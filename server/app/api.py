@@ -16,7 +16,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, Request
 from fastapi.responses import Response, StreamingResponse, FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .db import get_conn, ORIGINALS_DIR, ASSETS_DIR
 from .deps import get_user, require_admin, require_master
@@ -334,6 +334,37 @@ def _ensure_quality_cache(conn: sqlite3.Connection) -> None:
         _QUALITY_PATTERNS = patterns
         _QUALITY_LOADED = True
 
+
+# ---- tag lookup caches (alias/category/group) ----
+#
+# Zip imports and tag-heavy prompts can cause a large number of repetitive SQL lookups.
+# These tables are effectively read-only at runtime, so we can memoize them safely.
+#
+_TAG_ALIAS_CACHE: dict[str, str] = {}
+_TAG_ALIAS_LOCK = threading.Lock()
+_TAG_ALIAS_MAX = 200_000
+
+_TAG_CAT_CACHE: dict[str, int] = {}  # -1 means NULL/unknown
+_TAG_CAT_LOCK = threading.Lock()
+_TAG_CAT_MAX = 200_000
+
+_TAG_EFFECTIVE_CAT_CACHE: dict[str, int] = {}  # -1 means NULL/unknown (after quality upgrade)
+_TAG_EFFECTIVE_CAT_LOCK = threading.Lock()
+_TAG_EFFECTIVE_CAT_MAX = 200_000
+
+_TAG_GROUP_CACHE: dict[tuple[str, int | None], str] = {}
+_TAG_GROUP_LOCK = threading.Lock()
+_TAG_GROUP_MAX = 200_000
+
+def _cache_put(d: dict, lock: threading.Lock, k, v, max_size: int) -> None:
+    try:
+        with lock:
+            if len(d) >= int(max_size):
+                d.clear()
+            d[k] = v
+    except Exception:
+        # best-effort only
+        pass
 
 def _is_quality_tag(conn: sqlite3.Connection, canonical: str) -> bool:
     if not canonical:
@@ -2220,29 +2251,43 @@ def tag_suggest(q: str = "", limit: int = 20, user: dict = Depends(get_user)):
         conn.close()
 
 def _lookup_alias(conn: sqlite3.Connection, tag_norm: str) -> str:
+    if not tag_norm:
+        return ""
+    v = _TAG_ALIAS_CACHE.get(tag_norm)
+    if v is not None:
+        return v
     row = conn.execute("SELECT canonical FROM tag_aliases WHERE alias=?", (tag_norm,)).fetchone()
-    if row:
-        return str(row["canonical"])
-    return tag_norm
-
+    canonical = str(row["canonical"]) if row else tag_norm
+    _cache_put(_TAG_ALIAS_CACHE, _TAG_ALIAS_LOCK, tag_norm, canonical, _TAG_ALIAS_MAX)
+    return canonical
 def _category_group(conn: sqlite3.Connection, canonical: str, cat: int | None) -> str:
+    key = (canonical or "", cat)
+    v = _TAG_GROUP_CACHE.get(key)
+    if v is not None:
+        return v
+
     # groups for UI: artist / quality / character / other
     if cat == 1:
-        return "artist"
-    if cat == 4:
-        return "character"
-    # quality: explicit list / wildcard patterns OR meta category 5
-    if cat == 5 or _is_quality_tag(conn, canonical):
-        return "quality"
-    return "other"
+        grp = "artist"
+    elif cat == 4:
+        grp = "character"
+    elif cat == 5 or _is_quality_tag(conn, canonical):
+        grp = "quality"
+    else:
+        grp = "other"
 
+    _cache_put(_TAG_GROUP_CACHE, _TAG_GROUP_LOCK, key, grp, _TAG_GROUP_MAX)
+    return grp
 def _get_tag_category(conn: sqlite3.Connection, canonical: str) -> int | None:
+    if not canonical:
+        return None
+    v = _TAG_CAT_CACHE.get(canonical)
+    if v is not None:
+        return None if int(v) < 0 else int(v)
     row = conn.execute("SELECT category FROM tags_master WHERE tag=?", (canonical,)).fetchone()
-    if row and row["category"] is not None:
-        return int(row["category"])
-    return None
-
-
+    cat = int(row["category"]) if (row and row["category"] is not None) else None
+    _cache_put(_TAG_CAT_CACHE, _TAG_CAT_LOCK, canonical, (-1 if cat is None else int(cat)), _TAG_CAT_MAX)
+    return cat
 def _effective_tag_category(conn: sqlite3.Connection, canonical: str, cat: int | None) -> int | None:
     """Return the category used for UI grouping.
 
@@ -2253,8 +2298,26 @@ def _effective_tag_category(conn: sqlite3.Connection, canonical: str, cat: int |
     This fixes cases like "masterpiece" being treated as "other" when the
     master dictionary doesn't label it as quality.
     """
-    if cat in (1, 4, 5):
+    if not canonical:
         return cat
+
+    v = _TAG_EFFECTIVE_CAT_CACHE.get(canonical)
+    if v is not None:
+        return None if int(v) < 0 else int(v)
+
+    base = cat
+    if base in (1, 4, 5):
+        eff = base
+    else:
+        eff = base
+        try:
+            if _is_quality_tag(conn, canonical):
+                eff = 5
+        except Exception:
+            pass
+
+    _cache_put(_TAG_EFFECTIVE_CAT_CACHE, _TAG_EFFECTIVE_CAT_LOCK, canonical, (-1 if eff is None else int(eff)), _TAG_EFFECTIVE_CAT_MAX)
+    return eff
     try:
         if _is_quality_tag(conn, canonical):
             return 5
@@ -2346,7 +2409,8 @@ def _upload_image_core(
     # dedup by binary
     row = conn.execute("SELECT id FROM images WHERE sha256=?", (sha,)).fetchone()
     if row:
-        return {"ok": True, "dedup": True, "image_id": row["id"]}
+        iid = int(row["id"])
+        return {"ok": True, "dedup": True, "image_id": iid, "thumb": f"/api/images/{iid}/thumb?kind=grid&v={DERIV_VERSION}", "detail": _image_detail_summary(conn, iid), "dedup_reason": "binary"}
 
     # basic image info
     from PIL import Image
@@ -2438,7 +2502,8 @@ def _upload_image_core(
             (full_meta_hash, software, model, prompt_pos, prompt_neg, prompt_char, seed),
         ).fetchone()
         if row2:
-            return {"ok": True, "dedup": True, "image_id": row2["id"], "dedup_reason": "full"}
+            iid = int(row2["id"])
+        return {"ok": True, "dedup": True, "image_id": iid, "thumb": f"/api/images/{iid}/thumb?kind=grid&v={DERIV_VERSION}", "detail": _image_detail_summary(conn, iid), "dedup_reason": "full"}
 
     # tags
     parsed_tags = parse_tag_list(prompt_pos or "")
@@ -2613,6 +2678,318 @@ def _upload_image_core(
     else:
         _ensure_derivatives(image_id)
 
+    return {"ok": True, "dedup": False, "image_id": image_id, "dedup_flag": dedup_flag, "thumb": f"/api/images/{image_id}/thumb?kind=grid&v={DERIV_VERSION}", "detail": _image_detail_summary(conn, int(image_id))}
+
+
+def _upload_image_from_path_core(
+    *,
+    conn: sqlite3.Connection,
+    bg: BackgroundTasks | None,
+    file_path: str,
+    filename: str,
+    mime: str,
+    mtime_iso: str,
+    user_id: int,
+    username: str,
+    ensure_derivatives: bool = True,
+    derivative_kinds: tuple[str, ...] = ("grid", "overlay"),
+) -> dict:
+    """Upload implementation for an already-extracted local file.
+
+    This avoids creating an extra per-image temp copy for metadata extraction.
+    Intended for zip jobs (extract-once -> parse from path).
+    """
+    import hashlib
+    from PIL import Image
+
+    # sha256 + size (streaming)
+    h = hashlib.sha256()
+    total = 0
+    with open(file_path, "rb") as f:
+        while True:
+            b = f.read(1024 * 1024)
+            if not b:
+                break
+            total += len(b)
+            h.update(b)
+    sha = h.hexdigest()
+
+    # dedup by binary
+    row = conn.execute("SELECT id FROM images WHERE sha256=?", (sha,)).fetchone()
+    if row:
+        return {"ok": True, "dedup": True, "image_id": row["id"]}
+
+    # basic image info
+    try:
+        with Image.open(file_path) as im:
+            width, height = im.size
+            _fmt = (im.format or "").upper()
+    except Exception:
+        width = height = None
+        _fmt = ""
+
+    ext = (filename.rsplit(".", 1)[-1].lower() if "." in filename else "bin")
+
+    # metadata (NO temp copy)
+    meta = None
+    try:
+        meta = extract_novelai_metadata(file_path)
+    except Exception:
+        meta = None
+
+    software = meta.software if meta else None
+    model = meta.model if meta else None
+    prompt_pos = meta.prompt if meta else None
+    prompt_neg = meta.negative if meta else None
+    prompt_char = meta.character_prompt if meta else None
+    seed = None
+    try:
+        if meta and meta.params and ("seed" in meta.params):
+            seed = int(meta.params.get("seed"))
+    except Exception:
+        seed = None
+    params_json = json.dumps(meta.params, ensure_ascii=False) if (meta and meta.params) else None
+    potion_raw = json.dumps(meta.potion, ensure_ascii=False).encode("utf-8") if (meta and meta.potion) else None
+    has_potion = 1 if potion_raw else 0
+    metadata_raw = None
+    if meta:
+        try:
+            metadata_raw = json.dumps({"info": meta.raw, "json": meta.raw_json_str}, ensure_ascii=False)[:65535]
+        except Exception:
+            metadata_raw = None
+
+    # Full-meta dedup (same rule as _upload_image_core)
+    full_meta_hash = None
+    try:
+        src = "\n".join(
+            [
+                (software or ""),
+                (model or ""),
+                (prompt_pos or ""),
+                (prompt_char or ""),
+                (prompt_neg or ""),
+                (str(seed) if seed is not None else ""),
+            ]
+        )
+        full_meta_hash = hashlib.sha1(src.encode("utf-8", errors="ignore")).hexdigest()
+    except Exception:
+        full_meta_hash = None
+
+    if full_meta_hash:
+        row2 = conn.execute(
+            """
+            SELECT id FROM images
+            WHERE full_meta_hash = ?
+               OR (
+                    full_meta_hash IS NULL
+                AND software IS ?
+                AND model_name IS ?
+                AND prompt_positive_raw IS ?
+                AND prompt_negative_raw IS ?
+                AND prompt_character_raw IS ?
+                AND seed IS ?
+               )
+            LIMIT 1
+            """,
+            (full_meta_hash, software, model, prompt_pos, prompt_neg, prompt_char, seed),
+        ).fetchone()
+        if row2:
+            return {"ok": True, "dedup": True, "image_id": row2["id"], "dedup_reason": "full"}
+
+    # tags (same logic as _upload_image_core)
+    parsed_tags = parse_tag_list(prompt_pos or "")
+    parsed_char_tags = parse_tag_list(prompt_char or "")
+    tag_rows = []
+    canonical_main = []
+    is_nsfw = 0
+    seq = 0
+
+    def _push_tag(t, for_signature: bool, src_mask: int):
+        nonlocal is_nsfw, seq
+        tag_norm = normalize_tag(t.tag_text)
+        if not tag_norm:
+            return
+        canonical = _lookup_alias(conn, tag_norm)
+        cat = _get_tag_category(conn, canonical)
+        cat = _effective_tag_category(conn, canonical, cat)
+        group = _category_group(conn, canonical, cat)
+        if for_signature:
+            canonical_main.append(canonical)
+
+        if canonical in {"nsfw", "explicit"}:
+            is_nsfw = 1
+        brace = int(t.brace_level or 0)
+        numw = float(t.numeric_weight or 0)
+        cur_seq = seq
+        seq += 1
+        tag_rows.append((canonical, t.tag_text, t.tag_raw_one, cat, t.emphasis_type, brace, numw, group, int(src_mask), int(cur_seq)))
+
+    for t in parsed_tags:
+        _push_tag(t, for_signature=True, src_mask=1)
+    for t in parsed_char_tags:
+        _push_tag(t, for_signature=False, src_mask=2)
+
+    sig = None
+    dedup_flag = 1
+    if canonical_main:
+        sig = main_sig_hash(canonical_main)
+        exist = conn.execute("SELECT 1 FROM images WHERE main_sig_hash=? LIMIT 1", (sig,)).fetchone()
+        if exist:
+            dedup_flag = 2
+
+    cur = conn.execute(
+        """
+        INSERT INTO images(
+          sha256, original_filename, ext, mime, width, height, file_mtime_utc, uploader_user_id,
+          software, model_name, prompt_positive_raw, prompt_negative_raw, params_json,
+          prompt_character_raw,
+          seed,
+          potion_raw, has_potion, metadata_raw, main_sig_hash, dedup_flag
+          , full_meta_hash
+          , favorite, is_nsfw
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            sha,
+            filename or "upload",
+            ext,
+            mime,
+            width,
+            height,
+            mtime_iso,
+            int(user_id),
+            software,
+            model,
+            prompt_pos,
+            prompt_neg,
+            params_json,
+            prompt_char,
+            seed,
+            potion_raw,
+            has_potion,
+            metadata_raw,
+            sig,
+            dedup_flag,
+            full_meta_hash,
+            0,
+            is_nsfw,
+        ),
+    )
+    image_id = int(cur.lastrowid)
+
+    # Store original on disk by moving the extracted file into the originals directory.
+    ORIGINALS_DIR.mkdir(parents=True, exist_ok=True)
+    base = _safe_basename(filename or "upload")
+    ext0 = (ext or "").strip(".").lower()
+    if ext0 and not base.lower().endswith("." + ext0):
+        if "." not in base:
+            base = base + "." + ext0
+    fn = f"{image_id}_{base}"
+    path = ORIGINALS_DIR / fn
+    if path.exists():
+        suf = (sha or "")[:10] or str(int(datetime.now(timezone.utc).timestamp()))
+        stem, dot, sx = fn.rpartition(".")
+        if dot:
+            fn = f"{stem}_{suf}.{sx}"
+        else:
+            fn = f"{fn}_{suf}"
+        path = ORIGINALS_DIR / fn
+
+    tmp = str(path) + ".tmp"
+    try:
+        os.replace(file_path, tmp)
+    except Exception:
+        # Cross-device fallback
+        import shutil
+        shutil.copyfile(file_path, tmp)
+        try:
+            os.remove(file_path)
+        except Exception:
+            pass
+    os.replace(tmp, str(path))
+    disk_path = str(path)
+
+    conn.execute(
+        "INSERT INTO image_files(image_id, disk_path, size, bytes) VALUES (?,?,?,NULL)",
+        (image_id, disk_path, int(total)),
+    )
+
+    # image_tags
+    has_src_mask = _table_has_col(conn, "image_tags", "src_mask")
+    has_seq = _table_has_col(conn, "image_tags", "seq")
+    for (canonical, tag_text, tag_raw, cat, etype, brace, numw, group, src_mask, seq2) in _iter_tag_rows(tag_rows):
+        if has_src_mask and has_seq:
+            conn.execute(
+                """INSERT INTO image_tags(
+                       image_id, tag_canonical, tag_text, tag_raw, category,
+                       emphasis_type, brace_level, numeric_weight, src_mask, seq
+                     ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                     ON CONFLICT(image_id, tag_canonical, emphasis_type, brace_level, numeric_weight)
+                     DO UPDATE SET
+                       src_mask = (image_tags.src_mask | excluded.src_mask),
+                       seq = CASE WHEN excluded.seq < image_tags.seq THEN excluded.seq ELSE image_tags.seq END,
+                       category = COALESCE(image_tags.category, excluded.category),
+                       tag_text = COALESCE(image_tags.tag_text, excluded.tag_text),
+                       tag_raw = COALESCE(image_tags.tag_raw, excluded.tag_raw)
+                """,
+                (image_id, canonical, tag_text, tag_raw, cat, etype, brace, numw, src_mask, seq2),
+            )
+        elif has_src_mask:
+            conn.execute(
+                """INSERT INTO image_tags(
+                       image_id, tag_canonical, tag_text, tag_raw, category,
+                       emphasis_type, brace_level, numeric_weight, src_mask
+                     ) VALUES (?,?,?,?,?,?,?,?,?)
+                     ON CONFLICT(image_id, tag_canonical, emphasis_type, brace_level, numeric_weight)
+                     DO UPDATE SET
+                       src_mask = (image_tags.src_mask | excluded.src_mask),
+                       category = COALESCE(image_tags.category, excluded.category),
+                       tag_text = COALESCE(image_tags.tag_text, excluded.tag_text),
+                       tag_raw = COALESCE(image_tags.tag_raw, excluded.tag_raw)
+                """,
+                (image_id, canonical, tag_text, tag_raw, cat, etype, brace, numw, src_mask),
+            )
+        elif has_seq:
+            conn.execute(
+                """INSERT OR IGNORE INTO image_tags(
+                       image_id, tag_canonical, tag_text, tag_raw, category,
+                       emphasis_type, brace_level, numeric_weight, seq
+                     ) VALUES (?,?,?,?,?,?,?,?,?)""",
+                (image_id, canonical, tag_text, tag_raw, cat, etype, brace, numw, seq2),
+            )
+        else:
+            conn.execute(
+                """INSERT OR IGNORE INTO image_tags(image_id, tag_canonical, tag_text, tag_raw, category, emphasis_type, brace_level, numeric_weight)
+                     VALUES (?,?,?,?,?,?,?,?)""",
+                (image_id, canonical, tag_text, tag_raw, cat, etype, brace, numw),
+            )
+
+    # tag stats
+    uniq: dict[str, int | None] = {}
+    for (canonical, _tag_text, _tag_raw, cat, _etype, _brace, _numw, _group, _src_mask, _seq) in _iter_tag_rows(tag_rows):
+        if canonical not in uniq or (uniq[canonical] is None and cat is not None):
+            uniq[canonical] = cat
+    for canonical, cat in uniq.items():
+        stats_service.bump_tag(conn, canonical, cat)
+
+    # stats (creator/software/day)
+    stats_service.bump_creator(conn, username)
+    if software:
+        stats_service.bump_software(conn, software)
+    if mtime_iso:
+        ymd = mtime_iso[:10]
+        stats_service.bump_day(conn, ymd)
+        stats_service.bump_month(conn, ymd[:7])
+        stats_service.bump_year(conn, ymd[:4])
+
+    conn.commit()
+
+    if ensure_derivatives:
+        if bg is not None:
+            bg.add_task(_ensure_derivatives, image_id, derivative_kinds)
+        else:
+            _ensure_derivatives(image_id, derivative_kinds)
+
     return {"ok": True, "dedup": False, "image_id": image_id, "dedup_flag": dedup_flag}
 
 
@@ -2732,18 +3109,49 @@ async def upload_zip_chunk_append(
         raise HTTPException(status_code=404, detail="token not found")
     if int(st.get("user_id") or 0) != int(user["id"]):
         raise HTTPException(status_code=403, detail="forbidden")
-    if int(offset or 0) != int(st.get("received") or 0):
+    tmp = str(st.get("tmp") or "")
+    expected = int(st.get("received") or 0)
+    off = int(offset or 0)
+
+    # Idempotent append: allow retry/resume.
+    # - if off > expected: client skipped bytes
+    # - if off < expected: treat as retry; truncate back to off and overwrite
+    if off > expected:
         raise HTTPException(status_code=409, detail="offset mismatch")
 
-    tmp = str(st.get("tmp") or "")
     wrote = 0
-    with open(tmp, "ab") as f:
-        while True:
-            b = await chunk.read(1024 * 1024)
-            if not b:
-                break
-            wrote += len(b)
-            f.write(b)
+    with _ZIP_INCOMING_LOCK:
+        st = _ZIP_INCOMING.get(token)
+        if not st:
+            raise HTTPException(status_code=404, detail="token not found")
+        if off < int(st.get("received") or 0):
+            st["received"] = off
+        st["updated_at"] = time.time()
+
+    # write chunk at offset (seek + truncate if needed)
+    try:
+        with open(tmp, "r+b") as f:
+            f.seek(off)
+            f.truncate(off)
+            while True:
+                b = await chunk.read(1024 * 1024)
+                if not b:
+                    break
+                wrote += len(b)
+                f.write(b)
+    except FileNotFoundError:
+        # should not happen, but create and retry once
+        with open(tmp, "wb") as _f:
+            pass
+        with open(tmp, "r+b") as f:
+            f.seek(off)
+            f.truncate(off)
+            while True:
+                b = await chunk.read(1024 * 1024)
+                if not b:
+                    break
+                wrote += len(b)
+                f.write(b)
 
     with _ZIP_INCOMING_LOCK:
         st = _ZIP_INCOMING.get(token)
@@ -2774,6 +3182,11 @@ async def upload_zip_chunk_finish(
 
     tmp = str(st.get("tmp") or "")
     filename = str(st.get("filename") or "upload.zip")
+    received = int(st.get("received") or 0)
+    total_bytes = int(st.get("total_bytes") or 0)
+
+    if total_bytes > 0 and received < total_bytes:
+        raise HTTPException(status_code=409, detail="upload not complete")
 
     # Same as /upload_zip: defer scanning to the worker.
     total = 0
@@ -2796,8 +3209,67 @@ async def upload_zip_chunk_finish(
     return {"ok": True, "job_id": job_id, "total": int(total)}
 
 
+def _image_detail_summary(conn: sqlite3.Connection, iid: int, *, has_seq: bool | None = None) -> dict | None:
+    """Small summary for upload lists (chips) without pulling full detail payload."""
+    img = conn.execute(
+        """
+        SELECT images.id, images.software, images.favorite, images.is_nsfw,
+               users.username AS creator
+        FROM images
+        JOIN users ON users.id=images.uploader_user_id
+        WHERE images.id=?
+        """,
+        (int(iid),),
+    ).fetchone()
+    if not img:
+        return None
+
+    if has_seq is None:
+        has_seq = _table_has_col(conn, "image_tags", "seq")
+
+    cols = "tag_canonical, category"
+    order_sql = " ORDER BY category ASC, tag_canonical ASC"
+    if has_seq:
+        cols = "tag_canonical, category, seq"
+        order_sql = " ORDER BY seq ASC, category ASC, tag_canonical ASC"
+
+    tags = conn.execute(
+        f"SELECT {cols} FROM image_tags WHERE image_id=?" + order_sql + " LIMIT 120",
+        (int(iid),),
+    ).fetchall()
+
+    grouped = {"artist": [], "quality": [], "character": [], "other": []}
+    for t in tags:
+        canonical = t["tag_canonical"]
+        cat = int(t["category"]) if t["category"] is not None else None
+        group = _category_group(conn, canonical, cat)
+        grouped[group].append({"canonical": canonical})
+
+    return {
+        "id": int(img["id"]),
+        "software": img["software"],
+        "creator": img["creator"],
+        "favorite": int(img["favorite"] or 0),
+        "is_nsfw": int(img["is_nsfw"] or 0),
+        "tags": grouped,
+    }
+
+
+
 @api_router.get("/upload_zip/{job_id}")
-def upload_zip_status(job_id: int, user: dict = Depends(get_user)):
+def upload_zip_status(
+    job_id: int,
+    after_seq: int = 0,
+    limit: int = 300,
+    user: dict = Depends(get_user),
+):
+    # Return incremental items since after_seq to avoid re-fetching the same list repeatedly.
+    limit_i = int(limit or 0)
+    if limit_i <= 0:
+        limit_i = 300
+    if limit_i > 1000:
+        limit_i = 1000
+
     conn = get_conn()
     try:
         row = conn.execute(
@@ -2809,10 +3281,18 @@ def upload_zip_status(job_id: int, user: dict = Depends(get_user)):
         if int(row["user_id"] or 0) != int(user["id"]):
             raise HTTPException(status_code=403, detail="forbidden")
 
-        items = conn.execute(
-            "SELECT filename, state, image_id FROM upload_zip_items WHERE job_id=? ORDER BY seq DESC LIMIT 12",
+        latest_row = conn.execute(
+            "SELECT COALESCE(MAX(seq), 0) AS latest_seq FROM upload_zip_items WHERE job_id=?",
             (int(job_id),),
+        ).fetchone()
+        latest_seq = int(latest_row["latest_seq"] or 0) if latest_row else 0
+
+        items = conn.execute(
+            "SELECT seq, filename, state, image_id, message FROM upload_zip_items WHERE job_id=? AND seq>? ORDER BY seq ASC LIMIT ?",
+            (int(job_id), int(after_seq or 0), int(limit_i)),
         ).fetchall()
+
+        has_seq = _table_has_col(conn, "image_tags", "seq")
 
         return {
             "job_id": int(row["id"]),
@@ -2823,8 +3303,17 @@ def upload_zip_status(job_id: int, user: dict = Depends(get_user)):
             "dup": int(row["dup"] or 0),
             "status": row["status"],
             "error": row["error"],
+            "latest_seq": int(latest_seq),
             "items": [
-                {"filename": r["filename"], "state": r["state"], "image_id": r["image_id"]}
+                {
+                    "seq": int(r["seq"] or 0),
+                    "filename": r["filename"],
+                    "state": r["state"],
+                    "image_id": r["image_id"],
+                    "message": r["message"],
+                    "thumb": (f"/api/images/{r['image_id']}/thumb?kind=grid&v={DERIV_VERSION}" if r["image_id"] else None),
+                    "detail": (_image_detail_summary(conn, int(r["image_id"]), has_seq=has_seq) if r["image_id"] else None),
+                }
                 for r in items
             ],
         }
@@ -2856,6 +3345,8 @@ def upload_zip_cancel(job_id: int, user: dict = Depends(get_user)):
 def _upload_zip_worker(job_id: int, zip_path: str, user_id: int, username: str) -> None:
     import zipfile
     import mimetypes
+    import shutil
+    import tempfile
 
     conn = get_conn()
     try:
@@ -2869,20 +3360,34 @@ def _upload_zip_worker(job_id: int, zip_path: str, user_id: int, username: str) 
         seq = 0
 
         cancelled = False
-        with zipfile.ZipFile(zip_path, "r") as z:
-            # Scan once and update total here (background). This avoids an extra pass in /upload_zip.
-            entries: list[zipfile.ZipInfo] = []
-            for info in z.infolist():
-                if info.is_dir():
-                    continue
-                base = os.path.basename(info.filename or "")
-                if not base or not _allowed_image_ext(base):
-                    continue
-                entries.append(info)
+
+        # Extract all eligible images once, then parse from extracted paths.
+        # This prevents re-reading zip entries and avoids creating per-image temp copies for metadata extraction.
+        extract_dir = tempfile.mkdtemp(prefix="nim_zip_extract_")
+        extracted: list[tuple[str, str, str]] = []  # (path, basename, mtime_iso)
+
+        try:
+            with zipfile.ZipFile(zip_path, "r") as z:
+                for info in z.infolist():
+                    if info.is_dir():
+                        continue
+                    base = os.path.basename(info.filename or "")
+                    if not base or not _allowed_image_ext(base):
+                        continue
+                    # Avoid collisions and path traversal.
+                    safe_base = _safe_basename(base)
+                    dst = os.path.join(extract_dir, f"{len(extracted)+1:06d}_{safe_base}")
+                    with z.open(info, "r") as src, open(dst, "wb") as out:
+                        shutil.copyfileobj(src, out, length=1024 * 1024)
+                    try:
+                        mtime_iso = _zipinfo_mtime_iso(info)
+                    except Exception:
+                        mtime_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    extracted.append((dst, safe_base, mtime_iso))
 
             conn.execute(
                 "UPDATE upload_zip_jobs SET total=?, updated_at_utc=datetime('now') WHERE id=?",
-                (int(len(entries)), int(job_id)),
+                (int(len(extracted)), int(job_id)),
             )
             conn.execute(
                 "UPDATE upload_zip_jobs SET status='running', updated_at_utc=datetime('now') WHERE id=?",
@@ -2891,34 +3396,29 @@ def _upload_zip_worker(job_id: int, zip_path: str, user_id: int, username: str) 
             conn.commit()
 
             last_commit = 0
-            for info in entries:
-                # Cancel check (throttled)
+            for (path, base, mtime_iso) in extracted:
                 if (seq % 50) == 0:
                     strow = conn.execute("SELECT status FROM upload_zip_jobs WHERE id=?", (int(job_id),)).fetchone()
                     if strow and str(strow["status"] or "") == "cancelled":
                         cancelled = True
                         break
 
-                base = os.path.basename(info.filename or "")
                 seq += 1
                 state_txt = "完了"
                 image_id = None
                 msg = None
                 try:
-                    raw = z.read(info)
-                    if not raw:
-                        raise RuntimeError("empty")
                     mime = mimetypes.guess_type(base)[0] or "application/octet-stream"
-                    mtime_iso = _zipinfo_mtime_iso(info)
-                    res = _upload_image_core(
+                    res = _upload_image_from_path_core(
                         conn=conn,
                         bg=None,
-                        raw=raw,
+                        file_path=path,
                         filename=base,
                         mime=mime,
                         mtime_iso=mtime_iso,
                         user_id=int(user_id),
                         username=str(username),
+                        ensure_derivatives=False,
                     )
                     if res.get("dedup"):
                         state_txt = "重複"
@@ -2936,7 +3436,6 @@ def _upload_zip_worker(job_id: int, zip_path: str, user_id: int, username: str) 
                     (int(job_id), int(seq), base, state_txt, image_id, msg),
                 )
 
-                # Batch progress update/commit (reduce sqlite overhead)
                 if (seq - last_commit) >= 10:
                     conn.execute(
                         "UPDATE upload_zip_jobs SET done=?, failed=?, dup=?, updated_at_utc=datetime('now') WHERE id=?",
@@ -2945,18 +3444,22 @@ def _upload_zip_worker(job_id: int, zip_path: str, user_id: int, username: str) 
                     conn.commit()
                     last_commit = seq
 
-            # final progress write
             conn.execute(
                 "UPDATE upload_zip_jobs SET done=?, failed=?, dup=?, updated_at_utc=datetime('now') WHERE id=?",
                 (int(done), int(failed), int(dup), int(job_id)),
             )
             conn.commit()
 
-        conn.execute(
-            "UPDATE upload_zip_jobs SET status=?, updated_at_utc=datetime('now') WHERE id=?",
-            ("cancelled" if cancelled else "done", int(job_id)),
-        )
-        conn.commit()
+            conn.execute(
+                "UPDATE upload_zip_jobs SET status=?, updated_at_utc=datetime('now') WHERE id=?",
+                ("cancelled" if cancelled else "done", int(job_id)),
+            )
+            conn.commit()
+        finally:
+            try:
+                shutil.rmtree(extract_dir, ignore_errors=True)
+            except Exception:
+                pass
     except Exception as e:
         try:
             conn.execute(
@@ -3795,5 +4298,303 @@ def set_favorite(image_id: int, req: FavReq, user: dict = Depends(get_user)):
         conn.execute("UPDATE images SET favorite=? WHERE id=?", (nxt, image_id))
         conn.commit()
         return {"ok": True, "favorite": nxt}
+    finally:
+        conn.close()
+
+
+class BulkDeleteQuery(BaseModel):
+    creator: str = ""
+    software: str = ""
+    tags: list[str] = Field(default_factory=list)
+    date_from: str = ""   # YYYY-MM-DD
+    date_to: str = ""     # YYYY-MM-DD
+    dedup_only: int = 0
+    fav_only: int = 0
+
+
+class BulkDeleteReq(BaseModel):
+    mode: str
+    ids: list[int] = Field(default_factory=list)
+    query: BulkDeleteQuery | None = None
+    exclude_ids: list[int] = Field(default_factory=list)
+
+
+def _safe_int_list(xs: list[int] | None, *, max_n: int = 200000) -> list[int]:
+    out: list[int] = []
+    if not xs:
+        return out
+    seen = set()
+    for x in xs:
+        try:
+            n = int(x)
+        except Exception:
+            continue
+        if n <= 0 or n in seen:
+            continue
+        seen.add(n)
+        out.append(n)
+        if len(out) >= max_n:
+            break
+    return out
+
+
+def _apply_bulk_dec(conn: sqlite3.Connection, table: str, key_col: str, key_val: str, dec: int) -> None:
+    if not key_val or not dec:
+        return
+    conn.execute(
+        f"UPDATE {table} SET image_count = image_count - ? WHERE {key_col} = ?",
+        (int(dec), key_val),
+    )
+    conn.execute(
+        f"DELETE FROM {table} WHERE {key_col} = ? AND image_count <= 0",
+        (key_val,),
+    )
+
+
+@api_router.post("/images/bulk_delete")
+def bulk_delete_images(req: BulkDeleteReq, user: dict = Depends(get_user)):
+    """Delete images in bulk.
+
+    Requirements:
+    - user role can delete ONLY their own images.
+    - admin/master can delete any images.
+    - supports "ids" mode and "query" mode (current gallery filter).
+    """
+
+    role = str(user.get("role") or "user")
+    user_id = int(user.get("id") or 0)
+    username = str(user.get("username") or "")
+
+    mode = (req.mode or "").strip().lower()
+    if mode not in {"ids", "query"}:
+        raise HTTPException(status_code=400, detail="mode must be ids/query")
+
+    # normalize exclude ids
+    exclude_ids = _safe_int_list(req.exclude_ids, max_n=300000)
+
+    conn = get_conn()
+    disk_paths: list[str] = []
+    try:
+        # Prepare temp tables (avoid SQLite variable limits).
+        conn.execute("CREATE TEMP TABLE IF NOT EXISTS tmp_excl(id INTEGER PRIMARY KEY)")
+        conn.execute("DELETE FROM tmp_excl")
+        for i in range(0, len(exclude_ids), 500):
+            chunk = exclude_ids[i:i+500]
+            conn.executemany("INSERT OR IGNORE INTO tmp_excl(id) VALUES (?)", [(int(x),) for x in chunk])
+
+        conn.execute("CREATE TEMP TABLE IF NOT EXISTS tmp_del_ids(id INTEGER PRIMARY KEY)")
+        conn.execute("DELETE FROM tmp_del_ids")
+
+        requested_ids: list[int] = []
+
+        if mode == "ids":
+            requested_ids = _safe_int_list(req.ids, max_n=300000)
+            if not requested_ids:
+                return {"ok": True, "deleted": 0}
+
+            # Insert requested ids.
+            for i in range(0, len(requested_ids), 500):
+                chunk = requested_ids[i:i+500]
+                conn.executemany("INSERT OR IGNORE INTO tmp_del_ids(id) VALUES (?)", [(int(x),) for x in chunk])
+
+            # Permission: user can delete ONLY their own images.
+            if role == "user":
+                # Keep only ids owned by the current user.
+                conn.execute(
+                    "DELETE FROM tmp_del_ids WHERE id NOT IN (SELECT id FROM images WHERE uploader_user_id = ?)",
+                    (user_id,),
+                )
+                kept = int(conn.execute("SELECT COUNT(*) AS n FROM tmp_del_ids").fetchone()[0])
+                if kept != len(requested_ids):
+                    raise HTTPException(status_code=403, detail="can delete only your images")
+        else:
+            q = req.query or BulkDeleteQuery()
+
+            # For user role: force creator=self, ignore other creator field.
+            creator_username = (q.creator or "").strip()
+            creator_id: int | None = None
+            if role == "user":
+                creator_id = user_id
+            elif creator_username:
+                r = conn.execute("SELECT id FROM users WHERE username=?", (creator_username,)).fetchone()
+                if not r:
+                    return {"ok": True, "deleted": 0}
+                creator_id = int(r["id"])
+
+            where: list[str] = []
+            params: list = []
+            if creator_id is not None:
+                where.append("images.uploader_user_id = ?")
+                params.append(int(creator_id))
+            if q.software:
+                where.append("images.software = ?")
+                params.append(q.software)
+            if q.date_from:
+                where.append("images.file_mtime_utc >= ?")
+                params.append(q.date_from)
+            if q.date_to:
+                try:
+                    dt = datetime.strptime(q.date_to, "%Y-%m-%d") + timedelta(days=1)
+                    where.append("images.file_mtime_utc < ?")
+                    params.append(dt.strftime("%Y-%m-%d"))
+                except Exception:
+                    where.append("substr(images.file_mtime_utc,1,10) <= ?")
+                    params.append(q.date_to)
+            if int(q.dedup_only or 0):
+                where.append("images.dedup_flag = 1")
+            if int(q.fav_only or 0):
+                where.append("images.favorite = 1")
+
+            tag_list: list[str] = []
+            if q.tags:
+                for t in q.tags:
+                    tn = normalize_tag(str(t or ""))
+                    if tn:
+                        tag_list.append(tn)
+                tag_list = list(dict.fromkeys(tag_list))
+            for t in tag_list:
+                where.append(
+                    "EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = images.id AND it.tag_canonical = ?)"
+                )
+                params.append(t)
+
+            # Exclusions
+            where.append("images.id NOT IN (SELECT id FROM tmp_excl)")
+
+            where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+
+            # Materialize ids into temp table so we can reuse it across stats updates and deletion.
+            conn.execute(
+                "INSERT OR IGNORE INTO tmp_del_ids(id) SELECT images.id FROM images" + where_sql,
+                params,
+            )
+
+        to_del = int(conn.execute("SELECT COUNT(*) AS n FROM tmp_del_ids").fetchone()[0])
+        if to_del <= 0:
+            return {"ok": True, "deleted": 0}
+
+        # Capture aggregates BEFORE deletion.
+        # disk paths (best-effort)
+        drows = conn.execute(
+            "SELECT image_files.disk_path AS p FROM image_files JOIN tmp_del_ids d ON d.id = image_files.image_id"
+        ).fetchall()
+        for r in drows:
+            p = (r["p"] if not isinstance(r, tuple) else r[0])
+            if p and str(p).strip():
+                disk_paths.append(str(p))
+
+        # touched sig hashes for incremental dedup recompute
+        hrows = conn.execute(
+            "SELECT DISTINCT images.main_sig_hash AS h FROM images JOIN tmp_del_ids d ON d.id = images.id "
+            "WHERE images.main_sig_hash IS NOT NULL AND TRIM(images.main_sig_hash) <> ''"
+        ).fetchall()
+        hashes = [str((r["h"] if not isinstance(r, tuple) else r[0]) or "") for r in hrows]
+        hashes = [h for h in hashes if h.strip()]
+
+        # creators
+        creators = conn.execute(
+            "SELECT users.username AS k, COUNT(*) AS c "
+            "FROM images JOIN users ON users.id = images.uploader_user_id "
+            "JOIN tmp_del_ids d ON d.id = images.id GROUP BY users.username"
+        ).fetchall()
+
+        # software
+        softwares = conn.execute(
+            "SELECT images.software AS k, COUNT(*) AS c "
+            "FROM images JOIN tmp_del_ids d ON d.id = images.id "
+            "WHERE images.software IS NOT NULL AND TRIM(images.software) <> '' GROUP BY images.software"
+        ).fetchall()
+
+        # day/month/year
+        days = conn.execute(
+            "SELECT SUBSTR(images.file_mtime_utc,1,10) AS k, COUNT(*) AS c "
+            "FROM images JOIN tmp_del_ids d ON d.id = images.id "
+            "WHERE images.file_mtime_utc IS NOT NULL AND LENGTH(images.file_mtime_utc) >= 10 "
+            "GROUP BY SUBSTR(images.file_mtime_utc,1,10)"
+        ).fetchall()
+        months = conn.execute(
+            "SELECT SUBSTR(images.file_mtime_utc,1,7) AS k, COUNT(*) AS c "
+            "FROM images JOIN tmp_del_ids d ON d.id = images.id "
+            "WHERE images.file_mtime_utc IS NOT NULL AND LENGTH(images.file_mtime_utc) >= 7 "
+            "GROUP BY SUBSTR(images.file_mtime_utc,1,7)"
+        ).fetchall()
+        years = conn.execute(
+            "SELECT SUBSTR(images.file_mtime_utc,1,4) AS k, COUNT(*) AS c "
+            "FROM images JOIN tmp_del_ids d ON d.id = images.id "
+            "WHERE images.file_mtime_utc IS NOT NULL AND LENGTH(images.file_mtime_utc) >= 4 "
+            "GROUP BY SUBSTR(images.file_mtime_utc,1,4)"
+        ).fetchall()
+
+        # tags (distinct images per tag)
+        tags = conn.execute(
+            "SELECT it.tag_canonical AS k, COUNT(DISTINCT it.image_id) AS c "
+            "FROM image_tags it JOIN tmp_del_ids d ON d.id = it.image_id "
+            "GROUP BY it.tag_canonical"
+        ).fetchall()
+
+        # Delete rows (cascades to derivatives/image_files/image_tags/etc).
+        conn.execute("DELETE FROM images WHERE id IN (SELECT id FROM tmp_del_ids)")
+
+        # Apply stat decrements (best-effort; clamp at zero).
+        for r in creators:
+            k = str(r["k"] if not isinstance(r, tuple) else r[0])
+            c = int(r["c"] if not isinstance(r, tuple) else r[1])
+            _apply_bulk_dec(conn, "stat_creators", "creator", k, c)
+
+        for r in softwares:
+            k = str(r["k"] if not isinstance(r, tuple) else r[0])
+            c = int(r["c"] if not isinstance(r, tuple) else r[1])
+            _apply_bulk_dec(conn, "stat_software", "software", k, c)
+
+        for r in days:
+            k = str(r["k"] if not isinstance(r, tuple) else r[0])
+            c = int(r["c"] if not isinstance(r, tuple) else r[1])
+            _apply_bulk_dec(conn, "stat_day_counts", "ymd", k, c)
+
+        for r in months:
+            k = str(r["k"] if not isinstance(r, tuple) else r[0])
+            c = int(r["c"] if not isinstance(r, tuple) else r[1])
+            _apply_bulk_dec(conn, "stat_month_counts", "ym", k, c)
+
+        for r in years:
+            k = str(r["k"] if not isinstance(r, tuple) else r[0])
+            c = int(r["c"] if not isinstance(r, tuple) else r[1])
+            _apply_bulk_dec(conn, "stat_year_counts", "year", k, c)
+
+        for r in tags:
+            k = str(r["k"] if not isinstance(r, tuple) else r[0])
+            c = int(r["c"] if not isinstance(r, tuple) else r[1])
+            _apply_bulk_dec(conn, "stat_tag_counts", "tag_canonical", k, c)
+
+        # Dedup: recompute only affected signatures.
+        try:
+            stats_service.recompute_dedup_flags_for_hashes(conn, hashes)
+        except Exception:
+            # best-effort
+            pass
+
+        conn.commit()
+
+        # Best-effort file deletion AFTER commit.
+        for p in disk_paths:
+            try:
+                if p and os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+
+        return {"ok": True, "deleted": int(to_del)}
+    except HTTPException:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=f"bulk delete failed: {type(e).__name__}: {e}")
     finally:
         conn.close()

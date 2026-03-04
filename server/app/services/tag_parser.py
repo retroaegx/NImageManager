@@ -12,7 +12,63 @@ _NUMERIC_RE = re.compile(r"^\s*(?P<w>-?[0-9]+(?:\.[0-9]+)?)::(?P<inner>.*)::\s*$
 _EMPTY_EMPH_GARBAGE_RE = re.compile(r"^[\s\{\}\[\],]+$")
 
 # Characters that can accidentally leak to a tag edge (typos, separators, etc.)
-_TAG_EDGE_STRIP = " \t\r\n,，、:;："
+# Include braces/brackets as edge-strip to be resilient against malformed prompts
+# (e.g. missing closing braces causing wrappers to leak into tag text).
+_TAG_EDGE_STRIP = " \t\r\n,，、:;：{}[]"
+
+# Emphasis wrappers are often malformed in user prompts (missing/extra closers).
+# We repair them for parsing:
+# - extra closing brackets are dropped
+# - missing closing brackets are appended at EOL
+_BRACKET_PAIRS = {"{": "}", "[": "]"}
+_BRACKET_OPENERS = set(_BRACKET_PAIRS.keys())
+_BRACKET_CLOSERS = set(_BRACKET_PAIRS.values())
+_BRACKET_CLOSER_TO_OPENER = {v: k for k, v in _BRACKET_PAIRS.items()}
+
+def _repair_emphasis_brackets(s: str) -> str:
+    """Repair emphasis brackets for parsing.
+
+    - Drop extra closing brackets that have no opener.
+    - If a wrapper is left open, auto-append the missing closing brackets at EOL.
+    - If closing type mismatches, try to recover by auto-closing until we can match.
+    """
+    if not s:
+        return ""
+    stack: List[str] = []
+    out: List[str] = []
+    for ch in s:
+        if ch in _BRACKET_OPENERS:
+            stack.append(ch)
+            out.append(ch)
+            continue
+        if ch in _BRACKET_CLOSERS:
+            if not stack:
+                # extra closer -> drop
+                continue
+            want_open = _BRACKET_CLOSER_TO_OPENER.get(ch)
+            if want_open and stack[-1] == want_open:
+                stack.pop()
+                out.append(ch)
+                continue
+            if want_open and (want_open in stack):
+                # auto-close until match
+                while stack and stack[-1] != want_open:
+                    op = stack.pop()
+                    out.append(_BRACKET_PAIRS.get(op, ""))
+                if stack and stack[-1] == want_open:
+                    stack.pop()
+                    out.append(ch)
+                continue
+            # no matching opener -> drop
+            continue
+        out.append(ch)
+
+    while stack:
+        op = stack.pop()
+        out.append(_BRACKET_PAIRS.get(op, ""))
+
+    return "".join(out)
+
 
 @dataclass(frozen=True)
 class ParsedTag:
@@ -23,20 +79,29 @@ class ParsedTag:
     tag_raw_one: str = ""  # per-tag raw (reconstructed, emphasis preserved)
 
 def split_top_level_commas(s: str) -> List[str]:
-    """Split by commas that are NOT inside braces and NOT inside numeric emphasis blocks.
+    """Split by commas that are NOT inside emphasis wrappers.
 
-    Numeric emphasis: <num>:: ... ::  (inner may contain commas)
+    Supports:
+    - braces/brackets emphasis: {{{tag}}}, [[tag]]
+    - numeric emphasis: <num>:: ... ::  (inner may contain commas)
+
+    Error-tolerant behavior for malformed wrappers:
+    - Extra closing brackets are dropped.
+    - Missing closing brackets are auto-appended at EOL so parsing can proceed.
     """
+    s = _repair_emphasis_brackets(s or "")
+
     parts: List[str] = []
     buf: List[str] = []
-    depth = 0
+    stack: List[str] = []  # '{' or '['
+
     i = 0
     n = len(s)
     while i < n:
         ch = s[i]
 
-        # numeric block (only when not inside braces)
-        if depth == 0:
+        # numeric block (only when not inside braces/brackets)
+        if not stack:
             m = re.match(r"\s*(-?[0-9]+(?:\.[0-9]+)?)::", s[i:])
             if m:
                 start = i
@@ -44,16 +109,6 @@ def split_top_level_commas(s: str) -> List[str]:
                 end = s.find("::", start_delim_end)
                 if end != -1:
                     # Treat the numeric block as an atomic token.
-                    #
-                    # NovelAI tags are comma-separated, and numeric emphasis blocks
-                    # are expected to be followed by a comma or EOL. In practice,
-                    # users sometimes typo and forget the comma right after the
-                    # closing '::' (e.g. "...heart eyes::looking at viewer").
-                    # If we keep buffering, the trailing text gets glued into the
-                    # same segment and the numeric parser won't run.
-                    #
-                    # Here we force-split at the closing '::' so the numeric token
-                    # is parsed, and any trailing text becomes its own segment.
                     pre = "".join(buf).strip()
                     if pre:
                         parts.append(pre)
@@ -66,17 +121,42 @@ def split_top_level_commas(s: str) -> List[str]:
                     i = end + 2
                     continue
 
-        if ch in "{[":
-            depth += 1
+        if ch in _BRACKET_OPENERS:
+            stack.append(ch)
             buf.append(ch)
             i += 1
             continue
-        if ch in "]}":
-            depth = max(0, depth - 1)
-            buf.append(ch)
+
+        if ch in _BRACKET_CLOSERS:
+            if not stack:
+                # extra closer: treat as non-existent
+                i += 1
+                continue
+
+            want_open = _BRACKET_CLOSER_TO_OPENER.get(ch)
+
+            if want_open and stack[-1] == want_open:
+                stack.pop()
+                buf.append(ch)
+                i += 1
+                continue
+
+            # mismatch: try to recover by auto-closing until we can match
+            if want_open and (want_open in stack):
+                while stack and stack[-1] != want_open:
+                    op = stack.pop()
+                    buf.append(_BRACKET_PAIRS.get(op, ""))  # auto-close
+                if stack and stack[-1] == want_open:
+                    stack.pop()
+                    buf.append(ch)
+                i += 1
+                continue
+
+            # no matching opener in stack -> drop
             i += 1
             continue
-        if ch == "," and depth == 0:
+
+        if ch == "," and not stack:
             part = "".join(buf).strip()
             if part:
                 parts.append(part)
@@ -87,10 +167,166 @@ def split_top_level_commas(s: str) -> List[str]:
         buf.append(ch)
         i += 1
 
+    # auto-close any remaining openers (defensive; s was repaired already)
+    while stack:
+        op = stack.pop()
+        buf.append(_BRACKET_PAIRS.get(op, ""))
+
     tail = "".join(buf).strip()
     if tail:
         parts.append(tail)
     return parts
+def _split_commas_lenient(s: str) -> List[str]:
+    """Lenient comma splitter.
+
+    Always splits at ',' regardless of brace depth, but keeps numeric emphasis
+    blocks (<num>::...::) intact so commas inside them won't be split.
+    """
+    parts: List[str] = []
+    buf: List[str] = []
+    i = 0
+    n = len(s)
+    while i < n:
+        m = re.match(r"\s*(-?[0-9]+(?:\.[0-9]+)?)::", s[i:])
+        if m:
+            start = i
+            start_delim_end = i + m.end()
+            end = s.find("::", start_delim_end)
+            if end != -1:
+                pre = "".join(buf).strip()
+                if pre:
+                    parts.append(pre)
+                buf = []
+
+                token = s[start : end + 2].strip()
+                if token:
+                    parts.append(token)
+
+                i = end + 2
+                continue
+
+        ch = s[i]
+        if ch == ",":
+            part = "".join(buf).strip()
+            if part:
+                parts.append(part)
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def sanitize_prompt_wrappers(s: str) -> str:
+    """Best-effort sanitizer for malformed emphasis wrappers.
+
+    - If closing wrappers are missing, we auto-insert them.
+    - If there are too many closing wrappers, we ignore the extras.
+
+    Important detail: When we see a comma while wrappers are open, we may need to
+    auto-close some wrappers *before the comma* so that later top-level commas
+    still split.
+
+    We only auto-close early when it is mathematically impossible for the
+    remaining text to close all currently-open wrappers (based on suffix close
+    counts). This avoids breaking valid prompts like "{{a,b}}".
+
+    Numeric emphasis blocks (<num>::...::) are treated as atomic to prevent braces
+    inside them from affecting outer splitting.
+    """
+    if not s:
+        return s
+
+    # Suffix counts of remaining closing wrappers.
+    rem_curly = [0] * (len(s) + 1)
+    rem_square = [0] * (len(s) + 1)
+    for i in range(len(s) - 1, -1, -1):
+        rem_curly[i] = rem_curly[i + 1] + (1 if s[i] == "}" else 0)
+        rem_square[i] = rem_square[i + 1] + (1 if s[i] == "]" else 0)
+
+    out: List[str] = []
+    stack: List[str] = []  # '{' or '['
+    open_curly = 0
+    open_square = 0
+    i = 0
+    n = len(s)
+    while i < n:
+        # numeric block: <num>:: ... ::  (keep atomic)
+        m = re.match(r"\s*(-?[0-9]+(?:\.[0-9]+)?)::", s[i:])
+        if m:
+            start = i
+            start_delim_end = i + m.end()
+            end = s.find("::", start_delim_end)
+            if end != -1:
+                out.append(s[start : end + 2])
+                i = end + 2
+                continue
+
+        ch = s[i]
+
+        if ch == "{" or ch == "[":
+            stack.append(ch)
+            if ch == "{":
+                open_curly += 1
+            else:
+                open_square += 1
+            out.append(ch)
+            i += 1
+            continue
+
+        if ch == "}" or ch == "]":
+            want = "{" if ch == "}" else "["
+            if stack and stack[-1] == want:
+                stack.pop()
+                if want == "{":
+                    open_curly -= 1
+                else:
+                    open_square -= 1
+                out.append(ch)
+            # else: extra closing wrapper => ignore
+            i += 1
+            continue
+
+        if ch == "," and stack:
+            # Consider early auto-close BEFORE this comma only if necessary.
+            # Use remaining close counts AFTER this comma.
+            r_curly = rem_curly[i + 1]
+            r_square = rem_square[i + 1]
+
+            # While we have a deficit of closers for the wrapper type at the top
+            # of the stack, auto-close it now.
+            while stack:
+                top = stack[-1]
+                if top == "{" and open_curly > r_curly:
+                    stack.pop()
+                    open_curly -= 1
+                    out.append("}")
+                    continue
+                if top == "[" and open_square > r_square:
+                    stack.pop()
+                    open_square -= 1
+                    out.append("]")
+                    continue
+                break
+
+            out.append(ch)
+            i += 1
+            continue
+
+        out.append(ch)
+        i += 1
+
+    # Close anything still open at the end.
+    while stack:
+        top = stack.pop()
+        out.append("}" if top == "{" else "]")
+
+    return "".join(out)
 
 def _is_brace_balanced(s: str) -> bool:
     d = 0
@@ -162,10 +398,14 @@ def _strip_tag_edges(s: str) -> str:
     return s.strip(_TAG_EDGE_STRIP)
 
 def parse_tag_list(prompt: str) -> List[ParsedTag]:
-    return _parse_segment(prompt.strip(), inherited_brace_level=0)
+    # sanitize once at entry to keep splitting and wrapper stripping resilient
+    # against malformed prompts.
+    p = sanitize_prompt_wrappers((prompt or "").strip())
+    return _parse_segment(p, inherited_brace_level=0)
 
 def _parse_segment(seg: str, inherited_brace_level: int) -> List[ParsedTag]:
     seg = seg.strip()
+    seg = _repair_emphasis_brackets(seg)
     if not seg:
         return []
 
@@ -177,7 +417,7 @@ def _parse_segment(seg: str, inherited_brace_level: int) -> List[ParsedTag]:
     m = _NUMERIC_RE.match(seg)
     if m:
         w = float(m.group("w"))
-        inner = (m.group("inner") or "").strip(_TAG_EDGE_STRIP)
+        inner = sanitize_prompt_wrappers((m.group("inner") or "")).strip(_TAG_EDGE_STRIP)
         # numeric wins over braces/brackets inside it
         inner2, _ = strip_outer_braces(inner)
         parts = split_top_level_commas(inner2)

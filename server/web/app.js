@@ -90,6 +90,16 @@ let _autoFillBurst = 0;
 const _pageCache = new Map(); // key -> { promise, data }
 let _scrollPrefetch = null;   // { key, promise, data }
 const _overlayWarmSet = new Set();
+
+function invalidatePreviewCaches(){
+  // Used when the underlying dataset changes (e.g. bulk delete) but the search key stays the same.
+  _pageCache.clear();
+  _scrollPrefetch = null;
+  _overlayWarmSet.clear();
+  // Detail cache can contain deleted ids; keep it simple.
+  _detailCache.clear();
+  _detailInFlight.clear();
+}
 let _previewSearchKey = "";
 
 function isDesktop(){
@@ -416,63 +426,70 @@ function uploadProgressUpdate(){
   }
 }
 
+function _createUploadListItemElement(it){
+  const div = document.createElement("div");
+  div.className = "uploadItem";
+
+  const left = document.createElement("div");
+  left.className = "uploadLeft";
+
+  let thumbEl = null;
+  if(it.previewUrl){
+    const img = document.createElement("img");
+    img.className = "uploadThumb";
+    img.src = it.previewUrl;
+    img.alt = "";
+    thumbEl = img;
+  }else{
+    const ph = document.createElement("div");
+    ph.className = "uploadThumb ph";
+    thumbEl = ph;
+  }
+
+  const info = document.createElement("div");
+  info.className = "uploadInfo";
+  const name = document.createElement("div");
+  name.className = "uploadName";
+  name.textContent = it.file?.name || it.name || "";
+  const chips = document.createElement("div");
+  chips.className = "uploadChips";
+  info.appendChild(name);
+  info.appendChild(chips);
+
+  left.appendChild(thumbEl);
+  left.appendChild(info);
+
+  const right = document.createElement("div");
+  right.className = "uploadRight";
+  const st = document.createElement("div");
+  st.className = "uploadState";
+  st.textContent = it.state || "待機";
+  right.appendChild(st);
+
+  div.appendChild(left);
+  div.appendChild(right);
+
+  it._el = div;
+  it._elState = st;
+  it._elChips = chips;
+
+  return div;
+}
+
 function uploadListInit(){
   const wrap = $("uploadList");
   if(!wrap) return;
   wrap.innerHTML = "";
   const frag = document.createDocumentFragment();
+  (state.uploadQueue || []).forEach(it => frag.appendChild(_createUploadListItemElement(it)));
+  wrap.appendChild(frag);
+}
 
-  (state.uploadQueue || []).forEach((it) => {
-    const div = document.createElement("div");
-    div.className = "uploadItem";
-
-    const left = document.createElement("div");
-    left.className = "uploadLeft";
-
-    const thumbBox = document.createElement("div");
-    if(it.previewUrl){
-      const img = document.createElement("img");
-      img.className = "uploadThumb";
-      img.src = it.previewUrl;
-      img.alt = "";
-      thumbBox.appendChild(img);
-      it._elThumb = img;
-    }else{
-      const ph = document.createElement("div");
-      ph.className = "uploadThumb ph";
-      thumbBox.appendChild(ph);
-      it._elThumb = ph;
-    }
-
-    const info = document.createElement("div");
-    info.className = "uploadInfo";
-    const name = document.createElement("div");
-    name.className = "uploadName";
-    name.textContent = it.file?.name || it.name || "";
-    const chips = document.createElement("div");
-    chips.className = "uploadChips";
-    info.appendChild(name);
-    info.appendChild(chips);
-
-    left.appendChild(thumbBox.firstChild);
-    left.appendChild(info);
-
-    const right = document.createElement("div");
-    right.className = "uploadRight";
-    const st = document.createElement("div");
-    st.className = "uploadState";
-    st.textContent = it.state || "待機";
-    right.appendChild(st);
-
-    div.appendChild(left);
-    div.appendChild(right);
-
-    it._el = div;
-    it._elState = st;
-    it._elChips = chips;
-
-    frag.appendChild(div);
-  });
+function uploadListAppendItems(items){
+  const wrap = $("uploadList");
+  if(!wrap) return;
+  const frag = document.createDocumentFragment();
+  (items || []).forEach(it => frag.appendChild(_createUploadListItemElement(it)));
   wrap.appendChild(frag);
 }
 
@@ -538,17 +555,13 @@ async function startUploadFiles(files){
       const data = await apiJson(res);
       it.state = data && data.dedup ? "重複" : "完了";
 
-      // Fetch detail for richer upload list / summary
-      if(data && data.image_id){
-        try{
-          const dRes = await apiFetch(API.detail(data.image_id));
-          const d = await apiJson(dRes);
-          it.detail = d;
-          applyUploadSummary(d);
-          renderUploadSummary();
-        }catch(_e){
-          it.detail = null;
-        }
+      // Use server-provided summary (avoid a second detail fetch per image).
+      if(data && data.detail){
+        it.detail = data.detail;
+        applyUploadSummary(data.detail);
+        renderUploadSummary();
+      }else{
+        it.detail = null;
       }
     }catch(e){
       it.state = "失敗";
@@ -558,11 +571,21 @@ async function startUploadFiles(files){
   }
 
   uploadProgressUpdate();
-  await refreshFacets();
+  await refreshStatsAndPreviewAfterChange();
 }
 
 async function startUpload(){
   const files = Array.from($("fileInput").files || []);
+  if(!files.length) return;
+
+  // If a zip is selected via the normal file picker, route to zip upload.
+  const zip = files.find(f =>
+    (f && (f.type === "application/zip" || String(f.name||"").toLowerCase().endsWith(".zip")))
+  );
+  if(zip){
+    await startZipUpload(zip);
+    return;
+  }
   await startUploadFiles(files);
 }
 
@@ -570,6 +593,8 @@ let _zipPollTimer = null;
 async function startZipUpload(zipFile){
   if(!zipFile) return;
   state.uploadStop = false;
+  state._zipSeen = new Set();
+  state.uploadZipLastSeq = 0;
   // clear normal queue display
   state.uploadQueue = [];
   uploadListInit();
@@ -612,7 +637,9 @@ async function startZipUpload(zipFile){
     const token = init?.token;
     if(!token) throw new Error("chunk init failed");
 
-    const chunkSize = 5 * 1024 * 1024;
+    // Cloudflare Tunnel POST can hang on large bodies; always use small chunks.
+    // 1.5MB = 1.5 * 1024 * 1024
+    const chunkSize = 1572864;
     let offset = 0;
     while(offset < total){
       if(state.uploadStop) throw new Error("cancelled");
@@ -634,10 +661,10 @@ async function startZipUpload(zipFile){
     return await xhrPostForm(API.uploadZipChunkFinish, finFd);
   };
 
-  // Phase 1: send zip (show progress). If the tunnel resets the connection, fall back to chunk upload.
+  // Always use chunk upload for zip.
   let data = null;
   try{
-    data = await doZipUploadSingle();
+    data = await doZipUploadChunked();
   }catch(e){
     const msg = String(e && (e.message || e) || "");
     if(state.uploadStop && /cancelled/i.test(msg)){
@@ -646,15 +673,7 @@ async function startZipUpload(zipFile){
       if(elText) elText.textContent = "キャンセル";
       return;
     }
-    // Network reset / failed to fetch -> chunk fallback
-    if((e instanceof TypeError) || /Failed to fetch|ERR_CONNECTION_RESET/i.test(msg)){
-      if(jobBox){
-        jobBox.innerHTML = `<div class="row"><b>zip</b><span class="mut">接続が切れたので分割送信に切替…</span></div>`;
-      }
-      data = await doZipUploadChunked();
-    }else{
-      throw e;
-    }
+    throw e;
   }
 
   if(jobBox){
@@ -673,19 +692,68 @@ async function startZipUpload(zipFile){
       return;
     }
     try{
-      const r = await apiFetch(API.uploadZipStatus(jobId));
-      const st = await apiJson(r);
       const j = state.uploadZipJob;
       if(!j) return;
-      j.total = Number(st.total||j.total||0);
-      j.done = Number(st.done||0);
-      j.failed = Number(st.failed||0);
-      j.dup = Number(st.dup||0);
-      j.status = String(st.status||"running");
-      j.items = (st.items||[]).slice(0, 12);
+
+      const limit = 300;
+      let after = Number(state.uploadZipLastSeq || 0);
+
+      // Fetch all buffered items since the last seq (loop if the server has more than one page ready).
+      while(true){
+        const r = await apiFetch(`${API.uploadZipStatus(jobId)}?after_seq=${encodeURIComponent(String(after))}&limit=${encodeURIComponent(String(limit))}`);
+        const st = await apiJson(r);
+
+        j.total = Number(st.total||j.total||0);
+        j.done = Number(st.done||0);
+        j.failed = Number(st.failed||0);
+        j.dup = Number(st.dup||0);
+        j.status = String(st.status||"running");
+
+        const items = (st.items || []);
+        const newIts = items.map(x => ({
+          seq: Number(x.seq||0),
+          name: x.filename || "",
+          previewUrl: x.thumb || "",
+          state: x.state || "",
+          detail: x.detail || null,
+          image_id: x.image_id || null,
+        })).filter(x => x.seq > 0);
+
+        if(newIts.length){
+          // Append to queue and DOM
+          state.uploadQueue = (state.uploadQueue || []).concat(newIts);
+          uploadListAppendItems(newIts);
+          newIts.forEach(it => uploadListUpdateItem(it));
+
+          // Update right-side summary only once per image_id.
+          try{
+            const seen = state._zipSeen || new Set();
+            newIts.forEach(it => {
+              const iid = Number(it.image_id||0);
+              if(!iid || seen.has(iid)) return;
+              seen.add(iid);
+              if(it.detail){
+                applyUploadSummary(it.detail);
+              }
+            });
+            state._zipSeen = seen;
+            renderUploadSummary();
+          }catch(_e){}
+        }
+
+        const latest = Number(st.latest_seq || 0);
+        if(latest > after) after = latest;
+
+        if(items.length >= limit){
+          // There may be more buffered items; keep draining.
+          continue;
+        }
+        break;
+      }
+
+      state.uploadZipLastSeq = after;
 
       if(jobBox){
-        const lines = j.items.map(x => `<div class="row"><span>${escapeHtml(x.filename||"")}</span><span class="mut">${escapeHtml(x.state||"")}</span></div>`).join("");
         const doneAll = j.done + j.failed + j.dup;
         const progText = (j.total && j.total > 0)
           ? `${doneAll}/${j.total}（成功 ${j.done} / 重複 ${j.dup} / 失敗 ${j.failed}）`
@@ -693,8 +761,6 @@ async function startZipUpload(zipFile){
         jobBox.innerHTML = `
           <div class="row"><b>zip</b><span class="mut">${escapeHtml(zipFile.name)}</span></div>
           <div class="row"><span>進捗</span><span>${progText}</span></div>
-          <div class="mut" style="margin-top:6px">最新</div>
-          ${lines || `<div class="mut">(処理中)</div>`}
         `;
       }
 
@@ -713,15 +779,14 @@ async function startZipUpload(zipFile){
         elText.textContent = (denom && denom > 0) ? `zip ${doneAll}/${denom}` : `zip スキャン中…`;
       }
 
-      if(j.status === "done" || j.status === "error"){
+      if(j.status === "done" || j.status === "error" || j.status === "cancelled"){
         _zipPollTimer = null;
-        await refreshFacets();
+        await refreshStatsAndPreviewAfterChange();
         return;
       }
     }catch(_e){}
     _zipPollTimer = setTimeout(poll, 500);
   };
-
   if(_zipPollTimer) clearTimeout(_zipPollTimer);
   _zipPollTimer = setTimeout(poll, 200);
 }
@@ -798,6 +863,19 @@ async function refreshFacets(){
     renderCreatorList(creators);
     renderSoftwareList(softwares);
   }catch(e){}
+}
+
+
+async function refreshStatsAndPreviewAfterChange(){
+  // Used when the underlying dataset changes (e.g. upload / bulk delete / zip completion).
+  // Important: paging caches must be invalidated even when filter key stays the same.
+  invalidatePreviewCaches();
+  await refreshFacets();
+  await loadYearCounts();
+  await loadYearMonthCounts(state.calendar.month.getFullYear());
+  await loadMonthCounts(state.calendar.month);
+  renderCalendar();
+  await search(1);
 }
 
 function fillSelect(sel, items){
@@ -1482,12 +1560,7 @@ async function _bulkDelete(){
 
     // Reset selection and refresh UI lists/counts.
     _resetBulkSelection();
-    await refreshFacets();
-    await loadYearCounts();
-    await loadYearMonthCounts(state.calendar.month.getFullYear());
-    await loadMonthCounts(state.calendar.month);
-    renderCalendar();
-    await search(1);
+    await refreshStatsAndPreviewAfterChange();
   }catch(_e){
     _bulkStatus("削除に失敗しました", "error");
     b.deleting = false;
