@@ -30,12 +30,25 @@ def get_user_optional(
     conn = get_conn()
     try:
         row = conn.execute(
-            "SELECT id, username, role, disabled FROM users WHERE id=?",
+            """
+            SELECT u.id, u.username, u.role, u.disabled,
+                   COALESCE(us.share_works,0) AS share_works,
+                   COALESCE(us.share_bookmarks,0) AS share_bookmarks
+            FROM users u
+            LEFT JOIN user_settings us ON us.user_id = u.id
+            WHERE u.id=?
+            """,
             (user_id,),
         ).fetchone()
         if not row or int(row["disabled"]) == 1:
             return None
-        return {"id": row["id"], "username": row["username"], "role": row["role"]}
+        return {
+            "id": row["id"],
+            "username": row["username"],
+            "role": row["role"],
+            "share_works": int(row["share_works"] or 0),
+            "share_bookmarks": int(row["share_bookmarks"] or 0),
+        }
     finally:
         conn.close()
 

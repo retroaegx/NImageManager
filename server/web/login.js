@@ -24,16 +24,9 @@ async function doLogin(){
       $("loginErr").textContent = "ログインに失敗しました";
       return;
     }
-    // API may respond with non-JSON on misconfig; avoid crashing.
-    const text = await r.text();
-    try{
-      const data = JSON.parse(text || "{}");
-      if(data && data.token){
-        localStorage.setItem("token", data.token);
-      }
-    }catch(_e){
-      // Cookie auth is the primary path; token storage is optional.
-    }
+    // Cookie auth is the primary session path.
+    // The UI no longer persists API tokens in localStorage.
+    await r.text().catch(() => "");
     location.href = "/";
   }catch(e){
     $("loginErr").textContent = "接続できません";

@@ -4,13 +4,14 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Admin - NIM</title>
-  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/styles.css?v=42" />
 </head>
-<body>
+<body class="pageAdmin">
   <div class="bg"></div>
 
   <div class="app">
     <header class="topbar">
+      <div class="topbarInner">
       <div class="brand" style="cursor:pointer" onclick="location.assign('/')">
         <svg class="logo" viewBox="0 0 24 24" aria-hidden="true">
           <path d="M12 2c3.2 0 5.9 1.8 7.2 4.4.4.8 0 1.7-.9 2.1l-2.6 1.2c-.8.4-1.7 0-2.1-.9C13 7.8 12.1 7.2 12 7.2c-1.5 0-2.8 1.3-2.8 2.8v1.2h1.6c.9 0 1.6.7 1.6 1.6v2.4c0 .9-.7 1.6-1.6 1.6H9.2V20c0 1.1-.9 2-2 2H6c-1.1 0-2-.9-2-2v-6.4c0-3.8 0-4.1.1-4.6C4.6 5.1 8 2 12 2Z" fill="currentColor" opacity=".92"/>
@@ -22,8 +23,7 @@
       </div>
 
       <nav class="menu" aria-label="main">
-        <button id="navToPreview" class="tab"><span>プレビュー管理</span><i class="tabGlow"></i></button>
-        <button id="navToUpload" class="tab"><span>アップロード管理</span><i class="tabGlow"></i></button>
+        <button class="tab" onclick="location.assign('/')"><span>戻る</span><i class="tabGlow"></i></button>
         <button class="tab active"><span>アカウント管理</span><i class="tabGlow"></i></button>
       </nav>
 
@@ -37,15 +37,17 @@
         </button>
 
         <div id="userMenu" class="menuPopup hidden" role="menu" aria-label="ユーザーメニュー">
-          <button id="menuAdmin" class="menuItem" role="menuitem">アカウント管理</button>
-          <button id="menuMaintenance" class="menuItem" role="menuitem">メンテナンス</button>
+          <button id="menuAdmin" class="menuItem hidden" role="menuitem">アカウント管理</button>
+          <button id="menuMaintenance" class="menuItem hidden" role="menuitem">メンテナンス</button>
+          <button id="menuSettings" class="menuItem" role="menuitem">個人設定</button>
           <button id="menuPwLink" class="menuItem" role="menuitem">パスワード変更</button>
           <button id="menuLogout" class="menuItem" role="menuitem">ログアウト</button>
         </div>
       </div>
+      </div>
     </header>
 
-    <main class="main">
+    <main class="main shell">
       <section class="panel">
         <div class="card">
           <div class="panelTitleRow">
@@ -105,6 +107,6 @@
     </main>
   </div>
 
-  <script type="module" src="/admin.js"></script>
+  <script type="module" src="/admin.js?v=42"></script>
 </body>
 </html>

@@ -10,23 +10,552 @@ import math
 import threading
 import fnmatch
 import time
+import unicodedata
+import mimetypes
+import shutil
+import tempfile
+import secrets
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, Request
 from fastapi.responses import Response, StreamingResponse, FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
-from .db import get_conn, ORIGINALS_DIR, ASSETS_DIR
+from .db import get_conn, ORIGINALS_DIR, DERIVATIVES_DIR, PUBLIC_THUMBS_DIR, ASSETS_DIR
 from .deps import get_user, require_admin, require_master
 from .security import create_token, verify_password, hash_password
-from .services.metadata_extract import extract_novelai_metadata
+from .services.metadata_extract import extract_novelai_metadata, extract_novelai_metadata_bytes
 from .services.tag_parser import parse_tag_list, normalize_tag, main_sig_hash
-from .services.derivatives import make_webp_derivative, make_avif_derivative, avif_available, avif_probe_error
+from .services.derivatives import (
+    make_webp_derivative,
+    make_avif_derivative,
+    avif_available,
+    avif_probe_error,
+    decode_source_image,
+    make_resized_variant,
+    encode_webp_image,
+    encode_avif_image,
+    derivative_targets,
+)
 from .services import stats as stats_service
+from .services.prompt_view import (
+    build_prompt_view_payload,
+    ensure_prompt_view_cache,
+    parse_prompt_multiline_to_tag_objs,
+)
+from .services.gallery_query import (
+    apply_common_filters,
+    build_user_bookmark_join,
+    normalize_bookmark_list_id,
+    normalize_gallery_filters,
+    resolve_creator_id,
+)
+from .services.derivative_queue import enqueue_derivative_job, enqueue_upload_item_job, start_derivative_worker, stop_derivative_worker
+from .logging_utils import log_perf, perf_logging_enabled
+from .services.update_checker import get_update_status
 
 api_router = APIRouter()
+
+
+def _cookie_secure_flag(request: Request) -> bool:
+    override = os.getenv("NAI_IM_COOKIE_SECURE", "").strip().lower()
+    if override in {"1", "true", "yes", "on"}:
+        return True
+    if override in {"0", "false", "no", "off"}:
+        return False
+    forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    if forwarded_proto == "https":
+        return True
+    return (request.url.scheme or "").lower() == "https"
+
+
+def _queue_derivative_request(
+    image_id: int,
+    kinds: tuple[str, ...] = ("grid", "overlay"),
+    *,
+    source: str,
+    trace_id: str | None = None,
+) -> bool:
+    return enqueue_derivative_job(
+        int(image_id),
+        kinds,
+        source=str(source or "unknown"),
+        trace_id=(trace_id or None),
+    )
+
+
+def _queue_upload_item_request(
+    item_id: int,
+    *,
+    source: str,
+    trace_id: str | None = None,
+) -> bool:
+    return enqueue_upload_item_job(
+        int(item_id),
+        source=str(source or "unknown"),
+        trace_id=(trace_id or None),
+    )
+
+
+DERIVATIVE_TARGETS = derivative_targets()
+
+
+def _normalize_derivative_kinds(kinds: tuple[str, ...] | list[str] | None) -> tuple[str, ...]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in (kinds or ()):  # type: ignore[arg-type]
+        kind = str(raw or "").strip().lower()
+        if kind not in {"grid", "overlay"}:
+            continue
+        if kind in seen:
+            continue
+        seen.add(kind)
+        out.append(kind)
+    return tuple(out)
+
+
+def start_background_workers() -> None:
+    start_derivative_worker(_process_upload_item_job, _process_derivative_job)
+
+
+def stop_background_workers() -> None:
+    stop_derivative_worker()
+
+
+UPLOAD_STAGING_DIR = ORIGINALS_DIR.parent / "upload_staging"
+
+
+def _normalize_username(value: str | None) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).strip()
+    return text.casefold()
+
+
+def _find_user_by_username(conn: sqlite3.Connection, username: str | None, columns: str) -> sqlite3.Row | None:
+    norm = _normalize_username(username)
+    if not norm:
+        return None
+    return conn.execute(f"SELECT {columns} FROM users WHERE username_norm=?", (norm,)).fetchone()
+
+
+def _ensure_upload_staging_dir() -> Path:
+    UPLOAD_STAGING_DIR.mkdir(parents=True, exist_ok=True)
+    return UPLOAD_STAGING_DIR
+
+
+def _job_staging_dir(job_id: int) -> Path:
+    return _ensure_upload_staging_dir() / f"job_{int(job_id)}"
+
+
+def _staged_direct_item_mtime_iso(path: Path) -> str:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+    except Exception:
+        return datetime.now(timezone.utc).isoformat()
+
+
+def _upsert_direct_upload_item_row(
+    conn: sqlite3.Connection,
+    *,
+    job_id: int,
+    seq_i: int,
+    filename: str,
+    staged_path: str,
+    mtime_iso: str,
+) -> int:
+    existing = conn.execute(
+        "SELECT id, state FROM upload_zip_items WHERE job_id=? AND seq=? ORDER BY id DESC LIMIT 1",
+        (int(job_id), int(seq_i)),
+    ).fetchone()
+    if existing:
+        item_id = int(existing["id"])
+        state_now = str(existing["state"] or "")
+        next_state = state_now if state_now in {"処理中", "完了", "重複"} else "受信済み"
+        conn.execute(
+            "UPDATE upload_zip_items SET filename=?, staged_path=?, mtime_iso=?, state=?, message=CASE WHEN ? IN ('処理中','完了','重複') THEN message ELSE NULL END WHERE id=?",
+            (str(filename), str(staged_path), str(mtime_iso), next_state, state_now, int(item_id)),
+        )
+        return item_id
+    cur = conn.execute(
+        "INSERT INTO upload_zip_items(job_id, seq, filename, state, image_id, message, staged_path, mtime_iso) VALUES (?,?,?,?,?,?,?,?)",
+        (int(job_id), int(seq_i), str(filename), "受信済み", None, None, str(staged_path), str(mtime_iso)),
+    )
+    return int(cur.lastrowid)
+
+
+def _register_direct_upload_item(job_id: int, seq_i: int, filename: str, staged_path: str, *, trace_id: str | None = None) -> None:
+    item_id: int | None = None
+    conn = get_conn()
+    try:
+        job = conn.execute(
+            "SELECT status, source_kind FROM upload_zip_jobs WHERE id=?",
+            (int(job_id),),
+        ).fetchone()
+        if not job:
+            return
+        if str(job["source_kind"] or "zip") != "direct":
+            return
+        if str(job["status"] or "") in {"cancelled", "error", "done"}:
+            return
+        item_id = _upsert_direct_upload_item_row(
+            conn,
+            job_id=int(job_id),
+            seq_i=int(seq_i),
+            filename=str(filename),
+            staged_path=str(staged_path),
+            mtime_iso=_staged_direct_item_mtime_iso(Path(staged_path)),
+        )
+        total_items = int(conn.execute("SELECT COUNT(*) AS n FROM upload_zip_items WHERE job_id=?", (int(job_id),)).fetchone()[0])
+        conn.execute(
+            "UPDATE upload_zip_jobs SET total=?, updated_at_utc=datetime('now') WHERE id=?",
+            (int(total_items), int(job_id)),
+        )
+        _refresh_upload_job_progress(conn, int(job_id), seal=False)
+        conn.commit()
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        log_perf(
+            "direct_upload_append_register_failed",
+            job_id=int(job_id),
+            seq=int(seq_i),
+            filename=str(filename),
+            trace_id=(trace_id or None),
+            error_type=exc.__class__.__name__,
+            error_message=str(exc),
+        )
+        return
+    finally:
+        conn.close()
+
+    if item_id is None:
+        return
+    try:
+        _queue_upload_item_request(int(item_id), source="direct_append", trace_id=trace_id)
+    except Exception as exc:
+        log_perf(
+            "direct_upload_append_enqueue_failed",
+            job_id=int(job_id),
+            item_id=int(item_id),
+            seq=int(seq_i),
+            filename=str(filename),
+            trace_id=(trace_id or None),
+            error_type=exc.__class__.__name__,
+            error_message=str(exc),
+        )
+
+
+def _spawn_direct_upload_item_registration(job_id: int, seq_i: int, filename: str, staged_path: str, *, trace_id: str | None = None) -> None:
+    thread = threading.Thread(
+        target=_register_direct_upload_item,
+        args=(int(job_id), int(seq_i), str(filename), str(staged_path)),
+        kwargs={"trace_id": (trace_id or None)},
+        name=f"nim-direct-append-{int(job_id)}-{int(seq_i)}",
+        daemon=True,
+    )
+    thread.start()
+
+
+def _load_direct_staging_rows(staging_dir: Path) -> list[tuple[int, str, str, str]]:
+    rows: list[tuple[int, str, str, str]] = []
+    if not staging_dir.exists():
+        return rows
+    for p in sorted(staging_dir.iterdir()):
+        if not p.is_file():
+            continue
+        name = p.name
+        if '_' not in name:
+            continue
+        seq_text, base = name.split('_', 1)
+        try:
+            seq_i = int(seq_text)
+        except Exception:
+            continue
+        rows.append((seq_i, base, str(p), _staged_direct_item_mtime_iso(p)))
+    rows.sort(key=lambda x: x[0])
+    return rows
+
+
+def _sync_direct_upload_items(conn: sqlite3.Connection, job_id: int, staging_dir: Path) -> tuple[int, list[int]]:
+    rows = _load_direct_staging_rows(staging_dir)
+    item_ids: list[int] = []
+    for seq_i, base, path_text, mtime_iso in rows:
+        item_id = _upsert_direct_upload_item_row(
+            conn,
+            job_id=int(job_id),
+            seq_i=int(seq_i),
+            filename=str(base),
+            staged_path=str(path_text),
+            mtime_iso=str(mtime_iso),
+        )
+        item_ids.append(int(item_id))
+    conn.execute(
+        "UPDATE upload_zip_jobs SET total=?, updated_at_utc=datetime('now') WHERE id=?",
+        (int(len(rows)), int(job_id)),
+    )
+    return len(rows), item_ids
+
+async def _read_json_body_loose(request: Request) -> dict:
+    raw = await request.body()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except Exception:
+        try:
+            text = raw.decode('utf-8', errors='ignore').strip()
+        except Exception:
+            text = ''
+        if not text:
+            return {}
+        try:
+            data = json.loads(text)
+        except Exception:
+            raise HTTPException(status_code=422, detail='invalid json body')
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            raise HTTPException(status_code=422, detail='invalid json body')
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=422, detail='json body must be an object')
+    return data
+
+
+def _validate_body_model(model_cls: type[BaseModel], data: dict):
+    try:
+        return model_cls.model_validate(data)
+    except ValidationError as e:
+        # Mirror FastAPI's validation shape closely enough for the UI.
+        raise HTTPException(status_code=422, detail=e.errors())
+
+def _thumb_rev_token(value: str | None) -> str:
+    token = str(value or "0").strip()
+    token = re.sub(r"[^0-9A-Za-z]+", "", token)
+    return token or "0"
+
+
+def _new_public_id() -> str:
+    return secrets.token_hex(16)
+
+
+def _public_thumb_rel_path(public_id: str, rev: str, fmt: str = "webp") -> str:
+    pid = re.sub(r"[^0-9A-Za-z]+", "", str(public_id or "").strip().lower())
+    token = _thumb_rev_token(rev)
+    shard = pid[:2] or "xx"
+    clean_fmt = "avif" if str(fmt).strip().lower() == "avif" else "webp"
+    return f"grid/{clean_fmt}/{shard}/{pid}-r{token}.{clean_fmt}"
+
+
+def _public_thumb_abs_path(public_id: str, rev: str, fmt: str = "webp") -> Path:
+    return PUBLIC_THUMBS_DIR / _public_thumb_rel_path(public_id, rev, fmt=fmt)
+
+
+def _public_thumb_url(public_id: str, rev: str, fmt: str = "webp") -> str:
+    return f"/thumbs/{_public_thumb_rel_path(public_id, rev, fmt=fmt)}"
+
+
+def _ensure_image_public_id(conn: sqlite3.Connection, image_id: int) -> str:
+    row = conn.execute("SELECT public_id FROM images WHERE id=?", (int(image_id),)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="image not found")
+    public_id = str(row["public_id"] or "").strip().lower()
+    if public_id:
+        return public_id
+    while True:
+        candidate = _new_public_id()
+        exists = conn.execute("SELECT 1 FROM images WHERE public_id=? LIMIT 1", (candidate,)).fetchone()
+        if exists:
+            continue
+        conn.execute("UPDATE images SET public_id=? WHERE id=?", (candidate, int(image_id)))
+        return candidate
+
+
+def _write_bytes_to_path(path: Path, raw: bytes) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = str(path) + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(raw)
+    os.replace(tmp, str(path))
+    return str(path)
+
+
+def _cleanup_public_thumb_versions(
+    public_id: str,
+    *,
+    fmt: str | None = None,
+    keep_paths: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> None:
+    pid = re.sub(r"[^0-9A-Za-z]+", "", str(public_id or "").strip().lower())
+    if not pid:
+        return
+    shard = pid[:2] or "xx"
+    fmts = [str(fmt).strip().lower()] if fmt else ["webp", "avif"]
+    keep_abs = {os.path.abspath(str(p)) for p in (keep_paths or []) if str(p).strip()}
+    for one_fmt in fmts:
+        if one_fmt not in {"webp", "avif"}:
+            continue
+        shard_dir = PUBLIC_THUMBS_DIR / "grid" / one_fmt / shard
+        if not shard_dir.exists():
+            continue
+        for p in shard_dir.glob(f"{pid}-r*.{one_fmt}"):
+            try:
+                if os.path.abspath(str(p)) in keep_abs:
+                    continue
+                p.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def _thumb_rev_map(conn: sqlite3.Connection, ids: list[int] | tuple[int, ...], *, kind: str = "grid") -> dict[int, str]:
+    clean_ids: list[int] = []
+    seen: set[int] = set()
+    for raw_iid in ids:
+        try:
+            iid = int(raw_iid)
+        except Exception:
+            continue
+        if iid <= 0 or iid in seen:
+            continue
+        seen.add(iid)
+        clean_ids.append(iid)
+    if not clean_ids:
+        return {}
+
+    placeholders = ",".join("?" for _ in clean_ids)
+    rev_by_id: dict[int, str] = {}
+
+    rows = conn.execute(
+        f"SELECT id, uploaded_at_utc FROM images WHERE id IN ({placeholders})",
+        clean_ids,
+    ).fetchall()
+    for row in rows:
+        rev_by_id[int(row["id"])] = _thumb_rev_token(row["uploaded_at_utc"] if row["uploaded_at_utc"] is not None else None)
+
+    drows = conn.execute(
+        f"""
+        SELECT image_id, MAX(created_at_utc) AS rev
+        FROM image_derivatives
+        WHERE kind=? AND image_id IN ({placeholders})
+        GROUP BY image_id
+        """,
+        [kind] + clean_ids,
+    ).fetchall()
+    for row in drows:
+        rev_by_id[int(row["image_id"])] = _thumb_rev_token(row["rev"] if row["rev"] is not None else None)
+
+    return rev_by_id
+
+
+def _public_thumb_url_map(conn: sqlite3.Connection, ids: list[int] | tuple[int, ...]) -> dict[int, str]:
+    clean_ids: list[int] = []
+    seen: set[int] = set()
+    for raw_iid in ids:
+        try:
+            iid = int(raw_iid)
+        except Exception:
+            continue
+        if iid <= 0 or iid in seen:
+            continue
+        seen.add(iid)
+        clean_ids.append(iid)
+    if not clean_ids:
+        return {}
+
+    placeholders = ",".join("?" for _ in clean_ids)
+    rows = conn.execute(
+        f"SELECT id, public_id FROM images WHERE id IN ({placeholders})",
+        clean_ids,
+    ).fetchall()
+    rev_by_id = _thumb_rev_map(conn, clean_ids, kind="grid")
+    out: dict[int, str] = {}
+    for row in rows:
+        iid = int(row["id"])
+        public_id = str(row["public_id"] or "").strip().lower()
+        if not public_id:
+            public_id = _ensure_image_public_id(conn, iid)
+        out[iid] = _public_thumb_url(public_id, rev_by_id.get(iid, "0"))
+    return out
+
+
+def _thumb_url(conn: sqlite3.Connection, image_id: int, *, kind: str = "grid", rev: str | None = None) -> str:
+    token = rev or _thumb_rev_map(conn, [int(image_id)], kind=kind).get(int(image_id), "0")
+    if str(kind) == "grid":
+        return _public_thumb_url(_ensure_image_public_id(conn, int(image_id)), token)
+    return f"/api/images/{int(image_id)}/thumb?kind={kind}&v={DERIV_VERSION}&rev={token}"
+
+
+def _thumb_url_map(conn: sqlite3.Connection, ids: list[int] | tuple[int, ...], *, kind: str = "grid") -> dict[int, str]:
+    if str(kind) == "grid":
+        return _public_thumb_url_map(conn, ids)
+    rev_by_id = _thumb_rev_map(conn, ids, kind=kind)
+    return {int(iid): _thumb_url(conn, int(iid), kind=kind, rev=rev_by_id.get(int(iid), "0")) for iid in rev_by_id.keys()}
+
+
+def publish_existing_public_thumbs() -> None:
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT d.image_id, d.disk_path, d.created_at_utc, d.format, i.public_id
+            FROM image_derivatives d
+            JOIN images i ON i.id = d.image_id
+            WHERE d.kind='grid' AND d.format IN ('webp','avif')
+            ORDER BY d.image_id ASC, CASE WHEN d.format='webp' THEN 0 ELSE 1 END ASC
+            """
+        ).fetchall()
+        if not rows:
+            return
+        image_ids = [int(row["image_id"]) for row in rows]
+        shared_rev_by_id = _thumb_rev_map(conn, image_ids, kind="grid")
+        dirty = False
+        keep_by_public_id: dict[str, list[str]] = {}
+        for row in rows:
+            image_id = int(row["image_id"])
+            fmt = str(row["format"] or "").strip().lower()
+            if fmt not in {"webp", "avif"}:
+                continue
+            src_path = str(row["disk_path"] or "").strip()
+            public_id = str(row["public_id"] or "").strip().lower()
+            if not public_id:
+                public_id = _ensure_image_public_id(conn, image_id)
+                dirty = True
+            rev = shared_rev_by_id.get(image_id, _thumb_rev_token(row["created_at_utc"] if row["created_at_utc"] is not None else None))
+            dst = _public_thumb_abs_path(public_id, rev, fmt=fmt)
+            dst_str = str(dst)
+            if src_path and os.path.abspath(src_path) != os.path.abspath(dst_str) and os.path.exists(src_path):
+                _write_bytes_to_path(dst, Path(src_path).read_bytes())
+                dirty = True
+            elif src_path and os.path.abspath(src_path) == os.path.abspath(dst_str) and os.path.exists(src_path):
+                pass
+            elif dst.exists():
+                pass
+            else:
+                continue
+            if str(row["disk_path"] or "") != dst_str:
+                size = int(dst.stat().st_size) if dst.exists() else None
+                conn.execute(
+                    "UPDATE image_derivatives SET disk_path=?, size=?, bytes=NULL WHERE image_id=? AND kind='grid' AND format=?",
+                    (dst_str, size, image_id, fmt),
+                )
+                dirty = True
+            keep_by_public_id.setdefault(public_id, []).append(dst_str)
+            if src_path and os.path.abspath(src_path) != os.path.abspath(dst_str):
+                try:
+                    if os.path.exists(src_path):
+                        os.remove(src_path)
+                except Exception:
+                    pass
+        for public_id, keep_paths in keep_by_public_id.items():
+            _cleanup_public_thumb_versions(public_id, keep_paths=keep_paths)
+        if dirty:
+            conn.commit()
+    finally:
+        conn.close()
+
 
 
 # ---- quality tag cache (exact + wildcard patterns) ----
@@ -52,9 +581,6 @@ _QUALITY_PATTERNS: list[str] = []
 # - Reparse and rebuild must be mutually exclusive.
 
 _MAINT_LOCK = threading.Lock()
-_REPARSE_BG_THREAD: threading.Thread | None = None
-_REBUILD_BG_THREAD: threading.Thread | None = None
-
 _HB_MAX_AGE_SEC = 180
 
 
@@ -577,10 +1103,11 @@ class SetupMasterReq(BaseModel):
 
 
 @api_router.post("/auth/setup_master")
-def setup_master(req: SetupMasterReq, response: Response):
+def setup_master(request: Request, req: SetupMasterReq, response: Response):
     """Create the first (master) admin user. Only allowed when no users exist."""
     username = (req.username or "").strip()
-    if not username:
+    username_norm = _normalize_username(username)
+    if not username_norm:
         raise HTTPException(status_code=400, detail="username required")
     if not req.password or not req.password2:
         raise HTTPException(status_code=400, detail="password required")
@@ -597,16 +1124,16 @@ def setup_master(req: SetupMasterReq, response: Response):
 
         try:
             conn.execute(
-                "INSERT INTO users(username, password_hash, role, must_set_password, pw_set_at) VALUES (?,?,?,?,datetime('now'))",
-                (username, hash_password(req.password), "master", 0),
+                "INSERT INTO users(username, username_norm, password_hash, role, must_set_password, pw_set_at) VALUES (?,?,?,?,?,datetime('now'))",
+                (username, username_norm, hash_password(req.password), "master", 0),
             )
             conn.commit()
         except sqlite3.IntegrityError:
             raise HTTPException(status_code=409, detail="username already exists")
 
         row = conn.execute(
-            "SELECT id, username, role FROM users WHERE username=?",
-            (username,),
+            "SELECT id, username, role FROM users WHERE username_norm=?",
+            (username_norm,),
         ).fetchone()
         token = create_token(user_id=int(row["id"]), username=row["username"], role=row["role"])
         response.set_cookie(
@@ -616,16 +1143,20 @@ def setup_master(req: SetupMasterReq, response: Response):
             samesite="lax",
             max_age=60 * 60 * 24 * 30,
             path="/",
+            secure=_cookie_secure_flag(request),
         )
         return {"ok": True, "token": token, "user": {"id": row["id"], "username": row["username"], "role": row["role"]}}
     finally:
         conn.close()
 
 @api_router.post("/auth/login")
-def login(req: LoginReq, response: Response):
+def login(request: Request, req: LoginReq, response: Response):
     conn = get_conn()
     try:
-        row = conn.execute("SELECT id, username, password_hash, role, disabled FROM users WHERE username=?", (req.username,)).fetchone()
+        row = conn.execute(
+            "SELECT id, username, password_hash, role, disabled FROM users WHERE username_norm=?",
+            (_normalize_username(req.username),),
+        ).fetchone()
         if not row or int(row["disabled"]) == 1:
             raise HTTPException(status_code=401, detail="Invalid credentials")
         if not verify_password(req.password, row["password_hash"]):
@@ -639,6 +1170,7 @@ def login(req: LoginReq, response: Response):
             samesite="lax",
             max_age=60 * 60 * 24 * 30,
             path="/",
+            secure=_cookie_secure_flag(request),
         )
         return {"token": token, "user": {"id": row["id"], "username": row["username"], "role": row["role"]}}
     finally:
@@ -646,7 +1178,71 @@ def login(req: LoginReq, response: Response):
 
 @api_router.get("/me")
 def me(user: dict = Depends(get_user)):
-    return user
+    data = dict(user or {})
+    data["perf_enabled"] = bool(perf_logging_enabled())
+    return data
+
+
+@api_router.get("/app/update_status")
+def app_update_status(user: dict = Depends(get_user)):
+    state = get_update_status()
+    is_master = str(user.get("role") or "") == "master"
+    data = dict(state or {})
+    data["is_master"] = is_master
+    data["visible"] = bool(is_master and data.get("update_available"))
+    if not is_master:
+        data["update_available"] = False
+    return data
+
+
+class UpdateMeSettingsReq(BaseModel):
+    share_works: int | None = None
+    share_bookmarks: int | None = None
+
+
+@api_router.patch("/me/settings")
+@api_router.post("/me/settings")
+def update_me_settings(req: UpdateMeSettingsReq, user: dict = Depends(get_user)):
+    """Update current user's sharing settings."""
+    uid = int(user.get("id") or 0)
+    if uid <= 0:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    sw = None if req.share_works is None else (1 if int(req.share_works or 0) else 0)
+    sb = None if req.share_bookmarks is None else (1 if int(req.share_bookmarks or 0) else 0)
+    if sw is None and sb is None:
+        return {"ok": True, **user}
+
+    conn = get_conn()
+    try:
+        # Upsert (SQLite).
+        # Keep updated_at fresh for debugging.
+        cur = conn.execute("SELECT share_works, share_bookmarks FROM user_settings WHERE user_id=?", (uid,)).fetchone()
+        if cur:
+            nsw = int(cur[0] or 0) if sw is None else sw
+            nsb = int(cur[1] or 0) if sb is None else sb
+            conn.execute(
+                "UPDATE user_settings SET share_works=?, share_bookmarks=?, updated_at=datetime('now') WHERE user_id=?",
+                (nsw, nsb, uid),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO user_settings(user_id, share_works, share_bookmarks) VALUES (?,?,?)",
+                (uid, (sw or 0), (sb or 0)),
+            )
+        conn.commit()
+        # reflect back
+        row = conn.execute(
+            "SELECT COALESCE(share_works,0) AS share_works, COALESCE(share_bookmarks,0) AS share_bookmarks FROM user_settings WHERE user_id=?",
+            (uid,),
+        ).fetchone()
+        user2 = dict(user)
+        if row:
+            user2["share_works"] = int(row["share_works"] or 0)
+            user2["share_bookmarks"] = int(row["share_bookmarks"] or 0)
+        return {"ok": True, **user2}
+    finally:
+        conn.close()
 
 
 @api_router.post("/auth/logout")
@@ -679,7 +1275,8 @@ class CreateUserReq(BaseModel):
     role: str
 
 @api_router.post("/admin/users")
-def admin_create_user(request: Request, req: CreateUserReq, admin: dict = Depends(require_admin)):
+async def admin_create_user(request: Request, admin: dict = Depends(require_admin)):
+    req = _validate_body_model(CreateUserReq, await _read_json_body_loose(request))
     """Create a user and return a password-setup URL.
 
     - Admins can create/delete normal users.
@@ -690,7 +1287,8 @@ def admin_create_user(request: Request, req: CreateUserReq, admin: dict = Depend
     if req.role == "admin" and admin.get("role") != "master":
         raise HTTPException(status_code=403, detail="master required to create admin")
     username = (req.username or "").strip()
-    if not username:
+    username_norm = _normalize_username(username)
+    if not username_norm:
         raise HTTPException(status_code=400, detail="username required")
     conn = get_conn()
     try:
@@ -701,14 +1299,14 @@ def admin_create_user(request: Request, req: CreateUserReq, admin: dict = Depend
             # Create with a random placeholder hash; user sets their own password via URL.
             placeholder = secrets.token_urlsafe(32)
             conn.execute(
-                "INSERT INTO users(username, password_hash, role, must_set_password) VALUES (?,?,?,1)",
-                (username, hash_password(placeholder), req.role),
+                "INSERT INTO users(username, username_norm, password_hash, role, must_set_password) VALUES (?,?,?,?,1)",
+                (username, username_norm, hash_password(placeholder), req.role),
             )
             conn.commit()
         except sqlite3.IntegrityError:
             raise HTTPException(status_code=409, detail="username already exists")
 
-        urow = conn.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
+        urow = conn.execute("SELECT id FROM users WHERE username_norm=?", (username_norm,)).fetchone()
         user_id = int(urow["id"])
         token = secrets.token_urlsafe(32)
         exp = datetime.now(timezone.utc) + timedelta(days=14)
@@ -1089,6 +1687,149 @@ def _read_image_bytes(conn: sqlite3.Connection, image_id: int) -> bytes | None:
     return b
 
 
+def _derivative_file_path(image_id: int, kind: str, fmt: str) -> Path:
+    image_dir = DERIVATIVES_DIR / f"{int(image_id) // 1000:06d}" / str(int(image_id))
+    return image_dir / f"{str(kind)}.{str(fmt)}"
+
+
+def _write_derivative_to_disk(*, image_id: int, kind: str, fmt: str, raw: bytes) -> str:
+    path = _derivative_file_path(int(image_id), str(kind), str(fmt))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = str(path) + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(raw)
+    os.replace(tmp, str(path))
+    return str(path)
+
+
+def _ensure_derivative_on_disk(conn: sqlite3.Connection, image_id: int, kind: str, fmt: str) -> str | None:
+    row = conn.execute(
+        "SELECT id, disk_path, size, bytes, created_at_utc FROM image_derivatives WHERE image_id=? AND kind=? AND format=?",
+        (int(image_id), str(kind), str(fmt)),
+    ).fetchone()
+    if not row:
+        return None
+    p = row["disk_path"]
+    if p and os.path.exists(p):
+        return str(p)
+
+    b = row["bytes"]
+    if b is None:
+        return None
+    if isinstance(b, memoryview):
+        b = b.tobytes()
+    if not b:
+        return None
+
+    try:
+        if str(kind) == "grid" and str(fmt) in {"webp", "avif"}:
+            public_id = _ensure_image_public_id(conn, int(image_id))
+            rev_token = _thumb_rev_token(row["created_at_utc"] if row["created_at_utc"] is not None else None)
+            new_p = _write_bytes_to_path(_public_thumb_abs_path(public_id, rev_token, fmt=str(fmt)), b)
+            _cleanup_public_thumb_versions(public_id, fmt=str(fmt), keep_paths=[new_p])
+        else:
+            new_p = _write_derivative_to_disk(image_id=int(image_id), kind=str(kind), fmt=str(fmt), raw=b)
+        conn.execute(
+            "UPDATE image_derivatives SET disk_path=?, size=?, bytes=NULL WHERE id=?",
+            (new_p, int(len(b)), int(row["id"])),
+        )
+        return new_p
+    except Exception:
+        return None
+
+
+def _derivative_quality_for(kind: str, fmt: str) -> int:
+    target = DERIVATIVE_TARGETS[str(kind)]
+    if str(fmt) == "avif":
+        return int(target.avif.quality)
+    return int(target.webp.quality)
+
+
+def _derivative_format_enabled(kind: str, fmt: str) -> bool:
+    target = DERIVATIVE_TARGETS[str(kind)]
+    if str(fmt) == "avif":
+        return bool(target.avif.enabled and avif_available())
+    return str(fmt) == "webp"
+
+
+def _derivative_row_is_ready(conn: sqlite3.Connection, row, *, kind: str, fmt: str) -> bool:
+    if not row:
+        return False
+    target = DERIVATIVE_TARGETS[str(kind)]
+    try:
+        q = int(row["quality"] or 0)
+        w = int(row["width"] or 0)
+        h = int(row["height"] or 0)
+    except Exception:
+        return False
+    if q != _derivative_quality_for(kind, fmt):
+        return False
+    if max(w, h) > int(target.max_side) + 2:
+        return False
+    p = row["disk_path"] if "disk_path" in row.keys() else None
+    if p and os.path.exists(p):
+        try:
+            return os.path.getsize(p) > 0
+        except Exception:
+            return False
+    p2 = _ensure_derivative_on_disk(conn, int(row["image_id"]), kind, fmt) if "image_id" in row.keys() else None
+    return bool(p2 and os.path.exists(p2))
+
+
+def _upsert_derivative_file(
+    conn: sqlite3.Connection,
+    *,
+    image_id: int,
+    kind: str,
+    fmt: str,
+    width: int,
+    height: int,
+    quality: int,
+    raw: bytes,
+    created_at_utc: str | None = None,
+) -> None:
+    prev = conn.execute(
+        "SELECT disk_path FROM image_derivatives WHERE image_id=? AND kind=? AND format=?",
+        (int(image_id), str(kind), str(fmt)),
+    ).fetchone()
+    prev_disk_path = str(prev["disk_path"] or "").strip() if prev else ""
+    created_at_utc = str(created_at_utc or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+    if str(kind) == "grid" and str(fmt) in {"webp", "avif"}:
+        public_id = _ensure_image_public_id(conn, int(image_id))
+        rev_token = _thumb_rev_token(created_at_utc)
+        disk_path = _write_bytes_to_path(_public_thumb_abs_path(public_id, rev_token, fmt=str(fmt)), raw)
+        _cleanup_public_thumb_versions(public_id, fmt=str(fmt), keep_paths=[disk_path])
+    else:
+        disk_path = _write_derivative_to_disk(image_id=int(image_id), kind=str(kind), fmt=str(fmt), raw=raw)
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO image_derivatives(
+          image_id, kind, format, width, height, quality, disk_path, size, bytes, created_at_utc
+        ) VALUES (?,?,?,?,?,?,?,?,NULL,?)
+        """,
+        (int(image_id), str(kind), str(fmt), int(width), int(height), int(quality), disk_path, int(len(raw)), created_at_utc),
+    )
+    if prev_disk_path and os.path.abspath(prev_disk_path) != os.path.abspath(str(disk_path)):
+        try:
+            if os.path.exists(prev_disk_path):
+                os.remove(prev_disk_path)
+        except Exception:
+            pass
+
+
+def _collect_derivative_disk_paths(conn: sqlite3.Connection, where_sql: str, params: tuple | list = ()) -> list[str]:
+    rows = conn.execute(
+        f"SELECT disk_path FROM image_derivatives {where_sql}",
+        params,
+    ).fetchall()
+    out: list[str] = []
+    for row in rows:
+        p = row["disk_path"] if not isinstance(row, tuple) else row[0]
+        if p and str(p).strip():
+            out.append(str(p))
+    return out
+
+
 def _reparse_one(conn: sqlite3.Connection, image_id: int) -> dict:
     """Re-extract metadata and regenerate tags for an existing image."""
     img = conn.execute(
@@ -1141,6 +1882,8 @@ def _reparse_one(conn: sqlite3.Connection, image_id: int) -> dict:
         prompt_neg = meta.negative
         prompt_char = meta.character_prompt
         params_json = json.dumps(meta.params, ensure_ascii=False) if meta.params else None
+        character_entries, main_negative_combined_raw = build_prompt_view_payload(conn, prompt_neg, prompt_char, meta.params if meta else None)
+        character_entries_json = json.dumps(character_entries, ensure_ascii=False)
         potion_raw = json.dumps(meta.potion, ensure_ascii=False).encode("utf-8") if meta.potion else None
         has_potion = 1 if potion_raw else 0
         metadata_raw = None
@@ -1182,6 +1925,12 @@ def _reparse_one(conn: sqlite3.Connection, image_id: int) -> dict:
         for t in parsed_char_tags:
             _push_tag(t, for_signature=False, src_mask=2)
 
+        # NSFW: also treat the main prompt itself containing 'nsfw' as NSFW.
+        if not is_nsfw:
+            ptxt = (prompt_pos or "")
+            if ptxt and ("nsfw" in ptxt.lower()):
+                is_nsfw = 1
+
         # Per-image unique tag set for cache updates
         new_tag_cat: dict[str, int | None] = {}
         for (canonical, _tag_text, _tag_raw, cat, _etype, _brace, _numw, _group, _src_mask, _seq) in _iter_tag_rows(tag_rows):
@@ -1196,7 +1945,7 @@ def _reparse_one(conn: sqlite3.Connection, image_id: int) -> dict:
             UPDATE images
             SET software=?, model_name=?,
                 prompt_positive_raw=?, prompt_negative_raw=?, prompt_character_raw=?,
-                params_json=?, potion_raw=?, has_potion=?, metadata_raw=?,
+                params_json=?, character_entries_json=?, main_negative_combined_raw=?, potion_raw=?, has_potion=?, metadata_raw=?,
                 main_sig_hash=?, dedup_flag=?, is_nsfw=?
             WHERE id=?
             """,
@@ -1207,6 +1956,8 @@ def _reparse_one(conn: sqlite3.Connection, image_id: int) -> dict:
                 prompt_neg,
                 prompt_char,
                 params_json,
+                character_entries_json,
+                main_negative_combined_raw,
                 potion_raw,
                 has_potion,
                 metadata_raw,
@@ -1272,8 +2023,10 @@ def _reparse_one(conn: sqlite3.Connection, image_id: int) -> dict:
             if (old_software or "") != (software or ""):
                 if old_software:
                     stats_service.dec_software(conn, str(old_software))
+                    stats_service.dec_creator_software(conn, int(img["uploader_user_id"] or 0), str(old_software))
                 if software:
                     stats_service.bump_software(conn, str(software))
+                    stats_service.bump_creator_software(conn, int(img["uploader_user_id"] or 0), str(software))
 
             # tag cache (per-image distinct)
             removed = old_tags - new_tags
@@ -1681,7 +2434,6 @@ def _rebuild_active(conn: sqlite3.Connection) -> bool:
 
 def _reparse_all_worker(run_id: int, batch_size: int = 50, interval_sec: float = 0.6) -> None:
     """Background worker: reparse all images in batches."""
-    global _REPARSE_BG_THREAD
     try:
         while True:
             conn = get_conn()
@@ -1765,15 +2517,10 @@ def _reparse_all_worker(run_id: int, batch_size: int = 50, interval_sec: float =
                 conn.close()
         except Exception:
             pass
-    finally:
-        with _MAINT_LOCK:
-            _REPARSE_BG_THREAD = None
-
 
 @api_router.post("/admin/reparse_all_start")
 def admin_reparse_all_start(_admin: dict = Depends(require_admin)):
     """Start or resume background full-library reparse."""
-    global _REPARSE_BG_THREAD
 
     conn = get_conn()
     try:
@@ -1798,13 +2545,11 @@ def admin_reparse_all_start(_admin: dict = Depends(require_admin)):
         started = False
         if not active:
             with _MAINT_LOCK:
-                if not (_REPARSE_BG_THREAD and _REPARSE_BG_THREAD.is_alive()):
+                if not _reparse_active(conn):
                     _kv_set(conn, "reparse_bg_running", "1")
                     _kv_set(conn, "reparse_bg_heartbeat", str(_hb_now()))
                     conn.commit()
-                    t = threading.Thread(target=_reparse_all_worker, args=(int(run_id),), daemon=True)
-                    _REPARSE_BG_THREAD = t
-                    t.start()
+                    threading.Thread(target=_reparse_all_worker, args=(int(run_id),), daemon=True).start()
                     started = True
         return {"ok": True, "run_id": int(run_id), "started": bool(started)}
     finally:
@@ -1812,7 +2557,6 @@ def admin_reparse_all_start(_admin: dict = Depends(require_admin)):
 
 
 def _rebuild_stats_worker(run_id: int) -> None:
-    global _REBUILD_BG_THREAD
     try:
         conn = get_conn()
         try:
@@ -1862,15 +2606,10 @@ def _rebuild_stats_worker(run_id: int) -> None:
                 conn.close()
         except Exception:
             pass
-    finally:
-        with _MAINT_LOCK:
-            _REBUILD_BG_THREAD = None
-
 
 @api_router.post("/admin/rebuild_stats_start")
 def admin_rebuild_stats_start(_admin: dict = Depends(require_admin)):
     """Start background rebuild (stats + dedup)."""
-    global _REBUILD_BG_THREAD
 
     conn = get_conn()
     try:
@@ -1891,13 +2630,11 @@ def admin_rebuild_stats_start(_admin: dict = Depends(require_admin)):
         started = False
         if not active:
             with _MAINT_LOCK:
-                if not (_REBUILD_BG_THREAD and _REBUILD_BG_THREAD.is_alive()):
+                if not _rebuild_active(conn):
                     _kv_set(conn, "rebuild_bg_running", "1")
                     _kv_set(conn, "rebuild_bg_heartbeat", str(_hb_now()))
                     conn.commit()
-                    t = threading.Thread(target=_rebuild_stats_worker, args=(int(run_id),), daemon=True)
-                    _REBUILD_BG_THREAD = t
-                    t.start()
+                    threading.Thread(target=_rebuild_stats_worker, args=(int(run_id),), daemon=True).start()
                     started = True
 
         return {"ok": True, "run_id": int(run_id), "started": bool(started)}
@@ -2179,8 +2916,398 @@ def stats_creators(user: dict = Depends(get_user)):
 def stats_software(user: dict = Depends(get_user)):
     conn = get_conn()
     try:
-        rows = conn.execute("SELECT software, image_count FROM stat_software ORDER BY image_count DESC, software ASC").fetchall()
-        return [{"software": r["software"], "count": r["image_count"]} for r in rows]
+        role = str(user.get("role") or "user")
+        if role in {"admin", "master"}:
+            rows = conn.execute(
+                "SELECT software, image_count FROM stat_software ORDER BY image_count DESC, software ASC"
+            ).fetchall()
+            return [{"software": r["software"], "count": r["image_count"]} for r in rows]
+
+        # For normal users, the sidebar software counts must reflect *visible creators*.
+        uid = int(user.get("id") or 0)
+
+        # Best-effort backfill if the new table exists but hasn't been built yet.
+        try:
+            has = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='stat_creator_software'"
+            ).fetchone()
+            if has:
+                n = int(conn.execute("SELECT COUNT(*) AS n FROM stat_creator_software").fetchone()[0])
+                if n == 0:
+                    stats_service.rebuild_creator_software(conn)
+                    conn.commit()
+        except Exception:
+            pass
+
+        try:
+            rows = conn.execute(
+                """
+                SELECT software, SUM(image_count) AS c
+                FROM stat_creator_software cs
+                WHERE software IS NOT NULL AND TRIM(software) <> ''
+                  AND (
+                    cs.creator_id = ?
+                    OR EXISTS(SELECT 1 FROM user_settings us WHERE us.user_id=cs.creator_id AND us.share_works=1)
+                    OR EXISTS(SELECT 1 FROM user_creators uc WHERE uc.user_id=? AND uc.creator_user_id=cs.creator_id)
+                  )
+                GROUP BY software
+                ORDER BY c DESC, software ASC
+                """,
+                (uid, uid),
+            ).fetchall()
+            return [{"software": r["software"], "count": int(r["c"] or 0)} for r in rows]
+        except Exception:
+            # Fallback: exact aggregation on images table.
+            rows = conn.execute(
+                """
+                SELECT images.software AS software, COUNT(*) AS c
+                FROM images
+                WHERE images.software IS NOT NULL AND TRIM(images.software) <> ''
+                  AND (
+                    images.uploader_user_id = ?
+                    OR EXISTS(SELECT 1 FROM user_settings us WHERE us.user_id=images.uploader_user_id AND us.share_works=1)
+                    OR EXISTS(SELECT 1 FROM user_creators uc WHERE uc.user_id=? AND uc.creator_user_id=images.uploader_user_id)
+                  )
+                GROUP BY images.software
+                ORDER BY c DESC, software ASC
+                """,
+                (uid, uid),
+            ).fetchall()
+            return [{"software": r["software"], "count": int(r["c"] or 0)} for r in rows]
+    finally:
+        conn.close()
+
+
+@api_router.get("/creators/list")
+def my_creator_list(user: dict = Depends(get_user)):
+    """List creators registered in the current user's author list (+ self).
+
+    Returned items are used by the sidebar and the filter dropdown.
+    """
+    conn = get_conn()
+    try:
+        uid = int(user.get("id") or 0)
+        rows = conn.execute(
+            """
+            SELECT u.id AS id,
+                   u.username AS creator,
+                   COALESCE(sc.image_count, 0) AS count,
+                   COALESCE(us.share_works,0) AS share_works,
+                   COALESCE(us.share_bookmarks,0) AS share_bookmarks,
+                   CASE WHEN u.id = ? THEN 1 ELSE 0 END AS is_self
+            FROM users u
+            LEFT JOIN user_settings us ON us.user_id=u.id
+            LEFT JOIN user_creators uc ON uc.user_id=? AND uc.creator_user_id=u.id
+            LEFT JOIN stat_creators sc ON sc.creator=u.username
+            WHERE u.id = ? OR uc.creator_user_id IS NOT NULL
+            ORDER BY is_self DESC, LOWER(u.username) ASC
+            """,
+            (uid, uid, uid),
+        ).fetchall()
+
+        out = []
+        for r in rows:
+            out.append(
+                {
+                    "id": int(r["id"]),
+                    "creator": str(r["creator"] or ""),
+                    "count": int(r["count"] or 0),
+                    "share_works": int(r["share_works"] or 0),
+                    "share_bookmarks": int(r["share_bookmarks"] or 0),
+                    "is_self": int(r["is_self"] or 0),
+                }
+            )
+        return out
+    finally:
+        conn.close()
+
+
+class CreatorListReq(BaseModel):
+    username: str | None = None
+    user_id: int | None = None
+
+
+@api_router.post("/creators/list")
+def add_creator_to_list(req: CreatorListReq, user: dict = Depends(get_user)):
+    conn = get_conn()
+    try:
+        uid = int(user.get("id") or 0)
+        target_id = None
+        if req.user_id is not None:
+            try:
+                target_id = int(req.user_id)
+            except Exception:
+                target_id = None
+        if target_id is None and req.username:
+            row = _find_user_by_username(conn, str(req.username).strip(), "id")
+            target_id = int(row["id"]) if row else None
+        if not target_id or int(target_id) <= 0:
+            raise HTTPException(status_code=404, detail="user not found")
+        if int(target_id) == uid:
+            return {"ok": True}
+
+        # Only allow adding creators that explicitly share works.
+        srow = conn.execute(
+            """
+            SELECT u.id,
+                   u.disabled,
+                   COALESCE(us.share_works,0) AS share_works
+            FROM users u
+            LEFT JOIN user_settings us ON us.user_id=u.id
+            WHERE u.id=?
+            """,
+            (int(target_id),),
+        ).fetchone()
+        if not srow or int(srow["disabled"] or 0) == 1:
+            raise HTTPException(status_code=404, detail="user not found")
+        if int(srow["share_works"] or 0) != 1:
+            raise HTTPException(status_code=400, detail="user does not share works")
+
+        conn.execute(
+            "INSERT OR IGNORE INTO user_creators(user_id, creator_user_id) VALUES (?,?)",
+            (uid, int(target_id)),
+        )
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@api_router.delete("/creators/list/{creator_id}")
+def remove_creator_from_list(creator_id: int, user: dict = Depends(get_user)):
+    conn = get_conn()
+    try:
+        uid = int(user.get("id") or 0)
+        cid = int(creator_id)
+        if cid <= 0 or cid == uid:
+            return {"ok": True}
+        conn.execute(
+            "DELETE FROM user_creators WHERE user_id=? AND creator_user_id=?",
+            (uid, cid),
+        )
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@api_router.get("/bookmarks/sidebar")
+def bookmark_sidebar(user: dict = Depends(get_user)):
+    """Sidebar bookmark lists: own lists + subscribed creators' lists (read-only)."""
+    conn = get_conn()
+    try:
+        uid = int(user.get("id") or 0)
+        _ensure_default_bookmark_list(conn, uid)
+        mine, any_count = _list_bookmark_lists(conn, uid)
+
+        # creators subscribed by current user
+        creators = conn.execute(
+            """
+            SELECT u.id AS id, u.username AS username,
+                   COALESCE(us.share_works,0) AS share_works,
+                   COALESCE(us.share_bookmarks,0) AS share_bookmarks
+            FROM user_bookmark_creators sub
+            JOIN users u ON u.id=sub.creator_user_id
+            LEFT JOIN user_settings us ON us.user_id=u.id
+            WHERE sub.user_id=?
+            ORDER BY LOWER(u.username) ASC
+            """,
+            (uid,),
+        ).fetchall()
+
+        others = []
+        for r in creators:
+            cid = int(r["id"])
+            if cid == uid:
+                continue
+            # show only when creator shares bookmarks AND shares works
+            if int(r["share_bookmarks"] or 0) != 1:
+                continue
+            if int(r["share_works"] or 0) != 1:
+                continue
+
+            # Ensure shared creators have at least the default list; otherwise the UI looks broken.
+            _ensure_default_bookmark_list(conn, cid)
+
+            lists_rows = conn.execute(
+                """
+                SELECT bl.id, bl.name, bl.is_default,
+                       (SELECT COUNT(*) FROM bookmarks b WHERE b.list_id = bl.id) AS cnt
+                FROM bookmark_lists bl
+                WHERE bl.user_id=?
+                ORDER BY bl.sort_order ASC, bl.id ASC
+                """,
+                (cid,),
+            ).fetchall()
+            lists = []
+            for lr in lists_rows:
+                lists.append(
+                    {
+                        "id": int(lr["id"]),
+                        "name": str(lr["name"] or ""),
+                        "is_default": int(lr["is_default"] or 0),
+                        "count": int(lr["cnt"] or 0),
+                    }
+                )
+            others.append(
+                {
+                    "creator_id": cid,
+                    "creator": str(r["username"] or ""),
+                    "lists": lists,
+                }
+            )
+
+        return {"mine": {"lists": mine, "any_count": int(any_count)}, "others": others}
+    finally:
+        conn.close()
+
+
+class BookmarkSubReq(BaseModel):
+    username: str | None = None
+    user_id: int | None = None
+
+
+@api_router.post("/bookmarks/subscriptions")
+def add_bookmark_subscription(req: BookmarkSubReq, user: dict = Depends(get_user)):
+    conn = get_conn()
+    try:
+        uid = int(user.get("id") or 0)
+        target_id = None
+        if req.user_id is not None:
+            try:
+                target_id = int(req.user_id)
+            except Exception:
+                target_id = None
+        if target_id is None and req.username:
+            row = _find_user_by_username(conn, str(req.username).strip(), "id")
+            target_id = int(row["id"]) if row else None
+        if not target_id or int(target_id) <= 0:
+            raise HTTPException(status_code=404, detail="user not found")
+        if int(target_id) == uid:
+            return {"ok": True}
+
+        # Only allow subscribing to creators that share bookmarks and works.
+        srow = conn.execute(
+            """
+            SELECT u.id,
+                   u.disabled,
+                   COALESCE(us.share_works,0) AS share_works,
+                   COALESCE(us.share_bookmarks,0) AS share_bookmarks
+            FROM users u
+            LEFT JOIN user_settings us ON us.user_id=u.id
+            WHERE u.id=?
+            """,
+            (int(target_id),),
+        ).fetchone()
+        if not srow or int(srow["disabled"] or 0) == 1:
+            raise HTTPException(status_code=404, detail="user not found")
+        if int(srow["share_works"] or 0) != 1:
+            raise HTTPException(status_code=400, detail="user does not share works")
+        if int(srow["share_bookmarks"] or 0) != 1:
+            raise HTTPException(status_code=400, detail="user does not share bookmarks")
+
+        conn.execute(
+            "INSERT OR IGNORE INTO user_bookmark_creators(user_id, creator_user_id) VALUES (?,?)",
+            (uid, int(target_id)),
+        )
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@api_router.delete("/bookmarks/subscriptions/{creator_id}")
+def remove_bookmark_subscription(creator_id: int, user: dict = Depends(get_user)):
+    conn = get_conn()
+    try:
+        uid = int(user.get("id") or 0)
+        cid = int(creator_id)
+        if cid <= 0 or cid == uid:
+            return {"ok": True}
+        conn.execute(
+            "DELETE FROM user_bookmark_creators WHERE user_id=? AND creator_user_id=?",
+            (uid, cid),
+        )
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@api_router.get("/users/suggest")
+def users_suggest(kind: str = "creators", q: str = "", limit: int = 20, user: dict = Depends(get_user)):
+    """Suggest users for creator list / bookmark subscriptions.
+
+    - When q is empty: returns random 10.
+    - When q is given: partial match (LIKE).
+    """
+    kind = (kind or "creators").strip().lower()
+    limit = max(1, min(40, int(limit or 20)))
+    conn = get_conn()
+    try:
+        uid = int(user.get("id") or 0)
+        q2 = str(q or "").strip()
+
+        # Filter candidates by kind to match UI rules.
+        # - creators: must share works
+        # - bookmarks: must share works AND bookmarks
+        cond = "1=1"
+        if kind == "bookmarks":
+            cond = "COALESCE(us.share_works,0)=1 AND COALESCE(us.share_bookmarks,0)=1"
+        else:
+            cond = "COALESCE(us.share_works,0)=1"
+
+        if not q2:
+            limit = min(limit, 10)
+            sql = f"""
+                SELECT u.id, u.username,
+                       COALESCE(us.share_works,0) AS share_works,
+                       COALESCE(us.share_bookmarks,0) AS share_bookmarks,
+                       CASE WHEN uc.creator_user_id IS NOT NULL THEN 1 ELSE 0 END AS in_creator_list,
+                       CASE WHEN ub.creator_user_id IS NOT NULL THEN 1 ELSE 0 END AS in_bookmark_subs
+                FROM users u
+                LEFT JOIN user_settings us ON us.user_id=u.id
+                LEFT JOIN user_creators uc ON uc.user_id=? AND uc.creator_user_id=u.id
+                LEFT JOIN user_bookmark_creators ub ON ub.user_id=? AND ub.creator_user_id=u.id
+                WHERE u.disabled=0 AND u.id <> ?
+                  AND ({cond})
+                ORDER BY RANDOM()
+                LIMIT ?
+            """
+            rows = conn.execute(sql, (uid, uid, uid, limit)).fetchall()
+        else:
+            like = f"%{q2}%"
+            sql = f"""
+                SELECT u.id, u.username,
+                       COALESCE(us.share_works,0) AS share_works,
+                       COALESCE(us.share_bookmarks,0) AS share_bookmarks,
+                       CASE WHEN uc.creator_user_id IS NOT NULL THEN 1 ELSE 0 END AS in_creator_list,
+                       CASE WHEN ub.creator_user_id IS NOT NULL THEN 1 ELSE 0 END AS in_bookmark_subs
+                FROM users u
+                LEFT JOIN user_settings us ON us.user_id=u.id
+                LEFT JOIN user_creators uc ON uc.user_id=? AND uc.creator_user_id=u.id
+                LEFT JOIN user_bookmark_creators ub ON ub.user_id=? AND ub.creator_user_id=u.id
+                WHERE u.disabled=0 AND u.id <> ? AND u.username LIKE ?
+                  AND ({cond})
+                ORDER BY LENGTH(u.username) ASC, LOWER(u.username) ASC
+                LIMIT ?
+            """
+            rows = conn.execute(sql, (uid, uid, uid, like, limit)).fetchall()
+
+        out = []
+        for r in rows:
+            out.append(
+                {
+                    "id": int(r["id"]),
+                    "username": str(r["username"] or ""),
+                    "share_works": int(r["share_works"] or 0),
+                    "share_bookmarks": int(r["share_bookmarks"] or 0),
+                    "in_creator_list": int(r["in_creator_list"] or 0),
+                    "in_bookmark_subs": int(r["in_bookmark_subs"] or 0),
+                }
+            )
+        # kind is currently informational for the frontend; keep output stable.
+        return {"items": out, "kind": kind}
     finally:
         conn.close()
 
@@ -2191,11 +3318,44 @@ def stats_day_counts(month: str, user: dict = Depends(get_user)):
         raise HTTPException(status_code=400, detail="month must be YYYY-MM")
     conn = get_conn()
     try:
+        role = str(user.get("role") or "user")
+        if role in {"admin", "master"}:
+            rows = conn.execute(
+                "SELECT ymd, image_count FROM stat_day_counts WHERE ymd LIKE ? ORDER BY ymd ASC",
+                (month + "-%",),
+            ).fetchall()
+            return [{"ymd": r["ymd"], "count": r["image_count"]} for r in rows]
+
+        # Best-effort backfill for per-creator calendar stats (older DBs won't have it built).
+        try:
+            n = int(conn.execute("SELECT COUNT(*) FROM stat_creator_day_counts").fetchone()[0] or 0)
+            if n == 0:
+                nimg = int(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0] or 0)
+                if nimg > 0:
+                    stats_service.rebuild_creator_day_counts(conn)
+                    stats_service.rebuild_creator_month_counts(conn)
+                    stats_service.rebuild_creator_year_counts(conn)
+                    conn.commit()
+        except Exception:
+            pass
+
+        uid = int(user.get("id") or 0)
         rows = conn.execute(
-            "SELECT ymd, image_count FROM stat_day_counts WHERE ymd LIKE ? ORDER BY ymd ASC",
-            (month + "-%",),
+            """
+            SELECT ymd, SUM(image_count) AS c
+            FROM stat_creator_day_counts sc
+            WHERE ymd LIKE ?
+              AND (
+                sc.creator_id = ?
+                OR EXISTS(SELECT 1 FROM user_settings us WHERE us.user_id=sc.creator_id AND us.share_works=1)
+                OR EXISTS(SELECT 1 FROM user_creators uc WHERE uc.user_id=? AND uc.creator_user_id=sc.creator_id)
+              )
+            GROUP BY ymd
+            ORDER BY ymd ASC
+            """,
+            (month + "-%", uid, uid),
         ).fetchall()
-        return [{"ymd": r["ymd"], "count": r["image_count"]} for r in rows]
+        return [{"ymd": r["ymd"], "count": int(r["c"] or 0)} for r in rows]
     finally:
         conn.close()
 
@@ -2206,16 +3366,68 @@ def stats_month_counts(year: str, user: dict = Depends(get_user)):
         raise HTTPException(status_code=400, detail="year must be YYYY")
     conn = get_conn()
     try:
+        role = str(user.get("role") or "user")
+        if role in {"admin", "master"}:
+            rows = conn.execute(
+                "SELECT ym, image_count FROM stat_month_counts WHERE ym LIKE ? ORDER BY ym ASC",
+                (year + "-%",),
+            ).fetchall()
+            yrow = conn.execute("SELECT image_count FROM stat_year_counts WHERE year=?", (year,)).fetchone()
+            year_total = int((yrow["image_count"] if yrow else 0) or 0)
+            return {
+                "year": year,
+                "year_total": year_total,
+                "items": [{"ym": r["ym"], "count": r["image_count"]} for r in rows],
+            }
+
+        try:
+            n = int(conn.execute("SELECT COUNT(*) FROM stat_creator_month_counts").fetchone()[0] or 0)
+            if n == 0:
+                nimg = int(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0] or 0)
+                if nimg > 0:
+                    stats_service.rebuild_creator_day_counts(conn)
+                    stats_service.rebuild_creator_month_counts(conn)
+                    stats_service.rebuild_creator_year_counts(conn)
+                    conn.commit()
+        except Exception:
+            pass
+
+        uid = int(user.get("id") or 0)
         rows = conn.execute(
-            "SELECT ym, image_count FROM stat_month_counts WHERE ym LIKE ? ORDER BY ym ASC",
-            (year + "-%",),
+            """
+            SELECT ym, SUM(image_count) AS c
+            FROM stat_creator_month_counts sm
+            WHERE ym LIKE ?
+              AND (
+                sm.creator_id = ?
+                OR EXISTS(SELECT 1 FROM user_settings us WHERE us.user_id=sm.creator_id AND us.share_works=1)
+                OR EXISTS(SELECT 1 FROM user_creators uc WHERE uc.user_id=? AND uc.creator_user_id=sm.creator_id)
+              )
+            GROUP BY ym
+            ORDER BY ym ASC
+            """,
+            (year + "-%", uid, uid),
         ).fetchall()
-        yrow = conn.execute("SELECT image_count FROM stat_year_counts WHERE year=?", (year,)).fetchone()
-        year_total = int((yrow["image_count"] if yrow else 0) or 0)
+
+        yrow = conn.execute(
+            """
+            SELECT SUM(image_count) AS c
+            FROM stat_creator_year_counts sy
+            WHERE year=?
+              AND (
+                sy.creator_id = ?
+                OR EXISTS(SELECT 1 FROM user_settings us WHERE us.user_id=sy.creator_id AND us.share_works=1)
+                OR EXISTS(SELECT 1 FROM user_creators uc WHERE uc.user_id=? AND uc.creator_user_id=sy.creator_id)
+              )
+            """,
+            (year, uid, uid),
+        ).fetchone()
+        year_total = int((yrow["c"] if yrow else 0) or 0)
+
         return {
             "year": year,
             "year_total": year_total,
-            "items": [{"ym": r["ym"], "count": r["image_count"]} for r in rows],
+            "items": [{"ym": r["ym"], "count": int(r["c"] or 0)} for r in rows],
         }
     finally:
         conn.close()
@@ -2225,8 +3437,39 @@ def stats_month_counts(year: str, user: dict = Depends(get_user)):
 def stats_year_counts(user: dict = Depends(get_user)):
     conn = get_conn()
     try:
-        rows = conn.execute("SELECT year, image_count FROM stat_year_counts ORDER BY year DESC").fetchall()
-        return [{"year": r["year"], "count": r["image_count"]} for r in rows]
+        role = str(user.get("role") or "user")
+        if role in {"admin", "master"}:
+            rows = conn.execute("SELECT year, image_count FROM stat_year_counts ORDER BY year DESC").fetchall()
+            return [{"year": r["year"], "count": r["image_count"]} for r in rows]
+
+        try:
+            n = int(conn.execute("SELECT COUNT(*) FROM stat_creator_year_counts").fetchone()[0] or 0)
+            if n == 0:
+                nimg = int(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0] or 0)
+                if nimg > 0:
+                    stats_service.rebuild_creator_day_counts(conn)
+                    stats_service.rebuild_creator_month_counts(conn)
+                    stats_service.rebuild_creator_year_counts(conn)
+                    conn.commit()
+        except Exception:
+            pass
+
+        uid = int(user.get("id") or 0)
+        rows = conn.execute(
+            """
+            SELECT year, SUM(image_count) AS c
+            FROM stat_creator_year_counts sy
+            WHERE (
+              sy.creator_id = ?
+              OR EXISTS(SELECT 1 FROM user_settings us WHERE us.user_id=sy.creator_id AND us.share_works=1)
+              OR EXISTS(SELECT 1 FROM user_creators uc WHERE uc.user_id=? AND uc.creator_user_id=sy.creator_id)
+            )
+            GROUP BY year
+            ORDER BY year DESC
+            """,
+            (uid, uid),
+        ).fetchall()
+        return [{"year": r["year"], "count": int(r["c"] or 0)} for r in rows]
     finally:
         conn.close()
 
@@ -2242,9 +3485,14 @@ def tag_suggest(q: str = "", limit: int = 20, user: dict = Depends(get_user)):
                 (limit,),
             ).fetchall()
         else:
+            # Substring match (so "girl" can suggest "1girl" etc.) while still preferring prefix hits.
+            pattern = qn.replace("%", "\\%").replace("_", "\\_")
             rows = conn.execute(
-                "SELECT tag_canonical, image_count, category FROM stat_tag_counts WHERE tag_canonical LIKE ? ORDER BY image_count DESC LIMIT ?",
-                (qn + "%", limit),
+                "SELECT tag_canonical, image_count, category FROM stat_tag_counts "
+                "WHERE tag_canonical LIKE ? ESCAPE '\\' "
+                "ORDER BY (CASE WHEN tag_canonical LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END), image_count DESC "
+                "LIMIT ?",
+                ("%" + pattern + "%", pattern + "%", limit),
             ).fetchall()
         return [{"tag": r["tag_canonical"], "count": r["image_count"], "category": r["category"]} for r in rows]
     finally:
@@ -2260,6 +3508,117 @@ def _lookup_alias(conn: sqlite3.Connection, tag_norm: str) -> str:
     canonical = str(row["canonical"]) if row else tag_norm
     _cache_put(_TAG_ALIAS_CACHE, _TAG_ALIAS_LOCK, tag_norm, canonical, _TAG_ALIAS_MAX)
     return canonical
+
+
+def _tag_candidates_for_filter(conn: sqlite3.Connection, token: str, *, limit: int = 80) -> list[str]:
+    """Resolve a user token into canonical tag candidates.
+
+    - If the token matches an existing canonical tag, return [canonical].
+    - Otherwise expand by substring match against stat_tag_counts.
+
+    This allows queries like "girl" to match tags such as "1girl", and
+    ambiguous character names to match their disambiguated canonical forms.
+    """
+
+    tn = normalize_tag(token or "")
+    if not tn:
+        return []
+    canonical = _lookup_alias(conn, tn)
+
+    # Prefer exact matches when they exist.
+    try:
+        r = conn.execute(
+            "SELECT 1 FROM stat_tag_counts WHERE tag_canonical=? LIMIT 1",
+            (canonical,),
+        ).fetchone()
+        if not r:
+            r = conn.execute(
+                "SELECT 1 FROM image_tags WHERE tag_canonical=? LIMIT 1",
+                (canonical,),
+            ).fetchone()
+        if r:
+            return [canonical]
+    except Exception:
+        # If stats tables are missing in some early DB, fall back to exact.
+        return [canonical]
+
+    # Expand by substring match (bounded list so the main query remains sane).
+    pattern = canonical.replace("%", "\\%").replace("_", "\\_")
+    rows = conn.execute(
+        "SELECT tag_canonical FROM stat_tag_counts "
+        "WHERE tag_canonical LIKE ? ESCAPE '\\' "
+        "ORDER BY (CASE WHEN tag_canonical LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END), image_count DESC "
+        "LIMIT ?",
+        ("%" + pattern + "%", pattern + "%", int(limit)),
+    ).fetchall()
+    out: list[str] = []
+    for rr in rows:
+        v = rr[0] if isinstance(rr, tuple) else rr["tag_canonical"]
+        if v:
+            out.append(str(v))
+    return out
+
+
+def _apply_tag_filters(
+    conn: sqlite3.Connection,
+    where: list[str],
+    params: list,
+    include_tokens: list[str],
+    exclude_tokens: list[str],
+    *,
+    image_alias: str = "images",
+) -> None:
+    """Append SQL WHERE fragments for tag include/exclude.
+
+    Each include token is ANDed together; each token matches if **any** of its
+    candidate tags exists on the image (OR within the token).
+    """
+
+    inc_cands: list[list[str]] = []
+    inc_all: set[str] = set()
+    for t in include_tokens or []:
+        cands = _tag_candidates_for_filter(conn, t)
+        if not cands:
+            # No possible matches => whole query is empty.
+            where.append("0")
+            continue
+        # de-dupe while preserving order
+        cands = list(dict.fromkeys([c for c in cands if c]))
+        inc_cands.append(cands)
+        inc_all.update(cands)
+
+    exc_cands: list[list[str]] = []
+    for t in exclude_tokens or []:
+        cands = _tag_candidates_for_filter(conn, t)
+        if not cands:
+            continue
+        cands = [c for c in list(dict.fromkeys([c for c in cands if c])) if c not in inc_all]
+        if cands:
+            exc_cands.append(cands)
+
+    for cands in inc_cands:
+        if len(cands) == 1:
+            where.append(
+                f"EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = {image_alias}.id AND it.tag_canonical = ?)"
+            )
+            params.append(cands[0])
+        else:
+            where.append(
+                f"EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = {image_alias}.id AND it.tag_canonical IN (" + ",".join(["?"] * len(cands)) + "))"
+            )
+            params.extend(cands)
+
+    for cands in exc_cands:
+        if len(cands) == 1:
+            where.append(
+                f"NOT EXISTS (SELECT 1 FROM image_tags itn WHERE itn.image_id = {image_alias}.id AND itn.tag_canonical = ?)"
+            )
+            params.append(cands[0])
+        else:
+            where.append(
+                f"NOT EXISTS (SELECT 1 FROM image_tags itn WHERE itn.image_id = {image_alias}.id AND itn.tag_canonical IN (" + ",".join(["?"] * len(cands)) + "))"
+            )
+            params.extend(cands)
 def _category_group(conn: sqlite3.Connection, canonical: str, cat: int | None) -> str:
     key = (canonical or "", cat)
     v = _TAG_GROUP_CACHE.get(key)
@@ -2343,28 +3702,45 @@ async def upload_image(
     last_modified_ms: str | None = Form(default=None),
     user: dict = Depends(get_user),
 ):
-    raw = await file.read()
-    if not raw:
-        raise HTTPException(status_code=400, detail="empty file")
-
-    mtime = _parse_last_modified_ms(last_modified_ms)
-    if not mtime:
-        mtime = datetime.now(timezone.utc).isoformat()
-
-    conn = get_conn()
+    safe_name = _safe_basename(file.filename or "upload")
+    suffix = "." + safe_name.rsplit(".", 1)[-1] if "." in safe_name else ".bin"
+    fd, tmp_path = tempfile.mkstemp(prefix="nim_direct_", suffix=suffix)
+    os.close(fd)
+    total = 0
     try:
-        return _upload_image_core(
-            conn=conn,
-            bg=bg,
-            raw=raw,
-            filename=(file.filename or "upload"),
-            mime=(file.content_type or "application/octet-stream"),
-            mtime_iso=mtime,
-            user_id=int(user["id"]),
-            username=str(user["username"]),
-        )
+        with open(tmp_path, "wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                out.write(chunk)
+        if total <= 0:
+            raise HTTPException(status_code=400, detail="empty file")
+
+        mtime = _parse_last_modified_ms(last_modified_ms)
+        if not mtime:
+            mtime = datetime.now(timezone.utc).isoformat()
+
+        conn = get_conn()
+        try:
+            return _upload_image_from_path_core(
+                conn=conn,
+                bg=bg,
+                file_path=tmp_path,
+                filename=safe_name,
+                mime=(file.content_type or "application/octet-stream"),
+                mtime_iso=mtime,
+                user_id=int(user["id"]),
+                username=str(user["username"]),
+            )
+        finally:
+            conn.close()
     finally:
-        conn.close()
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
 
 
 def _allowed_image_ext(filename: str) -> bool:
@@ -2394,11 +3770,16 @@ def _upload_image_core(
 ) -> dict:
     """Core upload logic used by both direct upload and zip jobs.
 
+    NOTE:
+    This helper is shared by request uploads and zip workers. Do not read the
+    request-scoped `user` dependency in here; use the explicit `user_id` /
+    `username` arguments only.
+
     Keeps the existing semantics:
     - binary sha256 dedup
     - metadata extract
     - tag parsing + stats bumps
-    - original stored on disk, derivatives stored in DB
+    - original and derivative images stored on disk; DB keeps metadata/paths
     - derivatives created in background (or inline when bg is None)
     """
 
@@ -2410,7 +3791,7 @@ def _upload_image_core(
     row = conn.execute("SELECT id FROM images WHERE sha256=?", (sha,)).fetchone()
     if row:
         iid = int(row["id"])
-        return {"ok": True, "dedup": True, "image_id": iid, "thumb": f"/api/images/{iid}/thumb?kind=grid&v={DERIV_VERSION}", "detail": _image_detail_summary(conn, iid), "dedup_reason": "binary"}
+        return {"ok": True, "dedup": True, "image_id": iid, "thumb": _thumb_url(conn, iid, kind="grid"), "detail": _image_detail_summary(conn, iid, user_id=int(user_id)), "dedup_reason": "binary"}
 
     # basic image info
     from PIL import Image
@@ -2456,6 +3837,8 @@ def _upload_image_core(
     except Exception:
         seed = None
     params_json = json.dumps(meta.params, ensure_ascii=False) if (meta and meta.params) else None
+    character_entries, main_negative_combined_raw = build_prompt_view_payload(conn, prompt_neg, prompt_char, meta.params if meta else None)
+    character_entries_json = json.dumps(character_entries, ensure_ascii=False)
     potion_raw = json.dumps(meta.potion, ensure_ascii=False).encode("utf-8") if (meta and meta.potion) else None
     has_potion = 1 if potion_raw else 0
     metadata_raw = None
@@ -2503,7 +3886,7 @@ def _upload_image_core(
         ).fetchone()
         if row2:
             iid = int(row2["id"])
-        return {"ok": True, "dedup": True, "image_id": iid, "thumb": f"/api/images/{iid}/thumb?kind=grid&v={DERIV_VERSION}", "detail": _image_detail_summary(conn, iid), "dedup_reason": "full"}
+            return {"ok": True, "dedup": True, "image_id": iid, "thumb": _thumb_url(conn, iid, kind="grid"), "detail": _image_detail_summary(conn, iid, user_id=int(user_id)), "dedup_reason": "full"}
 
     # tags
     parsed_tags = parse_tag_list(prompt_pos or "")
@@ -2540,6 +3923,12 @@ def _upload_image_core(
     for t in parsed_char_tags:
         _push_tag(t, for_signature=False, src_mask=2)
 
+    # NSFW: also treat the main prompt itself containing 'nsfw' as NSFW.
+    if not is_nsfw:
+        ptxt = (prompt_pos or "")
+        if ptxt and ("nsfw" in ptxt.lower()):
+            is_nsfw = 1
+
     sig = None
     dedup_flag = 1
     if canonical_main:
@@ -2551,16 +3940,17 @@ def _upload_image_core(
     cur = conn.execute(
         """
         INSERT INTO images(
-          sha256, original_filename, ext, mime, width, height, file_mtime_utc, uploader_user_id,
+          public_id, sha256, original_filename, ext, mime, width, height, file_mtime_utc, uploader_user_id,
           software, model_name, prompt_positive_raw, prompt_negative_raw, params_json,
-          prompt_character_raw,
+          prompt_character_raw, character_entries_json, main_negative_combined_raw,
           seed,
           potion_raw, has_potion, metadata_raw, main_sig_hash, dedup_flag
           , full_meta_hash
           , favorite, is_nsfw
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
+            _new_public_id(),
             sha,
             filename or "upload",
             ext,
@@ -2575,6 +3965,8 @@ def _upload_image_core(
             prompt_neg,
             params_json,
             prompt_char,
+            character_entries_json,
+            main_negative_combined_raw,
             seed,
             potion_raw,
             has_potion,
@@ -2664,21 +4056,212 @@ def _upload_image_core(
     stats_service.bump_creator(conn, username)
     if software:
         stats_service.bump_software(conn, software)
+        stats_service.bump_creator_software(conn, int(user_id), software)
     if mtime_iso:
         ymd = mtime_iso[:10]
         stats_service.bump_day(conn, ymd)
         stats_service.bump_month(conn, ymd[:7])
         stats_service.bump_year(conn, ymd[:4])
+        stats_service.bump_creator_day(conn, int(user_id), ymd)
+        stats_service.bump_creator_month(conn, int(user_id), ymd[:7])
+        stats_service.bump_creator_year(conn, int(user_id), ymd[:4])
 
     conn.commit()
 
-    # background derivative creation
-    if bg is not None:
-        bg.add_task(_ensure_derivatives, image_id)
-    else:
-        _ensure_derivatives(image_id)
+    _queue_derivative_request(
+        int(image_id),
+        ("grid", "overlay"),
+        source="upload",
+    )
 
-    return {"ok": True, "dedup": False, "image_id": image_id, "dedup_flag": dedup_flag, "thumb": f"/api/images/{image_id}/thumb?kind=grid&v={DERIV_VERSION}", "detail": _image_detail_summary(conn, int(image_id))}
+    return {"ok": True, "dedup": False, "image_id": image_id, "dedup_flag": dedup_flag, "thumb": _thumb_url(conn, int(image_id), kind="grid"), "detail": _image_detail_summary(conn, int(image_id), user_id=int(user_id))}
+
+
+def _build_derivative_rows_from_base_image(
+    base_image,
+    *,
+    kinds: tuple[str, ...] = ("grid", "overlay"),
+) -> list[tuple[str, str, int, int, int, bytes]]:
+    rows: list[tuple[str, str, int, int, int, bytes]] = []
+    clean_kinds = _normalize_derivative_kinds(kinds)
+    do_avif = avif_available()
+    for kind in clean_kinds:
+        target = DERIVATIVE_TARGETS[kind]
+        variant = make_resized_variant(base_image, max_side=int(target.max_side))
+        try:
+            width, height = int(variant.size[0]), int(variant.size[1])
+            if do_avif and target.avif.enabled:
+                rows.append((
+                    kind,
+                    "avif",
+                    width,
+                    height,
+                    int(target.avif.quality),
+                    encode_avif_image(
+                        variant,
+                        quality=int(target.avif.quality),
+                        speed=int(target.avif.speed),
+                        codec=str(target.avif.codec),
+                        max_threads=int(target.avif.max_threads),
+                    ),
+                ))
+            rows.append((
+                kind,
+                "webp",
+                width,
+                height,
+                int(target.webp.quality),
+                encode_webp_image(
+                    variant,
+                    quality=int(target.webp.quality),
+                    method=int(target.webp.method),
+                    lossless=bool(target.webp.lossless),
+                    alpha_quality=int(target.webp.alpha_quality),
+                ),
+            ))
+        finally:
+            try:
+                variant.close()
+            except Exception:
+                pass
+    return rows
+
+
+
+def _refresh_upload_job_progress(conn: sqlite3.Connection, job_id: int, *, seal: bool = False) -> tuple[str, str, str]:
+    row = conn.execute(
+        "SELECT total, status, staging_dir, source_kind FROM upload_zip_jobs WHERE id=?",
+        (int(job_id),),
+    ).fetchone()
+    if not row:
+        return "", "", ""
+    counts = conn.execute(
+        """
+        SELECT
+          COUNT(*) AS n_all,
+          SUM(CASE WHEN state IN ('完了','重複') THEN 1 ELSE 0 END) AS n_done,
+          SUM(CASE WHEN state='失敗' THEN 1 ELSE 0 END) AS n_failed,
+          SUM(CASE WHEN state='重複' THEN 1 ELSE 0 END) AS n_dup,
+          SUM(CASE WHEN state='処理中' THEN 1 ELSE 0 END) AS n_running,
+          SUM(CASE WHEN state IN ('待機','受信済み') THEN 1 ELSE 0 END) AS n_pending
+        FROM upload_zip_items
+        WHERE job_id=?
+        """,
+        (int(job_id),),
+    ).fetchone()
+    total_items = int(counts["n_all"] or 0) if counts else 0
+    done = int(counts["n_done"] or 0) if counts else 0
+    failed = int(counts["n_failed"] or 0) if counts else 0
+    dup = int(counts["n_dup"] or 0) if counts else 0
+    running = int(counts["n_running"] or 0) if counts else 0
+    pending = int(counts["n_pending"] or 0) if counts else 0
+    total = max(int(row["total"] or 0), total_items)
+    cur_status = str(row["status"] or "")
+    new_status = cur_status
+    if cur_status not in {"error", "cancelled"}:
+        if cur_status == "collecting" and not seal:
+            new_status = "collecting"
+        else:
+            finished = done + failed
+            if total > 0 and finished >= total:
+                new_status = "done"
+            elif running > 0 or pending > 0:
+                new_status = "running"
+            else:
+                new_status = "queued"
+    conn.execute(
+        "UPDATE upload_zip_jobs SET total=?, done=?, failed=?, dup=?, status=?, updated_at_utc=datetime('now') WHERE id=?",
+        (int(total), int(done), int(failed), int(dup), new_status, int(job_id)),
+    )
+    return new_status, str(row["staging_dir"] or ""), str(row["source_kind"] or "")
+
+
+
+def _cleanup_upload_staging_dir(path_str: str) -> None:
+    if not path_str:
+        return
+    try:
+        shutil.rmtree(path_str, ignore_errors=True)
+    except Exception:
+        pass
+
+
+
+def _process_upload_item_job(item_id: int, source: str | None = None, trace_id: str | None = None) -> None:
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            """
+            SELECT i.id, i.job_id, i.filename, i.staged_path, i.mtime_iso, i.state,
+                   j.status AS job_status, j.source_kind, j.staging_dir, j.user_id,
+                   u.username AS username
+            FROM upload_zip_items i
+            JOIN upload_zip_jobs j ON j.id=i.job_id
+            JOIN users u ON u.id=j.user_id
+            WHERE i.id=?
+            """,
+            (int(item_id),),
+        ).fetchone()
+        if not row:
+            return
+        job_id = int(row["job_id"])
+        staged_path = str(row["staged_path"] or "")
+        if str(row["job_status"] or "") == "cancelled":
+            conn.execute("UPDATE upload_zip_items SET state='失敗', message=? WHERE id=?", ("cancelled", int(item_id)))
+            status, staging_dir, _source_kind = _refresh_upload_job_progress(conn, job_id, seal=False)
+            conn.commit()
+            if status == "done":
+                _cleanup_upload_staging_dir(staging_dir)
+            return
+        conn.execute("UPDATE upload_zip_items SET state='処理中', message=NULL WHERE id=?", (int(item_id),))
+        status, _staging_dir, _source_kind = _refresh_upload_job_progress(conn, job_id, seal=False)
+        conn.commit()
+        res = _upload_image_from_path_core(
+            conn=conn,
+            bg=None,
+            file_path=staged_path,
+            filename=str(row["filename"] or "upload"),
+            mime=(mimetypes.guess_type(str(row["filename"] or ""))[0] or "application/octet-stream"),
+            mtime_iso=str(row["mtime_iso"] or datetime.now(timezone.utc).isoformat()),
+            user_id=int(row["user_id"]),
+            username=str(row["username"] or ""),
+            ensure_derivatives=True,
+            derivative_kinds=("grid", "overlay"),
+        )
+        state_txt = "重複" if bool(res.get("dedup")) else "完了"
+        image_id = int(res.get("image_id") or 0) or None
+        msg = str(res.get("dedup_reason") or "") or None
+        conn.execute(
+            "UPDATE upload_zip_items SET state=?, image_id=?, message=? WHERE id=?",
+            (state_txt, image_id, msg, int(item_id)),
+        )
+        status, staging_dir, _source_kind = _refresh_upload_job_progress(conn, job_id, seal=False)
+        conn.commit()
+        if status == "done":
+            _cleanup_upload_staging_dir(staging_dir)
+    except Exception as e:
+        try:
+            conn.execute(
+                "UPDATE upload_zip_items SET state='失敗', image_id=NULL, message=? WHERE id=?",
+                (f"{type(e).__name__}: {e}"[:255], int(item_id)),
+            )
+            row2 = conn.execute("SELECT job_id FROM upload_zip_items WHERE id=?", (int(item_id),)).fetchone()
+            if row2:
+                status, staging_dir, _source_kind = _refresh_upload_job_progress(conn, int(row2["job_id"]), seal=False)
+            else:
+                status, staging_dir = "", ""
+            conn.commit()
+            if status == "done":
+                _cleanup_upload_staging_dir(staging_dir)
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        raise
+    finally:
+        conn.close()
+
 
 
 def _upload_image_from_path_core(
@@ -2694,46 +4277,40 @@ def _upload_image_from_path_core(
     ensure_derivatives: bool = True,
     derivative_kinds: tuple[str, ...] = ("grid", "overlay"),
 ) -> dict:
-    """Upload implementation for an already-extracted local file.
-
-    This avoids creating an extra per-image temp copy for metadata extraction.
-    Intended for zip jobs (extract-once -> parse from path).
-    """
     import hashlib
-    from PIL import Image
+    from PIL import Image, ImageOps
 
-    # sha256 + size (streaming)
-    h = hashlib.sha256()
-    total = 0
-    with open(file_path, "rb") as f:
-        while True:
-            b = f.read(1024 * 1024)
-            if not b:
-                break
-            total += len(b)
-            h.update(b)
-    sha = h.hexdigest()
+    raw = Path(file_path).read_bytes()
+    total = len(raw)
+    if total <= 0:
+        raise HTTPException(status_code=400, detail="empty file")
 
-    # dedup by binary
+    sha = hashlib.sha256(raw).hexdigest()
     row = conn.execute("SELECT id FROM images WHERE sha256=?", (sha,)).fetchone()
     if row:
-        return {"ok": True, "dedup": True, "image_id": row["id"]}
+        return {"ok": True, "dedup": True, "image_id": int(row["id"]), "dedup_reason": "binary"}
 
-    # basic image info
+    width = height = None
+    _fmt = ""
+    base_image = None
     try:
-        with Image.open(file_path) as im:
+        with Image.open(io.BytesIO(raw)) as im:
             width, height = im.size
             _fmt = (im.format or "").upper()
+            im.load()
+            transposed = ImageOps.exif_transpose(im)
+            transposed.load()
+            base_image = transposed.copy()
     except Exception:
         width = height = None
         _fmt = ""
+        base_image = None
 
     ext = (filename.rsplit(".", 1)[-1].lower() if "." in filename else "bin")
 
-    # metadata (NO temp copy)
     meta = None
     try:
-        meta = extract_novelai_metadata(file_path)
+        meta = extract_novelai_metadata_bytes(raw)
     except Exception:
         meta = None
 
@@ -2749,6 +4326,8 @@ def _upload_image_from_path_core(
     except Exception:
         seed = None
     params_json = json.dumps(meta.params, ensure_ascii=False) if (meta and meta.params) else None
+    character_entries, main_negative_combined_raw = build_prompt_view_payload(conn, prompt_neg, prompt_char, meta.params if meta else None)
+    character_entries_json = json.dumps(character_entries, ensure_ascii=False)
     potion_raw = json.dumps(meta.potion, ensure_ascii=False).encode("utf-8") if (meta and meta.potion) else None
     has_potion = 1 if potion_raw else 0
     metadata_raw = None
@@ -2758,7 +4337,6 @@ def _upload_image_from_path_core(
         except Exception:
             metadata_raw = None
 
-    # Full-meta dedup (same rule as _upload_image_core)
     full_meta_hash = None
     try:
         src = "\n".join(
@@ -2775,28 +4353,6 @@ def _upload_image_from_path_core(
     except Exception:
         full_meta_hash = None
 
-    if full_meta_hash:
-        row2 = conn.execute(
-            """
-            SELECT id FROM images
-            WHERE full_meta_hash = ?
-               OR (
-                    full_meta_hash IS NULL
-                AND software IS ?
-                AND model_name IS ?
-                AND prompt_positive_raw IS ?
-                AND prompt_negative_raw IS ?
-                AND prompt_character_raw IS ?
-                AND seed IS ?
-               )
-            LIMIT 1
-            """,
-            (full_meta_hash, software, model, prompt_pos, prompt_neg, prompt_char, seed),
-        ).fetchone()
-        if row2:
-            return {"ok": True, "dedup": True, "image_id": row2["id"], "dedup_reason": "full"}
-
-    # tags (same logic as _upload_image_core)
     parsed_tags = parse_tag_list(prompt_pos or "")
     parsed_char_tags = parse_tag_list(prompt_char or "")
     tag_rows = []
@@ -2815,7 +4371,6 @@ def _upload_image_from_path_core(
         group = _category_group(conn, canonical, cat)
         if for_signature:
             canonical_main.append(canonical)
-
         if canonical in {"nsfw", "explicit"}:
             is_nsfw = 1
         brace = int(t.brace_level or 0)
@@ -2829,6 +4384,11 @@ def _upload_image_from_path_core(
     for t in parsed_char_tags:
         _push_tag(t, for_signature=False, src_mask=2)
 
+    if not is_nsfw:
+        ptxt = (prompt_pos or "")
+        if ptxt and ("nsfw" in ptxt.lower()):
+            is_nsfw = 1
+
     sig = None
     dedup_flag = 1
     if canonical_main:
@@ -2840,16 +4400,17 @@ def _upload_image_from_path_core(
     cur = conn.execute(
         """
         INSERT INTO images(
-          sha256, original_filename, ext, mime, width, height, file_mtime_utc, uploader_user_id,
+          public_id, sha256, original_filename, ext, mime, width, height, file_mtime_utc, uploader_user_id,
           software, model_name, prompt_positive_raw, prompt_negative_raw, params_json,
-          prompt_character_raw,
+          prompt_character_raw, character_entries_json, main_negative_combined_raw,
           seed,
           potion_raw, has_potion, metadata_raw, main_sig_hash, dedup_flag
           , full_meta_hash
           , favorite, is_nsfw
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
+            _new_public_id(),
             sha,
             filename or "upload",
             ext,
@@ -2864,6 +4425,8 @@ def _upload_image_from_path_core(
             prompt_neg,
             params_json,
             prompt_char,
+            character_entries_json,
+            main_negative_combined_raw,
             seed,
             potion_raw,
             has_potion,
@@ -2877,7 +4440,6 @@ def _upload_image_from_path_core(
     )
     image_id = int(cur.lastrowid)
 
-    # Store original on disk by moving the extracted file into the originals directory.
     ORIGINALS_DIR.mkdir(parents=True, exist_ok=True)
     base = _safe_basename(filename or "upload")
     ext0 = (ext or "").strip(".").lower()
@@ -2899,8 +4461,6 @@ def _upload_image_from_path_core(
     try:
         os.replace(file_path, tmp)
     except Exception:
-        # Cross-device fallback
-        import shutil
         shutil.copyfile(file_path, tmp)
         try:
             os.remove(file_path)
@@ -2914,7 +4474,6 @@ def _upload_image_from_path_core(
         (image_id, disk_path, int(total)),
     )
 
-    # image_tags
     has_src_mask = _table_has_col(conn, "image_tags", "src_mask")
     has_seq = _table_has_col(conn, "image_tags", "seq")
     for (canonical, tag_text, tag_raw, cat, etype, brace, numw, group, src_mask, seq2) in _iter_tag_rows(tag_rows):
@@ -2964,7 +4523,6 @@ def _upload_image_from_path_core(
                 (image_id, canonical, tag_text, tag_raw, cat, etype, brace, numw),
             )
 
-    # tag stats
     uniq: dict[str, int | None] = {}
     for (canonical, _tag_text, _tag_raw, cat, _etype, _brace, _numw, _group, _src_mask, _seq) in _iter_tag_rows(tag_rows):
         if canonical not in uniq or (uniq[canonical] is None and cat is not None):
@@ -2972,23 +4530,41 @@ def _upload_image_from_path_core(
     for canonical, cat in uniq.items():
         stats_service.bump_tag(conn, canonical, cat)
 
-    # stats (creator/software/day)
     stats_service.bump_creator(conn, username)
     if software:
         stats_service.bump_software(conn, software)
+        stats_service.bump_creator_software(conn, int(user_id), software)
     if mtime_iso:
         ymd = mtime_iso[:10]
         stats_service.bump_day(conn, ymd)
         stats_service.bump_month(conn, ymd[:7])
         stats_service.bump_year(conn, ymd[:4])
+        stats_service.bump_creator_day(conn, int(user_id), ymd)
+        stats_service.bump_creator_month(conn, int(user_id), ymd[:7])
+        stats_service.bump_creator_year(conn, int(user_id), ymd[:4])
+
+    if ensure_derivatives and base_image is not None:
+        derivative_created_at_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        for kind, fmt, dw, dh, quality, blob in _build_derivative_rows_from_base_image(base_image, kinds=derivative_kinds):
+            _upsert_derivative_file(
+                conn,
+                image_id=int(image_id),
+                kind=kind,
+                fmt=fmt,
+                width=int(dw),
+                height=int(dh),
+                quality=int(quality),
+                raw=blob,
+                created_at_utc=derivative_created_at_utc,
+            )
 
     conn.commit()
 
-    if ensure_derivatives:
-        if bg is not None:
-            bg.add_task(_ensure_derivatives, image_id, derivative_kinds)
-        else:
-            _ensure_derivatives(image_id, derivative_kinds)
+    if base_image is not None:
+        try:
+            base_image.close()
+        except Exception:
+            pass
 
     return {"ok": True, "dedup": False, "image_id": image_id, "dedup_flag": dedup_flag}
 
@@ -3033,8 +4609,8 @@ async def upload_zip(
     conn = get_conn()
     try:
         cur = conn.execute(
-            "INSERT INTO upload_zip_jobs(user_id, filename, total, status) VALUES (?,?,?,?)",
-            (int(user["id"]), file.filename or "upload.zip", int(total), "queued"),
+            "INSERT INTO upload_zip_jobs(user_id, filename, source_kind, total, status, staging_dir) VALUES (?,?,?,?,?,?)",
+            (int(user["id"]), file.filename or "upload.zip", "zip", int(total), "queued", ""),
         )
         job_id = int(cur.lastrowid)
         conn.commit()
@@ -3194,8 +4770,8 @@ async def upload_zip_chunk_finish(
     conn = get_conn()
     try:
         cur = conn.execute(
-            "INSERT INTO upload_zip_jobs(user_id, filename, total, status) VALUES (?,?,?,?)",
-            (int(user["id"]), filename, int(total), "queued"),
+            "INSERT INTO upload_zip_jobs(user_id, filename, source_kind, total, status, staging_dir) VALUES (?,?,?,?,?,?)",
+            (int(user["id"]), filename, "zip", int(total), "queued", ""),
         )
         job_id = int(cur.lastrowid)
         conn.commit()
@@ -3209,49 +4785,183 @@ async def upload_zip_chunk_finish(
     return {"ok": True, "job_id": job_id, "total": int(total)}
 
 
-def _image_detail_summary(conn: sqlite3.Connection, iid: int, *, has_seq: bool | None = None) -> dict | None:
-    """Small summary for upload lists (chips) without pulling full detail payload."""
+class UploadBatchInitReq(BaseModel):
+    total: int = 0
+
+
+@api_router.post("/upload_batch/init")
+async def upload_batch_init(request: Request, user: dict = Depends(get_user)):
+    req = _validate_body_model(UploadBatchInitReq, await _read_json_body_loose(request))
+    requested_total = max(0, min(100000, int(req.total or 0)))
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "INSERT INTO upload_zip_jobs(user_id, filename, source_kind, total, status, staging_dir) VALUES (?,?,?,?,?,?)",
+            (int(user["id"]), "direct upload", "direct", int(requested_total), "collecting", ""),
+        )
+        job_id = int(cur.lastrowid)
+        staging_dir = _job_staging_dir(job_id)
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        conn.execute(
+            "UPDATE upload_zip_jobs SET staging_dir=?, updated_at_utc=datetime('now') WHERE id=?",
+            (str(staging_dir), int(job_id)),
+        )
+        conn.commit()
+        return {"ok": True, "job_id": job_id, "total": int(requested_total)}
+    finally:
+        conn.close()
+
+
+@api_router.post("/upload_batch/{job_id}/append")
+async def upload_batch_append(
+    job_id: int,
+    seq: int = Form(...),
+    file: UploadFile = File(...),
+    last_modified_ms: str | None = Form(default=None),
+    request: Request = None,
+    user: dict = Depends(get_user),
+):
+    seq_i = int(seq or 0)
+    if seq_i <= 0:
+        raise HTTPException(status_code=400, detail="invalid seq")
+
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT user_id, status, source_kind, staging_dir FROM upload_zip_jobs WHERE id=?",
+            (int(job_id),),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="not found")
+    if int(row["user_id"] or 0) != int(user["id"]):
+        raise HTTPException(status_code=403, detail="forbidden")
+    if str(row["source_kind"] or "zip") != "direct":
+        raise HTTPException(status_code=400, detail="not a direct upload job")
+    if str(row["status"] or "") != "collecting":
+        raise HTTPException(status_code=409, detail="upload closed")
+
+    safe_name = _safe_basename(file.filename or f"upload_{seq_i}")
+    if not _allowed_image_ext(safe_name):
+        raise HTTPException(status_code=400, detail="unsupported file type")
+
+    staging_dir = Path(str(row["staging_dir"] or "") or str(_job_staging_dir(job_id)))
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    dst = staging_dir / f"{seq_i:06d}_{safe_name}"
+    total = 0
+    with open(dst, "wb") as out:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            out.write(chunk)
+    if total <= 0:
+        try:
+            dst.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise HTTPException(status_code=400, detail="empty file")
+
+    try:
+        parsed = _parse_last_modified_ms(last_modified_ms)
+        if parsed:
+            ts = datetime.fromisoformat(parsed.replace('Z', '+00:00')).timestamp()
+            os.utime(dst, (ts, ts))
+    except Exception:
+        pass
+
+    _spawn_direct_upload_item_registration(
+        int(job_id),
+        int(seq_i),
+        str(safe_name),
+        str(dst),
+        trace_id=(getattr(request.state, "trace_id", None) if request is not None else None),
+    )
+    return {"ok": True, "seq": int(seq_i)}
+
+
+@api_router.post("/upload_batch/{job_id}/finish")
+def upload_batch_finish(job_id: int, user: dict = Depends(get_user)):
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT user_id, status, source_kind, staging_dir FROM upload_zip_jobs WHERE id=?",
+            (int(job_id),),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="not found")
+        if int(row["user_id"] or 0) != int(user["id"]):
+            raise HTTPException(status_code=403, detail="forbidden")
+        if str(row["source_kind"] or "zip") != "direct":
+            raise HTTPException(status_code=400, detail="not a direct upload job")
+        status = str(row["status"] or "")
+        if status in {"done", "error", "cancelled"}:
+            count = int(conn.execute("SELECT COUNT(*) AS n FROM upload_zip_items WHERE job_id=?", (int(job_id),)).fetchone()[0])
+            return {"ok": True, "job_id": int(job_id), "total": count, "status": status}
+
+        staging_dir = Path(str(row["staging_dir"] or "") or str(_job_staging_dir(job_id)))
+        count, item_ids = _sync_direct_upload_items(conn, int(job_id), staging_dir)
+        if count <= 0:
+            raise HTTPException(status_code=400, detail="no uploaded files")
+        status, _staging_dir, _source_kind = _refresh_upload_job_progress(conn, int(job_id), seal=True)
+        conn.execute(
+            "UPDATE upload_zip_jobs SET error=NULL, updated_at_utc=datetime('now') WHERE id=?",
+            (int(job_id),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    for item_id in item_ids:
+        try:
+            _queue_upload_item_request(int(item_id), source="direct_finish")
+        except Exception:
+            continue
+    return {"ok": True, "job_id": int(job_id), "total": int(count), "status": status or "queued"}
+
+
+def _image_detail_summary(conn: sqlite3.Connection, iid: int, *, user_id: int | None = None, has_seq: bool | None = None) -> dict | None:
+    """Small summary for upload responses; keep this cheap."""
     img = conn.execute(
-        """
-        SELECT images.id, images.software, images.favorite, images.is_nsfw,
-               users.username AS creator
-        FROM images
-        JOIN users ON users.id=images.uploader_user_id
-        WHERE images.id=?
-        """,
+        "SELECT id, software FROM images WHERE id=?",
         (int(iid),),
     ).fetchone()
     if not img:
         return None
-
-    if has_seq is None:
-        has_seq = _table_has_col(conn, "image_tags", "seq")
-
-    cols = "tag_canonical, category"
-    order_sql = " ORDER BY category ASC, tag_canonical ASC"
-    if has_seq:
-        cols = "tag_canonical, category, seq"
-        order_sql = " ORDER BY seq ASC, category ASC, tag_canonical ASC"
-
-    tags = conn.execute(
-        f"SELECT {cols} FROM image_tags WHERE image_id=?" + order_sql + " LIMIT 120",
-        (int(iid),),
-    ).fetchall()
-
-    grouped = {"artist": [], "quality": [], "character": [], "other": []}
-    for t in tags:
-        canonical = t["tag_canonical"]
-        cat = int(t["category"]) if t["category"] is not None else None
-        group = _category_group(conn, canonical, cat)
-        grouped[group].append({"canonical": canonical})
-
     return {
         "id": int(img["id"]),
         "software": img["software"],
-        "creator": img["creator"],
-        "favorite": int(img["favorite"] or 0),
-        "is_nsfw": int(img["is_nsfw"] or 0),
-        "tags": grouped,
+    }
+
+
+def _image_detail_summary_map(conn: sqlite3.Connection, ids: list[int] | tuple[int, ...]) -> dict[int, dict]:
+    clean_ids: list[int] = []
+    seen: set[int] = set()
+    for raw_iid in ids:
+        try:
+            iid = int(raw_iid)
+        except Exception:
+            continue
+        if iid <= 0 or iid in seen:
+            continue
+        seen.add(iid)
+        clean_ids.append(iid)
+    if not clean_ids:
+        return {}
+    placeholders = ",".join("?" for _ in clean_ids)
+    rows = conn.execute(
+        f"SELECT id, software FROM images WHERE id IN ({placeholders})",
+        clean_ids,
+    ).fetchall()
+    return {
+        int(row["id"]): {
+            "id": int(row["id"]),
+            "software": row["software"],
+        }
+        for row in rows
     }
 
 
@@ -3263,17 +4973,16 @@ def upload_zip_status(
     limit: int = 300,
     user: dict = Depends(get_user),
 ):
-    # Return incremental items since after_seq to avoid re-fetching the same list repeatedly.
     limit_i = int(limit or 0)
     if limit_i <= 0:
         limit_i = 300
-    if limit_i > 1000:
-        limit_i = 1000
+    if limit_i > 5000:
+        limit_i = 5000
 
     conn = get_conn()
     try:
         row = conn.execute(
-            "SELECT id, user_id, filename, total, done, failed, dup, status, error FROM upload_zip_jobs WHERE id=?",
+            "SELECT id, user_id, filename, source_kind, total, done, failed, dup, status, error FROM upload_zip_jobs WHERE id=?",
             (int(job_id),),
         ).fetchone()
         if not row:
@@ -3287,16 +4996,27 @@ def upload_zip_status(
         ).fetchone()
         latest_seq = int(latest_row["latest_seq"] or 0) if latest_row else 0
 
-        items = conn.execute(
-            "SELECT seq, filename, state, image_id, message FROM upload_zip_items WHERE job_id=? AND seq>? ORDER BY seq ASC LIMIT ?",
-            (int(job_id), int(after_seq or 0), int(limit_i)),
-        ).fetchall()
+        source_kind = str(row["source_kind"] or "zip")
+        if source_kind == "direct":
+            items = conn.execute(
+                "SELECT seq, filename, state, image_id, message FROM upload_zip_items WHERE job_id=? ORDER BY seq ASC LIMIT ?",
+                (int(job_id), int(limit_i)),
+            ).fetchall()
+        else:
+            items = conn.execute(
+                "SELECT seq, filename, state, image_id, message FROM upload_zip_items WHERE job_id=? AND seq>? ORDER BY seq ASC LIMIT ?",
+                (int(job_id), int(after_seq or 0), int(limit_i)),
+            ).fetchall()
 
-        has_seq = _table_has_col(conn, "image_tags", "seq")
+        detail_map = _image_detail_summary_map(
+            conn,
+            [int(r["image_id"]) for r in items if r["image_id"]],
+        )
 
         return {
             "job_id": int(row["id"]),
             "filename": row["filename"],
+            "source_kind": source_kind,
             "total": int(row["total"] or 0),
             "done": int(row["done"] or 0),
             "failed": int(row["failed"] or 0),
@@ -3311,8 +5031,8 @@ def upload_zip_status(
                     "state": r["state"],
                     "image_id": r["image_id"],
                     "message": r["message"],
-                    "thumb": (f"/api/images/{r['image_id']}/thumb?kind=grid&v={DERIV_VERSION}" if r["image_id"] else None),
-                    "detail": (_image_detail_summary(conn, int(r["image_id"]), has_seq=has_seq) if r["image_id"] else None),
+                    "thumb": None,
+                    "detail": (detail_map.get(int(r["image_id"])) if r["image_id"] else None),
                 }
                 for r in items
             ],
@@ -3324,79 +5044,87 @@ def upload_zip_status(
 @api_router.post("/upload_zip/{job_id}/cancel")
 def upload_zip_cancel(job_id: int, user: dict = Depends(get_user)):
     conn = get_conn()
+    staging_dir = None
     try:
-        row = conn.execute("SELECT user_id, status FROM upload_zip_jobs WHERE id=?", (int(job_id),)).fetchone()
+        row = conn.execute(
+            "SELECT user_id, status, source_kind, staging_dir FROM upload_zip_jobs WHERE id=?",
+            (int(job_id),),
+        ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="not found")
         if int(row["user_id"] or 0) != int(user["id"]):
             raise HTTPException(status_code=403, detail="forbidden")
         if row["status"] in {"done", "error"}:
             return {"ok": True, "status": row["status"]}
+        staging_dir = str(row["staging_dir"] or "")
         conn.execute(
             "UPDATE upload_zip_jobs SET status='cancelled', updated_at_utc=datetime('now') WHERE id=?",
             (int(job_id),),
         )
         conn.commit()
-        return {"ok": True, "status": "cancelled"}
     finally:
         conn.close()
 
+    if staging_dir and str(row["source_kind"] or "zip") == "direct":
+        try:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        except Exception:
+            pass
+    return {"ok": True, "status": "cancelled"}
+
+
+def _process_upload_job(job_id: int, user_id: int, username: str) -> None:
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT status FROM upload_zip_jobs WHERE id=?",
+            (int(job_id),),
+        ).fetchone()
+        if not row:
+            return
+        if str(row["status"] or "") == "cancelled":
+            return
+
+        rows = conn.execute(
+            "SELECT id FROM upload_zip_items WHERE job_id=? ORDER BY seq ASC",
+            (int(job_id),),
+        ).fetchall()
+        conn.execute(
+            "UPDATE upload_zip_jobs SET total=?, error=NULL, updated_at_utc=datetime('now') WHERE id=?",
+            (int(len(rows)), int(job_id)),
+        )
+        status, _staging_dir, _source_kind = _refresh_upload_job_progress(conn, int(job_id), seal=True)
+        conn.commit()
+    finally:
+        conn.close()
+
+    for r in rows:
+        _queue_upload_item_request(int(r["id"]), source="upload_zip")
 
 def _upload_zip_worker(job_id: int, zip_path: str, user_id: int, username: str) -> None:
     import zipfile
-    import mimetypes
-    import shutil
-    import tempfile
 
     conn = get_conn()
+    staging_dir = str(_job_staging_dir(job_id))
     try:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        Path(staging_dir).mkdir(parents=True, exist_ok=True)
         conn.execute(
-            "UPDATE upload_zip_jobs SET status='scanning', updated_at_utc=datetime('now') WHERE id=?",
-            (int(job_id),),
+            "UPDATE upload_zip_jobs SET status='scanning', staging_dir=?, total=0, done=0, failed=0, dup=0, error=NULL, updated_at_utc=datetime('now') WHERE id=?",
+            (staging_dir, int(job_id)),
         )
+        conn.execute("DELETE FROM upload_zip_items WHERE job_id=?", (int(job_id),))
         conn.commit()
 
-        done = failed = dup = 0
         seq = 0
-
         cancelled = False
-
-        # Extract all eligible images once, then parse from extracted paths.
-        # This prevents re-reading zip entries and avoids creating per-image temp copies for metadata extraction.
-        extract_dir = tempfile.mkdtemp(prefix="nim_zip_extract_")
-        extracted: list[tuple[str, str, str]] = []  # (path, basename, mtime_iso)
-
-        try:
-            with zipfile.ZipFile(zip_path, "r") as z:
-                for info in z.infolist():
-                    if info.is_dir():
-                        continue
-                    base = os.path.basename(info.filename or "")
-                    if not base or not _allowed_image_ext(base):
-                        continue
-                    # Avoid collisions and path traversal.
-                    safe_base = _safe_basename(base)
-                    dst = os.path.join(extract_dir, f"{len(extracted)+1:06d}_{safe_base}")
-                    with z.open(info, "r") as src, open(dst, "wb") as out:
-                        shutil.copyfileobj(src, out, length=1024 * 1024)
-                    try:
-                        mtime_iso = _zipinfo_mtime_iso(info)
-                    except Exception:
-                        mtime_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                    extracted.append((dst, safe_base, mtime_iso))
-
-            conn.execute(
-                "UPDATE upload_zip_jobs SET total=?, updated_at_utc=datetime('now') WHERE id=?",
-                (int(len(extracted)), int(job_id)),
-            )
-            conn.execute(
-                "UPDATE upload_zip_jobs SET status='running', updated_at_utc=datetime('now') WHERE id=?",
-                (int(job_id),),
-            )
-            conn.commit()
-
-            last_commit = 0
-            for (path, base, mtime_iso) in extracted:
+        with zipfile.ZipFile(zip_path, "r") as z:
+            for info in z.infolist():
+                if info.is_dir():
+                    continue
+                base = os.path.basename(info.filename or "")
+                if not base or not _allowed_image_ext(base):
+                    continue
                 if (seq % 50) == 0:
                     strow = conn.execute("SELECT status FROM upload_zip_jobs WHERE id=?", (int(job_id),)).fetchone()
                     if strow and str(strow["status"] or "") == "cancelled":
@@ -3404,62 +5132,38 @@ def _upload_zip_worker(job_id: int, zip_path: str, user_id: int, username: str) 
                         break
 
                 seq += 1
-                state_txt = "完了"
-                image_id = None
-                msg = None
+                safe_base = _safe_basename(base)
+                dst = Path(staging_dir) / f"{seq:06d}_{safe_base}"
+                with z.open(info, "r") as src, open(dst, "wb") as out:
+                    shutil.copyfileobj(src, out, length=1024 * 1024)
                 try:
-                    mime = mimetypes.guess_type(base)[0] or "application/octet-stream"
-                    res = _upload_image_from_path_core(
-                        conn=conn,
-                        bg=None,
-                        file_path=path,
-                        filename=base,
-                        mime=mime,
-                        mtime_iso=mtime_iso,
-                        user_id=int(user_id),
-                        username=str(username),
-                        ensure_derivatives=False,
-                    )
-                    if res.get("dedup"):
-                        state_txt = "重複"
-                        dup += 1
-                    else:
-                        done += 1
-                    image_id = res.get("image_id")
-                except Exception as e:
-                    state_txt = "失敗"
-                    failed += 1
-                    msg = f"{type(e).__name__}"
-
+                    mtime_iso = _zipinfo_mtime_iso(info)
+                except Exception:
+                    mtime_iso = datetime.now(timezone.utc).isoformat()
                 conn.execute(
-                    "INSERT INTO upload_zip_items(job_id, seq, filename, state, image_id, message) VALUES (?,?,?,?,?,?)",
-                    (int(job_id), int(seq), base, state_txt, image_id, msg),
+                    "INSERT INTO upload_zip_items(job_id, seq, filename, state, image_id, message, staged_path, mtime_iso) VALUES (?,?,?,?,?,?,?,?)",
+                    (int(job_id), int(seq), safe_base, "待機", None, None, str(dst), mtime_iso),
                 )
-
-                if (seq - last_commit) >= 10:
+                if (seq % 20) == 0:
                     conn.execute(
-                        "UPDATE upload_zip_jobs SET done=?, failed=?, dup=?, updated_at_utc=datetime('now') WHERE id=?",
-                        (int(done), int(failed), int(dup), int(job_id)),
+                        "UPDATE upload_zip_jobs SET total=?, updated_at_utc=datetime('now') WHERE id=?",
+                        (int(seq), int(job_id)),
                     )
                     conn.commit()
-                    last_commit = seq
 
+        if cancelled:
             conn.execute(
-                "UPDATE upload_zip_jobs SET done=?, failed=?, dup=?, updated_at_utc=datetime('now') WHERE id=?",
-                (int(done), int(failed), int(dup), int(job_id)),
+                "UPDATE upload_zip_jobs SET status='cancelled', updated_at_utc=datetime('now') WHERE id=?",
+                (int(job_id),),
             )
             conn.commit()
+            return
 
-            conn.execute(
-                "UPDATE upload_zip_jobs SET status=?, updated_at_utc=datetime('now') WHERE id=?",
-                ("cancelled" if cancelled else "done", int(job_id)),
-            )
-            conn.commit()
-        finally:
-            try:
-                shutil.rmtree(extract_dir, ignore_errors=True)
-            except Exception:
-                pass
+        conn.execute(
+            "UPDATE upload_zip_jobs SET total=?, status='queued', updated_at_utc=datetime('now') WHERE id=?",
+            (int(seq), int(job_id)),
+        )
+        conn.commit()
     except Exception as e:
         try:
             conn.execute(
@@ -3469,101 +5173,186 @@ def _upload_zip_worker(job_id: int, zip_path: str, user_id: int, username: str) 
             conn.commit()
         except Exception:
             pass
+        return
     finally:
         conn.close()
         try:
             os.remove(zip_path)
         except Exception:
             pass
-DERIV_VERSION = "18"
 
-def _ensure_derivatives(image_id: int, kinds: tuple[str, ...] = ("grid", "overlay")) -> None:
+    _process_upload_job(int(job_id), int(user_id), str(username))
+
+DERIV_VERSION = "19"
+
+
+def _process_derivative_job(image_id: int, kinds: tuple[str, ...], source: str | None = None, trace_id: str | None = None) -> None:
+    _ensure_derivatives(image_id, kinds, trigger=(source or "queue"), trace_id=trace_id)
+
+
+def _ensure_derivatives(
+    image_id: int,
+    kinds: tuple[str, ...] = ("grid", "overlay"),
+    *,
+    trigger: str = "direct",
+    trace_id: str | None = None,
+) -> None:
+    started = time.perf_counter()
     conn = get_conn()
+    per_kind: dict[str, dict] = {}
     try:
         src = _read_image_bytes(conn, image_id)
         if not src:
+            log_perf("ensure_derivatives", image_id=int(image_id), kinds=list(kinds), trigger=str(trigger or "direct"), trace_id=(trace_id or None), skipped="no_source", total_ms=round((time.perf_counter() - started) * 1000.0, 3))
             return
 
-        # Derivative policy
-        # - grid: *lossy* and small for list
-        # - overlay: higher quality for detail preview
-        targets = {
-            "grid": {"max_side": 320, "quality": 70},
-            "overlay": {"max_side": 1400, "quality": 82},
-        }
+        targets = DERIVATIVE_TARGETS
 
         def needs_refresh(kind: str, fmt: str) -> bool:
-            t = targets[kind]
+            if not _derivative_format_enabled(kind, fmt):
+                return False
             r = conn.execute(
-                "SELECT width, height, quality, bytes FROM image_derivatives WHERE image_id=? AND kind=? AND format=?",
+                "SELECT image_id, width, height, quality, disk_path, size, bytes FROM image_derivatives WHERE image_id=? AND kind=? AND format=?",
                 (image_id, kind, fmt),
             ).fetchone()
             if not r:
                 return True
-            try:
-                q = int(r["quality"] or 0)
-                w = int(r["width"] or 0)
-                h = int(r["height"] or 0)
-                b = r["bytes"]
-            except Exception:
-                return True
-            if isinstance(b, memoryview):
-                b = b.tobytes()
-            if not b or len(b) < 128:
-                return True
-            # quick container sanity (very light)
-            if fmt == "webp":
-                if not (b[:4] == b"RIFF" and b[8:12] == b"WEBP"):
-                    return True
-            if fmt == "avif":
-                if b[4:12] not in (b"ftypavif", b"ftypavis"):
-                    return True
-            if q != int(t["quality"]):
-                return True
-            if max(w, h) > int(t["max_side"]) + 2:
-                return True
-            return False
+            return not _derivative_row_is_ready(conn, r, kind=kind, fmt=fmt)
 
         do_avif = avif_available()
+        clean_kinds = _normalize_derivative_kinds(kinds)
+        need_any = False
+        refresh_map: dict[str, dict[str, bool]] = {}
+        for kind in clean_kinds:
+            refresh_map[kind] = {
+                "avif": bool(do_avif and needs_refresh(kind, "avif")),
+                "webp": bool(needs_refresh(kind, "webp")),
+            }
+            if refresh_map[kind]["avif"] or refresh_map[kind]["webp"]:
+                need_any = True
+        if not need_any:
+            log_perf(
+                "ensure_derivatives",
+                image_id=int(image_id),
+                kinds=list(clean_kinds),
+                trigger=str(trigger or "direct"),
+                trace_id=(trace_id or None),
+                avif_enabled=bool(do_avif),
+                per_kind={kind: {"avif_refresh": refresh_map[kind]["avif"], "webp_refresh": refresh_map[kind]["webp"], "duration_ms": 0.0} for kind in clean_kinds},
+                commit_ms=0.0,
+                total_ms=round((time.perf_counter() - started) * 1000.0, 3),
+            )
+            return
 
-        for kind in kinds:
-            max_side = int(targets[kind]["max_side"])
-            quality = int(targets[kind]["quality"])
-
-            # AVIF first (only when server supports encoding)
-            if do_avif:
+        base_image = decode_source_image(src)
+        try:
+            for kind in clean_kinds:
+                kind_started = time.perf_counter()
+                target = targets[kind]
+                kind_meta = {
+                    "max_side": int(target.max_side),
+                    "webp_quality": int(target.webp.quality),
+                    "webp_method": int(target.webp.method),
+                    "avif_quality": int(target.avif.quality),
+                    "avif_speed": int(target.avif.speed),
+                    "avif_codec": str(target.avif.codec),
+                    "avif_refresh": refresh_map[kind]["avif"],
+                    "webp_refresh": refresh_map[kind]["webp"],
+                    "avif_written": False,
+                    "webp_written": False,
+                    "avif_error": None,
+                    "webp_error": None,
+                }
+                if not (refresh_map[kind]["avif"] or refresh_map[kind]["webp"]):
+                    kind_meta["duration_ms"] = round((time.perf_counter() - kind_started) * 1000.0, 3)
+                    per_kind[kind] = kind_meta
+                    continue
+                variant = make_resized_variant(base_image, max_side=int(target.max_side))
+                derivative_created_at_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
                 try:
-                    if needs_refresh(kind, "avif"):
-                        b, w, h = make_avif_derivative(src, max_side=max_side, quality=quality)
-                        conn.execute(
-                            "INSERT OR REPLACE INTO image_derivatives(image_id, kind, format, width, height, quality, bytes) VALUES (?,?,?,?,?,?,?)",
-                            (image_id, kind, "avif", w, h, quality, b),
-                        )
-                except Exception:
-                    # If encode fails for some specific image, keep WEBP fallback.
-                    pass
-
-            # Always keep WEBP fallback
+                    width, height = int(variant.size[0]), int(variant.size[1])
+                    if refresh_map[kind]["avif"]:
+                        try:
+                            b = encode_avif_image(
+                                variant,
+                                quality=int(target.avif.quality),
+                                speed=int(target.avif.speed),
+                                codec=str(target.avif.codec),
+                                max_threads=int(target.avif.max_threads),
+                            )
+                            _upsert_derivative_file(
+                                conn,
+                                image_id=int(image_id),
+                                kind=kind,
+                                fmt="avif",
+                                width=width,
+                                height=height,
+                                quality=int(target.avif.quality),
+                                raw=b,
+                                created_at_utc=derivative_created_at_utc,
+                            )
+                            kind_meta["avif_written"] = True
+                        except Exception as exc:
+                            kind_meta["avif_error"] = exc.__class__.__name__
+                    if refresh_map[kind]["webp"]:
+                        try:
+                            b = encode_webp_image(
+                                variant,
+                                quality=int(target.webp.quality),
+                                method=int(target.webp.method),
+                                lossless=bool(target.webp.lossless),
+                                alpha_quality=int(target.webp.alpha_quality),
+                            )
+                            _upsert_derivative_file(
+                                conn,
+                                image_id=int(image_id),
+                                kind=kind,
+                                fmt="webp",
+                                width=width,
+                                height=height,
+                                quality=int(target.webp.quality),
+                                raw=b,
+                                created_at_utc=derivative_created_at_utc,
+                            )
+                            kind_meta["webp_written"] = True
+                        except Exception as exc:
+                            kind_meta["webp_error"] = exc.__class__.__name__
+                finally:
+                    try:
+                        variant.close()
+                    except Exception:
+                        pass
+                kind_meta["duration_ms"] = round((time.perf_counter() - kind_started) * 1000.0, 3)
+                per_kind[kind] = kind_meta
+        finally:
             try:
-                if needs_refresh(kind, "webp"):
-                    b, w, h = make_webp_derivative(src, max_side=max_side, quality=quality)
-                    conn.execute(
-                        "INSERT OR REPLACE INTO image_derivatives(image_id, kind, format, width, height, quality, bytes) VALUES (?,?,?,?,?,?,?)",
-                        (image_id, kind, "webp", w, h, quality, b),
-                    )
+                base_image.close()
             except Exception:
                 pass
 
+        commit_started = time.perf_counter()
         conn.commit()
+        commit_ms = round((time.perf_counter() - commit_started) * 1000.0, 3)
+        log_perf(
+            "ensure_derivatives",
+            image_id=int(image_id),
+            kinds=list(clean_kinds),
+            trigger=str(trigger or "direct"),
+            trace_id=(trace_id or None),
+            avif_enabled=bool(do_avif),
+            per_kind=per_kind,
+            commit_ms=commit_ms,
+            total_ms=round((time.perf_counter() - started) * 1000.0, 3),
+        )
     finally:
         conn.close()
 
 @api_router.get("/images")
-
 def list_images(
     creator: str | None = None,
     software: str | None = None,
     tags: str | None = None,  # comma-separated canonical tags
+    tags_not: str | None = None,  # comma-separated canonical tags to exclude
     date_from: str | None = None,  # YYYY-MM-DD
     date_to: str | None = None,    # YYYY-MM-DD
     dedup_only: int = 0,
@@ -3571,25 +5360,34 @@ def list_images(
     cursor: int | None = None,
     user: dict = Depends(get_user),
 ):
+    """Legacy cursor list (kept for older clients)."""
     limit = max(1, min(200, int(limit)))
     conn = get_conn()
     try:
+        uid = int(user["id"])
+
         creator_id: int | None = None
         if creator:
-            r = conn.execute("SELECT id FROM users WHERE username=?", (creator,)).fetchone()
+            r = _find_user_by_username(conn, creator, "id")
             if not r:
                 return {"items": [], "next_cursor": None}
             creator_id = int(r["id"])
 
         q = """
         SELECT images.id, images.width, images.height, images.file_mtime_utc, images.software, images.dedup_flag,
-               images.favorite, images.is_nsfw,
+               COALESCE(ubm.bm, 0) AS favorite, images.is_nsfw,
                users.username AS creator
         FROM images
         JOIN users ON users.id = images.uploader_user_id
+        LEFT JOIN (
+          SELECT DISTINCT b.image_id AS image_id, 1 AS bm
+          FROM bookmarks b
+          JOIN bookmark_lists bl ON bl.id=b.list_id
+          WHERE bl.user_id=?
+        ) ubm ON ubm.image_id = images.id
         """
-        where = []
-        params: list = []
+        where: list[str] = []
+        params: list = [uid]
 
         if creator_id is not None:
             where.append("images.uploader_user_id = ?")
@@ -3606,62 +5404,64 @@ def list_images(
         if dedup_only:
             where.append("images.dedup_flag = 1")
 
-        tag_list = []
+        tag_list: list[str] = []
+        tag_not_list: list[str] = []
         if tags:
-            tag_list = [normalize_tag(t) for t in tags.split(",") if t.strip()]
-        if tag_list:
-            # AND search: image must have all tags
-            # Use intersection by grouping
-            q += " JOIN image_tags ON image_tags.image_id = images.id "
-            where.append("image_tags.tag_canonical IN (%s)" % ",".join(["?"] * len(tag_list)))
-            params.extend(tag_list)
-            q += " "
+            tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+            tag_list = list(dict.fromkeys(tag_list))
+        if tags_not:
+            tag_not_list = [t.strip() for t in tags_not.split(",") if t.strip()]
+            tag_not_list = list(dict.fromkeys(tag_not_list))
+
+        _apply_tag_filters(conn, where, params, tag_list, tag_not_list, image_alias="images")
+
+        _append_visibility_filter(where, params, viewer=user)
 
         if where:
             q += " WHERE " + " AND ".join(where)
 
-        # pagination
         if cursor is not None:
             q += (" AND " if where else " WHERE ") + " images.id < ? "
             params.append(int(cursor))
-
-        q += " GROUP BY images.id "
-        if tag_list:
-            q += " HAVING COUNT(DISTINCT image_tags.tag_canonical) = ? "
-            params.append(len(set(tag_list)))
 
         q += " ORDER BY images.file_mtime_utc DESC, images.id DESC LIMIT ?"
         params.append(limit)
 
         rows = conn.execute(q, params).fetchall()
+        thumb_urls = _thumb_url_map(conn, [int(r["id"]) for r in rows], kind="grid")
         out = []
         for r in rows:
-            out.append({
-                "id": r["id"],
-                "w": r["width"],
-                "h": r["height"],
-                "mtime": r["file_mtime_utc"],
-                "software": r["software"],
-                "creator": r["creator"],
-                "dedup_flag": r["dedup_flag"],
-                "favorite": int(r["favorite"] or 0),
-                "is_nsfw": int(r["is_nsfw"] or 0),
-                "thumb": f"/api/images/{r['id']}/thumb?kind=grid&v={DERIV_VERSION}",
-            })
+            out.append(
+                {
+                    "id": r["id"],
+                    "w": r["width"],
+                    "h": r["height"],
+                    "mtime": r["file_mtime_utc"],
+                    "software": r["software"],
+                    "creator": r["creator"],
+                    "dedup_flag": r["dedup_flag"],
+                    "favorite": int(r["favorite"] or 0),
+                    "is_nsfw": int(r["is_nsfw"] or 0),
+                    "thumb": thumb_urls.get(int(r["id"]), _thumb_url(conn, int(r["id"]), kind="grid")),
+                }
+            )
         next_cursor = out[-1]["id"] if out else None
         return {"items": out, "next_cursor": next_cursor}
     finally:
         conn.close()
-
 
 @api_router.get("/images_page")
 def list_images_page(
     creator: str | None = None,
     software: str | None = None,
     tags: str | None = None,
+    tags_not: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
     dedup_only: int = 0,
+    bm_any: int = 0,
+    bm_list_id: int | None = None,
+    # backward-compat
     fav_only: int = 0,
     sort: str = "newest",
     page: int = 1,
@@ -3669,82 +5469,84 @@ def list_images_page(
     include_total: int = 1,
     user: dict = Depends(get_user),
 ):
-    """Offset-based paging for gallery UI.
-
-    Kept separate from /images (cursor) so older clients keep working.
-    """
+    """Offset-based paging for gallery UI."""
     limit = max(1, min(72, int(limit)))
     page = max(1, int(page))
     offset = (page - 1) * limit
 
-    sort_key = (sort or "newest").lower()
-    if sort_key not in {"newest", "oldest", "favorite"}:
-        sort_key = "newest"
-
-    tag_list: list[str] = []
-    if tags:
-        tag_list = [normalize_tag(t) for t in tags.split(",") if t.strip()]
-        tag_list = list(dict.fromkeys(tag_list))
+    filters = normalize_gallery_filters(
+        creator=creator,
+        software=software,
+        tags=tags,
+        tags_not=tags_not,
+        date_from=date_from,
+        date_to=date_to,
+        dedup_only=dedup_only,
+        bm_any=bm_any,
+        bm_list_id=bm_list_id,
+        fav_only=fav_only,
+        sort=sort,
+        normalize_tag=normalize_tag,
+    )
 
     conn = get_conn()
     try:
-        creator_id: int | None = None
-        if creator:
-            r = conn.execute("SELECT id FROM users WHERE username=?", (creator,)).fetchone()
-            if not r:
-                return {
-                    "items": [],
-                    "page": page,
-                    "limit": limit,
-                    "total_count": 0,
-                    "total_pages": 0,
-                    "sort": sort_key,
-                    "fav_only": int(1 if fav_only else 0),
-                }
-            creator_id = int(r["id"])
+        uid = int(user["id"])
+        filters.bm_list_id = normalize_bookmark_list_id(
+            conn,
+            viewer=user,
+            bm_list_id=filters.bm_list_id,
+            can_view_bookmark_list=lambda c, viewer, lid: _can_view_bookmark_list(c, viewer=viewer, list_id=lid),
+        )
 
+        creator_ok, creator_id = resolve_creator_id(conn, filters.creator)
+        if not creator_ok:
+            return {
+                "items": [],
+                "page": page,
+                "limit": limit,
+                "total_count": 0,
+                "total_pages": 0,
+                "sort": filters.sort_key,
+                "bm_any": int(filters.bm_any),
+                "bm_list_id": (int(filters.bm_list_id) if filters.bm_list_id is not None else None),
+            }
+
+        join_sql, join_params = build_user_bookmark_join(uid, filters.bm_list_id)
         where: list[str] = []
         params: list = []
-        if creator_id is not None:
-            where.append("images.uploader_user_id = ?")
-            params.append(creator_id)
-        if software:
-            where.append("images.software = ?")
-            params.append(software)
-        if date_from:
-            where.append("images.file_mtime_utc >= ?")
-            params.append(date_from)
-        if date_to:
-            try:
-                dt = datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1)
-                where.append("images.file_mtime_utc < ?")
-                params.append(dt.strftime("%Y-%m-%d"))
-            except Exception:
-                where.append("substr(images.file_mtime_utc,1,10) <= ?")
-                params.append(date_to)
-        if dedup_only:
-            where.append("images.dedup_flag = 1")
-        if fav_only:
-            where.append("images.favorite = 1")
-        for t in tag_list:
-            where.append("EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = images.id AND it.tag_canonical = ?)")
-            params.append(t)
+        apply_common_filters(
+            conn,
+            filters=filters,
+            creator_id=creator_id,
+            where=where,
+            params=params,
+            viewer=user,
+            apply_tag_filters=lambda c, w, p, tag_list, tag_not_list, image_alias: _apply_tag_filters(c, w, p, tag_list, tag_not_list, image_alias=image_alias),
+            append_visibility_filter=lambda w, p, viewer: _append_visibility_filter(w, p, viewer=viewer),
+        )
 
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""
-
-        if sort_key == "oldest":
+        fav_expr = "COALESCE(ubm.bm,0)"
+        if filters.sort_key == "oldest":
             order_sql = " ORDER BY images.file_mtime_utc ASC, images.id ASC "
-        elif sort_key == "favorite":
-            order_sql = " ORDER BY images.favorite DESC, images.file_mtime_utc DESC, images.id DESC "
+        elif filters.sort_key == "favorite":
+            order_sql = f" ORDER BY {fav_expr} DESC, images.file_mtime_utc DESC, images.id DESC "
         else:
             order_sql = " ORDER BY images.file_mtime_utc DESC, images.id DESC "
+
+        from_sql = (
+            " FROM images "
+            " JOIN users ON users.id = images.uploader_user_id "
+            + join_sql
+        )
 
         total = None
         total_pages = None
         if int(include_total):
             cnt_row = conn.execute(
-                "SELECT COUNT(*) AS n FROM images" + where_sql,
-                params,
+                "SELECT COUNT(*) AS n " + from_sql + where_sql,
+                join_params + params,
             ).fetchone()
             total = int(cnt_row["n"] if cnt_row else 0)
             total_pages = int(math.ceil(total / float(limit))) if total else 0
@@ -3752,30 +5554,34 @@ def list_images_page(
         rows = conn.execute(
             """
             SELECT images.id, images.width, images.height, images.file_mtime_utc, images.software, images.dedup_flag,
-                   images.favorite, images.is_nsfw,
+                   COALESCE(ubm.bm,0) AS favorite, images.is_nsfw,
                    users.username AS creator, images.original_filename AS filename
-            FROM images
-            JOIN users ON users.id = images.uploader_user_id
-            """ + where_sql +
-            order_sql + " LIMIT ? OFFSET ?",
-            params + [limit, offset],
+            """
+            + from_sql
+            + where_sql
+            + order_sql
+            + " LIMIT ? OFFSET ?",
+            join_params + params + [limit, offset],
         ).fetchall()
 
+        thumb_urls = _thumb_url_map(conn, [int(r["id"]) for r in rows], kind="grid")
         out = []
         for r in rows:
-            out.append({
-                "id": r["id"],
-                "w": r["width"],
-                "h": r["height"],
-                "mtime": r["file_mtime_utc"],
-                "software": r["software"],
-                "creator": r["creator"],
-                "filename": r["filename"],
-                "dedup_flag": r["dedup_flag"],
-                "favorite": int(r["favorite"] or 0),
-                "is_nsfw": int(r["is_nsfw"] or 0),
-                "thumb": f"/api/images/{r['id']}/thumb?kind=grid&v={DERIV_VERSION}",
-            })
+            out.append(
+                {
+                    "id": r["id"],
+                    "w": r["width"],
+                    "h": r["height"],
+                    "mtime": r["file_mtime_utc"],
+                    "software": r["software"],
+                    "creator": r["creator"],
+                    "filename": r["filename"],
+                    "dedup_flag": r["dedup_flag"],
+                    "favorite": int(r["favorite"] or 0),
+                    "is_nsfw": int(r["is_nsfw"] or 0),
+                    "thumb": thumb_urls.get(int(r["id"]), _thumb_url(conn, int(r["id"]), kind="grid")),
+                }
+            )
 
         return {
             "items": out,
@@ -3783,8 +5589,9 @@ def list_images_page(
             "limit": limit,
             "total_count": total,
             "total_pages": total_pages,
-            "sort": sort_key,
-            "fav_only": int(1 if fav_only else 0),
+            "sort": filters.sort_key,
+            "bm_any": int(filters.bm_any),
+            "bm_list_id": (int(filters.bm_list_id) if filters.bm_list_id is not None else None),
         }
     finally:
         conn.close()
@@ -3822,14 +5629,99 @@ def _make_scroll_cursor(sort_key: str, row: sqlite3.Row) -> str:
     return f"{mtime}|{iid}"
 
 
+def _append_visibility_filter(where: list[str], params: list, *, viewer: dict) -> None:
+    """Apply per-user visibility rule for images.
+
+    Rule (user role):
+    - always include own images
+    - include other users' images when creator has share_works=ON
+    - include other users' images when creator is registered in viewer's author list (user_creators)
+
+    Admin/master: see all.
+    """
+    role = str(viewer.get("role") or "user")
+    if role in {"admin", "master"}:
+        return
+    uid = int(viewer.get("id") or 0)
+    where.append(
+        "(images.uploader_user_id = ? "
+        "OR EXISTS(SELECT 1 FROM user_settings us WHERE us.user_id = images.uploader_user_id AND us.share_works = 1) "
+        "OR EXISTS(SELECT 1 FROM user_creators uc WHERE uc.user_id = ? AND uc.creator_user_id = images.uploader_user_id))"
+    )
+    params.extend([uid, uid])
+
+
+def _assert_image_visible(conn: sqlite3.Connection, *, image_id: int, viewer: dict) -> None:
+    """Raise 404 if viewer cannot see the image."""
+    role = str(viewer.get("role") or "user")
+    if role in {"admin", "master"}:
+        return
+    uid = int(viewer.get("id") or 0)
+    row = conn.execute("SELECT uploader_user_id FROM images WHERE id=?", (int(image_id),)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="not found")
+    creator_id = int(row["uploader_user_id"])
+    if creator_id == uid:
+        return
+    ok = conn.execute(
+        """
+        SELECT 1
+        WHERE EXISTS(SELECT 1 FROM user_settings us WHERE us.user_id=? AND us.share_works=1)
+           OR EXISTS(SELECT 1 FROM user_creators uc WHERE uc.user_id=? AND uc.creator_user_id=?)
+        """,
+        (creator_id, uid, creator_id),
+    ).fetchone()
+    if not ok:
+        raise HTTPException(status_code=404, detail="not found")
+
+
+def _can_view_bookmark_list(conn: sqlite3.Connection, *, viewer: dict, list_id: int) -> bool:
+    """Whether viewer can filter by the given bookmark list id."""
+    role = str(viewer.get("role") or "user")
+    if role in {"admin", "master"}:
+        return True
+
+    uid = int(viewer.get("id") or 0)
+    lid = int(list_id)
+
+    row = conn.execute(
+        "SELECT user_id FROM bookmark_lists WHERE id=?",
+        (lid,),
+    ).fetchone()
+    if not row:
+        return False
+    owner_id = int(row["user_id"])
+    if owner_id == uid:
+        return True
+
+    ok = conn.execute(
+        """
+        SELECT 1
+        FROM users u
+        LEFT JOIN user_settings us ON us.user_id=u.id
+        JOIN user_bookmark_creators sub ON sub.user_id=? AND sub.creator_user_id=u.id
+        WHERE u.id=?
+          AND COALESCE(us.share_bookmarks,0)=1
+          AND COALESCE(us.share_works,0)=1
+        LIMIT 1
+        """,
+        (uid, owner_id),
+    ).fetchone()
+    return bool(ok)
+
+
 @api_router.get("/images_scroll")
 def list_images_scroll(
     creator: str | None = None,
     software: str | None = None,
     tags: str | None = None,
+    tags_not: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
     dedup_only: int = 0,
+    bm_any: int = 0,
+    bm_list_id: int | None = None,
+    # backward-compat
     fav_only: int = 0,
     sort: str = "newest",
     # mobile-first: load in smaller chunks by default
@@ -3841,72 +5733,71 @@ def list_images_scroll(
     """Cursor-based list for gallery (includes total_count for UI)."""
     limit = max(1, min(120, int(limit)))
 
-    sort_key = (sort or "newest").lower()
-    if sort_key not in {"newest", "oldest", "favorite"}:
-        sort_key = "newest"
-
-    tag_list: list[str] = []
-    if tags:
-        tag_list = [normalize_tag(t) for t in tags.split(",") if t.strip()]
-        tag_list = list(dict.fromkeys(tag_list))
+    filters = normalize_gallery_filters(
+        creator=creator,
+        software=software,
+        tags=tags,
+        tags_not=tags_not,
+        date_from=date_from,
+        date_to=date_to,
+        dedup_only=dedup_only,
+        bm_any=bm_any,
+        bm_list_id=bm_list_id,
+        fav_only=fav_only,
+        sort=sort,
+        normalize_tag=normalize_tag,
+    )
 
     conn = get_conn()
     try:
-        creator_id: int | None = None
-        if creator:
-            r = conn.execute("SELECT id FROM users WHERE username=?", (creator,)).fetchone()
-            if not r:
-                return {
-                    "items": [],
-                    "next_cursor": None,
-                    "sort": sort_key,
-                    "fav_only": int(1 if fav_only else 0),
-                    "total_count": 0,
-                }
-            creator_id = int(r["id"])
+        uid = int(user["id"])
+        filters.bm_list_id = normalize_bookmark_list_id(
+            conn,
+            viewer=user,
+            bm_list_id=filters.bm_list_id,
+            can_view_bookmark_list=lambda c, viewer, lid: _can_view_bookmark_list(c, viewer=viewer, list_id=lid),
+        )
 
+        creator_ok, creator_id = resolve_creator_id(conn, filters.creator)
+        if not creator_ok:
+            return {
+                "items": [],
+                "next_cursor": None,
+                "sort": filters.sort_key,
+                "bm_any": int(filters.bm_any),
+                "bm_list_id": (int(filters.bm_list_id) if filters.bm_list_id is not None else None),
+                "total_count": 0,
+            }
+
+        join_sql, join_params = build_user_bookmark_join(uid, filters.bm_list_id)
         where: list[str] = []
         params: list = []
-        if creator_id is not None:
-            where.append("images.uploader_user_id = ?")
-            params.append(creator_id)
-        if software:
-            where.append("images.software = ?")
-            params.append(software)
-        if date_from:
-            where.append("images.file_mtime_utc >= ?")
-            params.append(date_from)
-        if date_to:
-            try:
-                dt = datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1)
-                where.append("images.file_mtime_utc < ?")
-                params.append(dt.strftime("%Y-%m-%d"))
-            except Exception:
-                where.append("substr(images.file_mtime_utc,1,10) <= ?")
-                params.append(date_to)
-        if dedup_only:
-            where.append("images.dedup_flag = 1")
-        if fav_only:
-            where.append("images.favorite = 1")
-        for t in tag_list:
-            where.append("EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = images.id AND it.tag_canonical = ?)")
-            params.append(t)
+        apply_common_filters(
+            conn,
+            filters=filters,
+            creator_id=creator_id,
+            where=where,
+            params=params,
+            viewer=user,
+            apply_tag_filters=lambda c, w, p, tag_list, tag_not_list, image_alias: _apply_tag_filters(c, w, p, tag_list, tag_not_list, image_alias=image_alias),
+            append_visibility_filter=lambda w, p, viewer: _append_visibility_filter(w, p, viewer=viewer),
+        )
 
-        # Save a copy *before* applying cursor constraints.
         where_base = list(where)
         params_base = list(params)
 
-        cur_tuple = _parse_scroll_cursor(sort_key, cursor)
+        fav_expr = "COALESCE(ubm.bm,0)"
+        cur_tuple = _parse_scroll_cursor(filters.sort_key, cursor)
         if cur_tuple is not None:
-            if sort_key == "oldest":
+            if filters.sort_key == "oldest":
                 where.append("(images.file_mtime_utc > ? OR (images.file_mtime_utc = ? AND images.id > ?))")
                 params.extend([cur_tuple[0], cur_tuple[0], cur_tuple[1]])
-            elif sort_key == "favorite":
+            elif filters.sort_key == "favorite":
                 fav, mtime, iid = cur_tuple
                 where.append(
-                    "(images.favorite < ? OR "
-                    "(images.favorite = ? AND images.file_mtime_utc < ?) OR "
-                    "(images.favorite = ? AND images.file_mtime_utc = ? AND images.id < ?))"
+                    f"({fav_expr} < ? OR "
+                    f"({fav_expr} = ? AND images.file_mtime_utc < ?) OR "
+                    f"({fav_expr} = ? AND images.file_mtime_utc = ? AND images.id < ?))"
                 )
                 params.extend([fav, fav, mtime, fav, mtime, iid])
             else:
@@ -3916,53 +5807,65 @@ def list_images_scroll(
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""
         where_sql_base = (" WHERE " + " AND ".join(where_base)) if where_base else ""
 
-        if sort_key == "oldest":
+        if filters.sort_key == "oldest":
             order_sql = " ORDER BY images.file_mtime_utc ASC, images.id ASC "
-        elif sort_key == "favorite":
-            order_sql = " ORDER BY images.favorite DESC, images.file_mtime_utc DESC, images.id DESC "
+        elif filters.sort_key == "favorite":
+            order_sql = f" ORDER BY {fav_expr} DESC, images.file_mtime_utc DESC, images.id DESC "
         else:
             order_sql = " ORDER BY images.file_mtime_utc DESC, images.id DESC "
+
+        from_sql = (
+            " FROM images "
+            " JOIN users ON users.id = images.uploader_user_id "
+            + join_sql
+        )
 
         total_count = None
         if int(include_total):
             total_count = conn.execute(
-                "SELECT COUNT(1) AS c FROM images" + where_sql_base,
-                params_base,
+                "SELECT COUNT(1) AS c " + from_sql + where_sql_base,
+                join_params + params_base,
             ).fetchone()[0]
 
         rows = conn.execute(
             """
             SELECT images.id, images.width, images.height, images.file_mtime_utc, images.software, images.dedup_flag,
-                   images.favorite, images.is_nsfw,
+                   COALESCE(ubm.bm,0) AS favorite, images.is_nsfw,
                    users.username AS creator, images.original_filename AS filename
-            FROM images
-            JOIN users ON users.id = images.uploader_user_id
-            """ + where_sql + order_sql + " LIMIT ?",
-            params + [limit],
+            """
+            + from_sql
+            + where_sql
+            + order_sql
+            + " LIMIT ?",
+            join_params + params + [limit],
         ).fetchall()
 
+        thumb_urls = _thumb_url_map(conn, [int(r["id"]) for r in rows], kind="grid")
         out = []
         for r in rows:
-            out.append({
-                "id": r["id"],
-                "w": r["width"],
-                "h": r["height"],
-                "mtime": r["file_mtime_utc"],
-                "software": r["software"],
-                "creator": r["creator"],
-                "filename": r["filename"],
-                "dedup_flag": r["dedup_flag"],
-                "favorite": int(r["favorite"] or 0),
-                "is_nsfw": int(r["is_nsfw"] or 0),
-                "thumb": f"/api/images/{r['id']}/thumb?kind=grid&v={DERIV_VERSION}",
-            })
+            out.append(
+                {
+                    "id": r["id"],
+                    "w": r["width"],
+                    "h": r["height"],
+                    "mtime": r["file_mtime_utc"],
+                    "software": r["software"],
+                    "creator": r["creator"],
+                    "filename": r["filename"],
+                    "dedup_flag": r["dedup_flag"],
+                    "favorite": int(r["favorite"] or 0),
+                    "is_nsfw": int(r["is_nsfw"] or 0),
+                    "thumb": thumb_urls.get(int(r["id"]), _thumb_url(conn, int(r["id"]), kind="grid")),
+                }
+            )
 
-        next_cursor = _make_scroll_cursor(sort_key, rows[-1]) if rows else None
+        next_cursor = _make_scroll_cursor(filters.sort_key, rows[-1]) if rows else None
         return {
             "items": out,
             "next_cursor": next_cursor,
-            "sort": sort_key,
-            "fav_only": int(1 if fav_only else 0),
+            "sort": filters.sort_key,
+            "bm_any": int(filters.bm_any),
+            "bm_list_id": (int(filters.bm_list_id) if filters.bm_list_id is not None else None),
             "total_count": (int(total_count) if total_count is not None else None),
         }
     finally:
@@ -3973,77 +5876,39 @@ def get_thumb(image_id: int, request: Request, kind: str = "grid", user: dict = 
     if kind not in {"grid", "overlay"}:
         raise HTTPException(status_code=400, detail="kind must be grid/overlay")
 
-    # Prefer AVIF when the browser supports it; fall back to WEBP.
     accept = (request.headers.get("accept") or "").lower()
     fmts = ["webp"]
-    if "image/avif" in accept and avif_available():
+    if "image/avif" in accept and _derivative_format_enabled(kind, "avif"):
         fmts = ["avif", "webp"]
-
-    # match _ensure_derivatives targets
-    targets = {
-        "grid": {"max_side": 320, "quality": 70},
-        "overlay": {"max_side": 1400, "quality": 82},
-    }
-
-    def row_needs_refresh(r, fmt: str) -> bool:
-        if not r:
-            return True
-        t = targets[kind]
-        try:
-            q = int(r["quality"] or 0)
-            w = int(r["width"] or 0)
-            h = int(r["height"] or 0)
-            b = r["bytes"]
-        except Exception:
-            return True
-        if isinstance(b, memoryview):
-            b = b.tobytes()
-        if not b or len(b) < 128:
-            return True
-        if fmt == "webp":
-            if not (b[:4] == b"RIFF" and b[8:12] == b"WEBP"):
-                return True
-        if fmt == "avif":
-            if b[4:12] not in (b"ftypavif", b"ftypavis"):
-                return True
-        if q != int(t["quality"]):
-            return True
-        if max(w, h) > int(t["max_side"]) + 2:
-            return True
-        return False
 
     conn = get_conn()
     try:
+        _assert_image_visible(conn, image_id=int(image_id), viewer=user)
         chosen = None
         chosen_fmt = None
 
-        # try preferred formats
         for fmt in fmts:
             row = conn.execute(
-                "SELECT format, width, height, quality, bytes, created_at_utc FROM image_derivatives WHERE image_id=? AND kind=? AND format=?",
+                "SELECT image_id, format, width, height, quality, disk_path, size, bytes, created_at_utc FROM image_derivatives WHERE image_id=? AND kind=? AND format=?",
                 (image_id, kind, fmt),
             ).fetchone()
-            if row_needs_refresh(row, fmt):
-                _ensure_derivatives(image_id, (kind,))
-                row = conn.execute(
-                    "SELECT format, width, height, quality, bytes, created_at_utc FROM image_derivatives WHERE image_id=? AND kind=? AND format=?",
-                    (image_id, kind, fmt),
-                ).fetchone()
-            if row and not row_needs_refresh(row, fmt):
+            if _derivative_row_is_ready(conn, row, kind=kind, fmt=fmt):
                 chosen = row
                 chosen_fmt = fmt
                 break
 
-        if not chosen:
+        if not chosen or not chosen_fmt:
             raise HTTPException(status_code=404, detail="thumb not ready")
 
-        b = chosen["bytes"]
-        if isinstance(b, memoryview):
-            b = b.tobytes()
+        disk_path = chosen["disk_path"]
+        if not disk_path or not os.path.exists(disk_path):
+            disk_path = _ensure_derivative_on_disk(conn, int(image_id), kind, chosen_fmt)
+            conn.commit()
+        if not disk_path or not os.path.exists(disk_path):
+            raise HTTPException(status_code=404, detail="thumb not ready")
 
         etag = f'W/"deriv-{image_id}-{kind}-{chosen_fmt}-{chosen["quality"]}-{chosen["width"]}x{chosen["height"]}-{chosen["created_at_utc"]}"'
         headers = {
-            # keep it cacheable but allow recovery from regeneration within a reasonable time
             "Cache-Control": "private, max-age=604800",
             "ETag": etag,
             "Vary": "Accept",
@@ -4053,10 +5918,9 @@ def get_thumb(image_id: int, request: Request, kind: str = "grid", user: dict = 
             return Response(status_code=304, headers=headers)
 
         mt = "image/webp" if chosen_fmt == "webp" else "image/avif"
-        return Response(content=b, media_type=mt, headers=headers)
+        return FileResponse(path=str(disk_path), media_type=mt, headers=headers)
     finally:
         conn.close()
-
 
 
 class PrefetchDerivativesReq(BaseModel):
@@ -4064,8 +5928,45 @@ class PrefetchDerivativesReq(BaseModel):
     kind: str = "overlay"  # overlay / grid / both
 
 
+class ClientPerfLogReq(BaseModel):
+    event: str = Field(default="client_perf", max_length=64)
+    trace_id: str | None = Field(default=None, max_length=128)
+    image_id: int | None = None
+    page: int | None = None
+    mode: str | None = Field(default=None, max_length=32)
+    source: str | None = Field(default=None, max_length=32)
+    fetch_ms: float | None = None
+    parse_ms: float | None = None
+    total_ms: float | None = None
+    note: str | None = Field(default=None, max_length=256)
+
+
+class ImageDetailsBatchReq(BaseModel):
+    ids: list[int] = []
+
+
+@api_router.post("/debug/perf")
+def debug_perf_log(req: ClientPerfLogReq, request: Request, user: dict = Depends(get_user)):
+    log_perf(
+        "client_perf",
+        trace_id=(req.trace_id or getattr(request.state, "trace_id", None)),
+        user_id=int(user["id"]) if user and user.get("id") is not None else None,
+        image_id=(int(req.image_id) if req.image_id else None),
+        page=(int(req.page) if req.page else None),
+        mode=(req.mode or None),
+        source=(req.source or None),
+        fetch_ms=(round(float(req.fetch_ms), 3) if req.fetch_ms is not None else None),
+        parse_ms=(round(float(req.parse_ms), 3) if req.parse_ms is not None else None),
+        total_ms=(round(float(req.total_ms), 3) if req.total_ms is not None else None),
+        note=(req.note or None),
+        ua=request.headers.get("user-agent") or None,
+    )
+    return {"ok": True}
+
+
 @api_router.post("/cache/prefetch_derivatives")
-def prefetch_derivatives(req: PrefetchDerivativesReq, bg: BackgroundTasks, user: dict = Depends(get_user)):
+def prefetch_derivatives(req: PrefetchDerivativesReq, bg: BackgroundTasks, request: Request, user: dict = Depends(get_user)):
+    started = time.perf_counter()
     kind = (req.kind or "overlay").lower()
     if kind not in {"overlay", "grid", "both"}:
         kind = "overlay"
@@ -4079,23 +5980,56 @@ def prefetch_derivatives(req: PrefetchDerivativesReq, bg: BackgroundTasks, user:
         except Exception:
             continue
 
-    # Keep it small: this runs in background tasks in the same process.
     ids = list(dict.fromkeys(ids))[:48]
+    kinds = ("grid", "overlay") if kind == "both" else (kind,)
+    trace_id = getattr(request.state, "trace_id", None) if request is not None else None
 
-    if kind == "both":
-        for iid in ids:
-            bg.add_task(_ensure_derivatives, iid)
-    else:
-        for iid in ids:
-            bg.add_task(_ensure_derivatives, iid, (kind,))
+    queued_ids: list[int] = []
+    skipped_ids: list[int] = []
+    for iid in ids:
+        try:
+            ok = _queue_derivative_request(
+                int(iid),
+                kinds,
+                source="prefetch",
+                trace_id=trace_id,
+            )
+        except sqlite3.OperationalError as exc:
+            skipped_ids.append(int(iid))
+            log_perf(
+                "prefetch_derivatives_enqueue_skipped",
+                trace_id=trace_id,
+                user_id=int(user["id"]) if user and user.get("id") is not None else None,
+                kind=kind,
+                image_id=int(iid),
+                error_type=exc.__class__.__name__,
+                error_message=str(exc),
+            )
+            continue
+        if ok:
+            queued_ids.append(int(iid))
+        else:
+            skipped_ids.append(int(iid))
 
-    return {"ok": True, "n": len(ids), "kind": kind}
+    log_perf(
+        "prefetch_derivatives_enqueue",
+        trace_id=trace_id,
+        user_id=int(user["id"]) if user and user.get("id") is not None else None,
+        kind=kind,
+        ids=queued_ids,
+        count=len(queued_ids),
+        skipped_ids=skipped_ids,
+        skipped_count=len(skipped_ids),
+        duration_ms=round((time.perf_counter() - started) * 1000.0, 3),
+    )
+    return {"ok": True, "n": len(queued_ids), "skipped": len(skipped_ids), "kind": kind}
 
 @api_router.get("/images/{image_id}/file")
 
 def download_original(image_id: int, request: Request, user: dict = Depends(get_user)):
     conn = get_conn()
     try:
+        _assert_image_visible(conn, image_id=int(image_id), viewer=user)
         row = conn.execute(
             "SELECT images.original_filename AS fn, images.mime AS mime, images.sha256 AS sha, image_files.disk_path AS p, image_files.bytes AS bytes "
             "FROM images JOIN image_files ON image_files.image_id=images.id WHERE images.id=?",
@@ -4138,6 +6072,7 @@ def view_original(image_id: int, user: dict = Depends(get_user)):
     """Inline view for full size image (useful for browser zoom)."""
     conn = get_conn()
     try:
+        _assert_image_visible(conn, image_id=int(image_id), viewer=user)
         row = conn.execute(
             "SELECT images.original_filename AS fn, images.mime AS mime, image_files.disk_path AS p, image_files.bytes AS bytes "
             "FROM images JOIN image_files ON image_files.image_id=images.id WHERE images.id=?",
@@ -4168,8 +6103,9 @@ def view_original(image_id: int, user: dict = Depends(get_user)):
 def download_metadata(image_id: int, user: dict = Depends(get_user)):
     conn = get_conn()
     try:
+        _assert_image_visible(conn, image_id=int(image_id), viewer=user)
         row = conn.execute(
-            "SELECT prompt_positive_raw, prompt_negative_raw, prompt_character_raw, params_json, software, model_name, metadata_raw, has_potion FROM images WHERE id=?",
+            "SELECT prompt_positive_raw, prompt_negative_raw, prompt_character_raw, character_entries_json, main_negative_combined_raw, params_json, software, model_name, metadata_raw, has_potion FROM images WHERE id=?",
             (image_id,),
         ).fetchone()
         if not row:
@@ -4180,6 +6116,8 @@ def download_metadata(image_id: int, user: dict = Depends(get_user)):
             "prompt_positive_raw": row["prompt_positive_raw"],
             "prompt_negative_raw": row["prompt_negative_raw"],
             "prompt_character_raw": row["prompt_character_raw"],
+            "character_entries": json.loads(row["character_entries_json"]) if row["character_entries_json"] else [],
+            "main_negative_combined_raw": row["main_negative_combined_raw"],
             "params": json.loads(row["params_json"]) if row["params_json"] else None,
             "metadata_raw": row["metadata_raw"],
             "has_potion": bool(row["has_potion"]),
@@ -4193,6 +6131,7 @@ def download_metadata(image_id: int, user: dict = Depends(get_user)):
 def download_potion(image_id: int, user: dict = Depends(get_user)):
     conn = get_conn()
     try:
+        _assert_image_visible(conn, image_id=int(image_id), viewer=user)
         row = conn.execute("SELECT potion_raw, has_potion FROM images WHERE id=?", (image_id,)).fetchone()
         if not row or int(row["has_potion"]) != 1:
             raise HTTPException(status_code=404, detail="no potion")
@@ -4201,37 +6140,165 @@ def download_potion(image_id: int, user: dict = Depends(get_user)):
     finally:
         conn.close()
 
-@api_router.get("/images/{image_id}/detail")
-def image_detail(image_id: int, user: dict = Depends(get_user)):
-    conn = get_conn()
-    try:
-        img = conn.execute(
-            """
-            SELECT images.*, users.username AS creator, COALESCE(image_files.size, LENGTH(image_files.bytes)) AS file_bytes
-            FROM images
-            JOIN users ON users.id=images.uploader_user_id
-            JOIN image_files ON image_files.image_id = images.id
-            WHERE images.id=?
-            """,
-            (image_id,),
-        ).fetchone()
-        if not img:
-            raise HTTPException(status_code=404, detail="not found")
-        has_seq = _table_has_col(conn, "image_tags", "seq")
-        cols = "tag_canonical, tag_text, tag_raw, category, emphasis_type, brace_level, numeric_weight"
-        if has_seq:
-            cols += ", seq"
-        order_sql = " ORDER BY category ASC, tag_canonical ASC"
-        if has_seq:
-            order_sql = " ORDER BY seq ASC, category ASC, tag_canonical ASC"
-        tags = conn.execute(
-            f"SELECT {cols} FROM image_tags WHERE image_id=?" + order_sql,
-            (image_id,),
-        ).fetchall()
 
-        # IMPORTANT: Display grouping must be **category-based**.
-        # Do NOT use src_mask (prompt origin) for UI classification.
+_GENERIC_CHARACTER_KEYS = {"girl", "girls", "boy", "boys", "1girl", "2girls", "3girls", "1boy", "2boys", "3boys"}
+
+
+def _parse_caption_lines_server(raw: str | None) -> list[str]:
+    from .services.prompt_view import parse_caption_lines
+    return parse_caption_lines(raw)
+
+
+def _extract_character_negative_prompt_raw(params_json_or_obj) -> str:
+    from .services.prompt_view import extract_character_negative_prompt_raw
+    return extract_character_negative_prompt_raw(params_json_or_obj)
+
+
+def _canonical_character_name_from_text(conn: sqlite3.Connection, text: str | None) -> str:
+    from .services.prompt_view import canonical_character_name_from_text
+    return canonical_character_name_from_text(conn, text)
+
+
+def _parse_character_entries_backend(conn: sqlite3.Connection, pos_raw: str | None, neg_raw: str | None) -> list[dict]:
+    from .services.prompt_view import parse_character_entries
+    return parse_character_entries(conn, pos_raw, neg_raw)
+
+
+def _build_prompt_view_payload(conn: sqlite3.Connection, prompt_negative_raw: str | None, prompt_character_raw: str | None, params_json_or_obj) -> tuple[list[dict], str]:
+    return build_prompt_view_payload(conn, prompt_negative_raw, prompt_character_raw, params_json_or_obj)
+
+
+def _parse_prompt_multiline_to_tag_objs(conn, raw: str | None) -> list[dict]:
+    return parse_prompt_multiline_to_tag_objs(conn, raw)
+
+
+def _normalize_detail_ids(values, *, limit: int = 64) -> list[int]:
+    ids: list[int] = []
+    seen: set[int] = set()
+    for x in (values or []):
+        try:
+            iid = int(x)
+        except Exception:
+            continue
+        if iid <= 0 or iid in seen:
+            continue
+        seen.add(iid)
+        ids.append(iid)
+        if len(ids) >= int(limit):
+            break
+    return ids
+
+
+def _get_visible_image_rows(conn: sqlite3.Connection, ids: list[int], viewer: dict) -> dict[int, sqlite3.Row]:
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    role = str(viewer.get("role") or "user")
+    if role in {"admin", "master"}:
+        sql = (
+            "SELECT images.*, users.username AS creator, COALESCE(image_files.size, LENGTH(image_files.bytes)) AS file_bytes "
+            "FROM images "
+            "JOIN users ON users.id=images.uploader_user_id "
+            "JOIN image_files ON image_files.image_id = images.id "
+            f"WHERE images.id IN ({placeholders})"
+        )
+        rows = conn.execute(sql, tuple(ids)).fetchall()
+        return {int(r["id"]): r for r in rows}
+
+    uid = int(viewer.get("id") or 0)
+    sql = (
+        "SELECT images.*, users.username AS creator, COALESCE(image_files.size, LENGTH(image_files.bytes)) AS file_bytes "
+        "FROM images "
+        "JOIN users ON users.id=images.uploader_user_id "
+        "JOIN image_files ON image_files.image_id = images.id "
+        f"WHERE images.id IN ({placeholders}) "
+        "AND (images.uploader_user_id=? "
+        "OR EXISTS(SELECT 1 FROM user_settings us WHERE us.user_id=images.uploader_user_id AND us.share_works=1) "
+        "OR EXISTS(SELECT 1 FROM user_creators uc WHERE uc.user_id=? AND uc.creator_user_id=images.uploader_user_id))"
+    )
+    rows = conn.execute(sql, tuple(ids) + (uid, uid)).fetchall()
+    return {int(r["id"]): r for r in rows}
+
+
+def _fetch_tags_by_image_ids(conn: sqlite3.Connection, ids: list[int]) -> tuple[dict[int, list[sqlite3.Row]], bool]:
+    if not ids:
+        return {}, _table_has_col(conn, "image_tags", "seq")
+    has_seq = _table_has_col(conn, "image_tags", "seq")
+    cols = "image_id, tag_canonical, tag_text, tag_raw, category, emphasis_type, brace_level, numeric_weight"
+    if has_seq:
+        cols += ", seq"
+    order_sql = " ORDER BY image_id ASC, category ASC, tag_canonical ASC"
+    if has_seq:
+        order_sql = " ORDER BY image_id ASC, seq ASC, category ASC, tag_canonical ASC"
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        f"SELECT {cols} FROM image_tags WHERE image_id IN ({placeholders})" + order_sql,
+        tuple(ids),
+    ).fetchall()
+    grouped: dict[int, list[sqlite3.Row]] = {}
+    for row in rows:
+        iid = int(row["image_id"])
+        grouped.setdefault(iid, []).append(row)
+    return grouped, has_seq
+
+
+def _fetch_favorite_ids(conn: sqlite3.Connection, user_id: int | None, ids: list[int]) -> set[int]:
+    if not ids or user_id is None:
+        return set()
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        "SELECT DISTINCT b.image_id "
+        "FROM bookmarks b "
+        "JOIN bookmark_lists bl ON bl.id=b.list_id "
+        f"WHERE bl.user_id=? AND b.image_id IN ({placeholders})",
+        (int(user_id), *ids),
+    ).fetchall()
+    return {int(r["image_id"]) for r in rows}
+
+
+def _build_image_detail_payloads(conn: sqlite3.Connection, ids: list[int], *, viewer: dict) -> tuple[dict[int, dict], dict]:
+    started = time.perf_counter()
+    id_list = _normalize_detail_ids(ids)
+    if not id_list:
+        return {}, {"count": 0, "total_ms": 0.0}
+
+    t0 = time.perf_counter()
+    image_rows = _get_visible_image_rows(conn, id_list, viewer)
+    visible_ms = round((time.perf_counter() - t0) * 1000.0, 3)
+    missing = [iid for iid in id_list if iid not in image_rows]
+    if missing:
+        raise HTTPException(status_code=404, detail="not found")
+
+    t0 = time.perf_counter()
+    tags_by_id, has_seq = _fetch_tags_by_image_ids(conn, id_list)
+    tag_query_ms = round((time.perf_counter() - t0) * 1000.0, 3)
+
+    t0 = time.perf_counter()
+    favorite_ids = _fetch_favorite_ids(conn, (int(viewer["id"]) if viewer and viewer.get("id") is not None else None), id_list)
+    favorite_ms = round((time.perf_counter() - t0) * 1000.0, 3)
+
+    grouped_tags_ms = 0.0
+    prompt_cache_ms = 0.0
+    uc_tags_ms = 0.0
+    payloads: dict[int, dict] = {}
+    prompt_cache_meta_by_id: dict[int, dict] = {}
+    tag_total = 0
+    cached_character_entries_count = 0
+    cached_main_negative_count = 0
+
+    for iid in id_list:
+        img = image_rows[iid]
+        cached_character_entries = bool(str(img["character_entries_json"] or "").strip())
+        cached_main_negative = bool(str(img["main_negative_combined_raw"] or "").strip())
+        if cached_character_entries:
+            cached_character_entries_count += 1
+        if cached_main_negative:
+            cached_main_negative_count += 1
+
+        t1 = time.perf_counter()
         grouped = {"artist": [], "quality": [], "character": [], "other": []}
+        tags = tags_by_id.get(iid, [])
+        tag_total += len(tags)
         for t in tags:
             canonical = t["tag_canonical"]
             cat = int(t["category"]) if t["category"] is not None else None
@@ -4244,9 +6311,29 @@ def image_detail(image_id: int, user: dict = Depends(get_user)):
                 "brace_level": t["brace_level"],
                 "numeric_weight": t["numeric_weight"],
             })
+        grouped_tags_ms += (time.perf_counter() - t1) * 1000.0
 
-        return {
+        t1 = time.perf_counter()
+        character_entries, main_negative_combined_raw, prompt_cache_meta = ensure_prompt_view_cache(
+            conn,
+            image_id=int(iid),
+            character_entries_json=img["character_entries_json"],
+            main_negative_combined_raw=img["main_negative_combined_raw"],
+            prompt_negative_raw=img["prompt_negative_raw"],
+            prompt_character_raw=img["prompt_character_raw"],
+            params_json_or_obj=img["params_json"],
+            return_meta=True,
+        )
+        prompt_cache_ms += (time.perf_counter() - t1) * 1000.0
+        prompt_cache_meta_by_id[iid] = prompt_cache_meta
+
+        t1 = time.perf_counter()
+        uc_tags = parse_prompt_multiline_to_tag_objs(conn, main_negative_combined_raw)
+        uc_tags_ms += (time.perf_counter() - t1) * 1000.0
+
+        payloads[iid] = {
             "id": img["id"],
+            "public_id": img["public_id"],
             "filename": img["original_filename"],
             "mime": img["mime"],
             "file_bytes": int(img["file_bytes"] or 0),
@@ -4258,46 +6345,489 @@ def image_detail(image_id: int, user: dict = Depends(get_user)):
             "model": img["model_name"],
             "creator": img["creator"],
             "dedup_flag": img["dedup_flag"],
-            "favorite": int(img["favorite"] or 0),
+            "favorite": 1 if iid in favorite_ids else 0,
             "is_nsfw": int(img["is_nsfw"] or 0),
             "prompt_positive_raw": img["prompt_positive_raw"],
             "prompt_negative_raw": img["prompt_negative_raw"],
             "prompt_character_raw": img["prompt_character_raw"],
+            "character_entries": character_entries,
+            "main_negative_combined_raw": main_negative_combined_raw,
             "params_json": img["params_json"],
             "has_potion": bool(img["has_potion"]),
             "tags": grouped,
-            "overlay": f"/api/images/{image_id}/thumb?kind=overlay&v={DERIV_VERSION}",
-            "view_full": f"/api/images/{image_id}/view",
-            "download_file": f"/api/images/{image_id}/file",
-            "download_meta": f"/api/images/{image_id}/metadata_json",
-            "download_potion": f"/api/images/{image_id}/potion",
+            "uc_tags": uc_tags,
+            "thumb": _thumb_url(conn, iid, kind="grid"),
+            "overlay": _thumb_url(conn, iid, kind="overlay"),
+            "view_full": f"/api/images/{iid}/view",
+            "download_file": f"/api/images/{iid}/file",
+            "download_meta": f"/api/images/{iid}/metadata_json",
+            "download_potion": f"/api/images/{iid}/potion",
+        }
+
+    metrics = {
+        "count": len(id_list),
+        "has_seq": has_seq,
+        "visible_ms": visible_ms,
+        "tag_query_ms": tag_query_ms,
+        "group_tags_ms": round(grouped_tags_ms, 3),
+        "prompt_cache_ms": round(prompt_cache_ms, 3),
+        "uc_tags_ms": round(uc_tags_ms, 3),
+        "favorite_ms": favorite_ms,
+        "tag_count": tag_total,
+        "cached_character_entries_count": cached_character_entries_count,
+        "cached_main_negative_count": cached_main_negative_count,
+        "prompt_cache_meta_by_id": prompt_cache_meta_by_id,
+        "total_ms": round((time.perf_counter() - started) * 1000.0, 3),
+    }
+    return payloads, metrics
+
+
+@api_router.get("/images/{image_id}/detail")
+def image_detail(image_id: int, request: Request, user: dict = Depends(get_user)):
+    trace_id = getattr(request.state, "trace_id", None)
+    conn = get_conn()
+    try:
+        payloads, metrics = _build_image_detail_payloads(conn, [int(image_id)], viewer=user)
+        payload = payloads.get(int(image_id))
+        if not payload:
+            raise HTTPException(status_code=404, detail="not found")
+        log_perf(
+            "image_detail_timing",
+            trace_id=trace_id,
+            user_id=int(user["id"]) if user and user.get("id") is not None else None,
+            image_id=int(image_id),
+            detail_source=request.headers.get("x-nim-detail-source") or None,
+            detail_page=request.headers.get("x-nim-detail-page") or None,
+            detail_mode=request.headers.get("x-nim-detail-mode") or None,
+            visible_ms=metrics.get("visible_ms"),
+            image_row_ms=metrics.get("visible_ms"),
+            tag_query_ms=metrics.get("tag_query_ms"),
+            group_tags_ms=metrics.get("group_tags_ms"),
+            prompt_cache_ms=metrics.get("prompt_cache_ms"),
+            uc_tags_ms=metrics.get("uc_tags_ms"),
+            favorite_ms=metrics.get("favorite_ms"),
+            total_ms=metrics.get("total_ms"),
+            tag_count=metrics.get("tag_count"),
+            cached_character_entries=bool(metrics.get("cached_character_entries_count")),
+            cached_main_negative=bool(metrics.get("cached_main_negative_count")),
+            prompt_cache_meta=(metrics.get("prompt_cache_meta_by_id") or {}).get(int(image_id)),
+        )
+        return payload
+    finally:
+        conn.close()
+
+
+@api_router.post("/images/details")
+async def images_detail_batch(request: Request, user: dict = Depends(get_user)):
+    data = await _read_json_body_loose(request)
+    req = _validate_body_model(ImageDetailsBatchReq, data)
+    ids = _normalize_detail_ids(req.ids, limit=64)
+    trace_id = getattr(request.state, "trace_id", None)
+    conn = get_conn()
+    try:
+        payloads, metrics = _build_image_detail_payloads(conn, ids, viewer=user)
+        log_perf(
+            "image_details_batch_timing",
+            trace_id=trace_id,
+            user_id=int(user["id"]) if user and user.get("id") is not None else None,
+            detail_source=request.headers.get("x-nim-detail-source") or None,
+            detail_page=request.headers.get("x-nim-detail-page") or None,
+            detail_mode=request.headers.get("x-nim-detail-mode") or None,
+            count=metrics.get("count"),
+            visible_ms=metrics.get("visible_ms"),
+            tag_query_ms=metrics.get("tag_query_ms"),
+            group_tags_ms=metrics.get("group_tags_ms"),
+            prompt_cache_ms=metrics.get("prompt_cache_ms"),
+            uc_tags_ms=metrics.get("uc_tags_ms"),
+            favorite_ms=metrics.get("favorite_ms"),
+            total_ms=metrics.get("total_ms"),
+            tag_count=metrics.get("tag_count"),
+            cached_character_entries_count=metrics.get("cached_character_entries_count"),
+            cached_main_negative_count=metrics.get("cached_main_negative_count"),
+        )
+        ordered = {str(iid): payloads[iid] for iid in ids if iid in payloads}
+        return {"items": ordered}
+    finally:
+        conn.close()
+
+
+
+class FavReq(BaseModel):
+    # Backward-compat: old clients send /images/{id}/favorite with toggle/favorite.
+    favorite: int | None = None
+    toggle: bool = False
+
+
+def _ensure_default_bookmark_list(conn: sqlite3.Connection, user_id: int) -> int:
+    """Ensure the user has a default bookmark list and return its id."""
+    uid = int(user_id)
+    row = conn.execute(
+        "SELECT id FROM bookmark_lists WHERE user_id=? AND is_default=1 ORDER BY id LIMIT 1",
+        (uid,),
+    ).fetchone()
+    if row:
+        return int(row["id"])
+
+    # If lists exist but default is missing, promote the first list.
+    row2 = conn.execute(
+        "SELECT id FROM bookmark_lists WHERE user_id=? ORDER BY sort_order ASC, id ASC LIMIT 1",
+        (uid,),
+    ).fetchone()
+    if row2:
+        lid = int(row2["id"])
+        conn.execute("UPDATE bookmark_lists SET is_default=1 WHERE id=?", (lid,))
+        conn.commit()
+        return lid
+
+    cur = conn.execute(
+        "INSERT INTO bookmark_lists(user_id, name, sort_order, is_default) VALUES (?,?,0,1)",
+        (uid, "ブックマークバー"),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def _list_bookmark_lists(conn: sqlite3.Connection, user_id: int) -> tuple[list[dict], int]:
+    uid = int(user_id)
+    rows = conn.execute(
+        """
+        SELECT bl.id, bl.name, bl.is_default, bl.sort_order,
+               COUNT(b.image_id) AS cnt
+        FROM bookmark_lists bl
+        LEFT JOIN bookmarks b ON b.list_id = bl.id
+        WHERE bl.user_id=?
+        GROUP BY bl.id
+        ORDER BY bl.is_default DESC, bl.sort_order ASC, bl.id ASC
+        """,
+        (uid,),
+    ).fetchall()
+
+    lists: list[dict] = []
+    for r in rows:
+        lists.append(
+            {
+                "id": int(r["id"]),
+                "name": str(r["name"] or ""),
+                "is_default": int(r["is_default"] or 0),
+                "count": int(r["cnt"] or 0),
+            }
+        )
+
+    any_row = conn.execute(
+        """
+        SELECT COUNT(DISTINCT b.image_id) AS n
+        FROM bookmarks b
+        JOIN bookmark_lists bl ON bl.id=b.list_id
+        WHERE bl.user_id=?
+        """,
+        (uid,),
+    ).fetchone()
+    any_count = int(any_row["n"] if any_row else 0)
+    return lists, any_count
+
+
+def _user_owns_bookmark_list(conn: sqlite3.Connection, user_id: int, list_id: int) -> bool:
+    uid = int(user_id)
+    lid = int(list_id)
+    r = conn.execute(
+        "SELECT 1 FROM bookmark_lists WHERE id=? AND user_id=?",
+        (lid, uid),
+    ).fetchone()
+    return bool(r)
+
+
+def _image_bookmarked(conn: sqlite3.Connection, user_id: int, image_id: int) -> int:
+    uid = int(user_id)
+    iid = int(image_id)
+    r = conn.execute(
+        """
+        SELECT 1
+        FROM bookmarks b
+        JOIN bookmark_lists bl ON bl.id=b.list_id
+        WHERE bl.user_id=? AND b.image_id=?
+        LIMIT 1
+        """,
+        (uid, iid),
+    ).fetchone()
+    return 1 if r else 0
+
+
+@api_router.get("/bookmarks/lists")
+def get_bookmark_lists(user: dict = Depends(get_user)):
+    conn = get_conn()
+    try:
+        uid = int(user["id"])
+        _ensure_default_bookmark_list(conn, uid)
+        lists, any_count = _list_bookmark_lists(conn, uid)
+        return {"lists": lists, "any_count": int(any_count)}
+    finally:
+        conn.close()
+
+
+class BookmarkListReq(BaseModel):
+    name: str = ""
+
+
+@api_router.post("/bookmarks/lists")
+def create_bookmark_list(req: BookmarkListReq, user: dict = Depends(get_user)):
+    name = str(req.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name required")
+    if len(name) > 80:
+        raise HTTPException(status_code=400, detail="name too long")
+
+    conn = get_conn()
+    try:
+        uid = int(user["id"])
+        _ensure_default_bookmark_list(conn, uid)
+        try:
+            cur = conn.execute(
+                "INSERT INTO bookmark_lists(user_id, name, sort_order, is_default) VALUES (?,?,0,0)",
+                (uid, name),
+            )
+            conn.commit()
+        except Exception:
+            # likely UNIQUE(user_id,name)
+            raise HTTPException(status_code=409, detail="name already exists")
+        lists, any_count = _list_bookmark_lists(conn, uid)
+        return {"ok": True, "list_id": int(cur.lastrowid), "lists": lists, "any_count": int(any_count)}
+    finally:
+        conn.close()
+
+
+@api_router.patch("/bookmarks/lists/{list_id}")
+def rename_bookmark_list(list_id: int, req: BookmarkListReq, user: dict = Depends(get_user)):
+    name = str(req.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name required")
+    if len(name) > 80:
+        raise HTTPException(status_code=400, detail="name too long")
+
+    conn = get_conn()
+    try:
+        uid = int(user["id"])
+        if not _user_owns_bookmark_list(conn, uid, int(list_id)):
+            raise HTTPException(status_code=404, detail="not found")
+        try:
+            conn.execute("UPDATE bookmark_lists SET name=? WHERE id=? AND user_id=?", (name, int(list_id), uid))
+            conn.commit()
+        except Exception:
+            raise HTTPException(status_code=409, detail="name already exists")
+        lists, any_count = _list_bookmark_lists(conn, uid)
+        return {"ok": True, "lists": lists, "any_count": int(any_count)}
+    finally:
+        conn.close()
+
+
+@api_router.delete("/bookmarks/lists/{list_id}")
+def delete_bookmark_list(list_id: int, user: dict = Depends(get_user)):
+    conn = get_conn()
+    try:
+        uid = int(user["id"])
+        r = conn.execute(
+            "SELECT is_default FROM bookmark_lists WHERE id=? AND user_id=?",
+            (int(list_id), uid),
+        ).fetchone()
+        if not r:
+            raise HTTPException(status_code=404, detail="not found")
+        if int(r["is_default"] or 0):
+            raise HTTPException(status_code=400, detail="cannot delete default list")
+        conn.execute("DELETE FROM bookmark_lists WHERE id=? AND user_id=?", (int(list_id), uid))
+        conn.commit()
+        lists, any_count = _list_bookmark_lists(conn, uid)
+        return {"ok": True, "lists": lists, "any_count": int(any_count)}
+    finally:
+        conn.close()
+
+
+@api_router.get("/bookmarks/images/{image_id}")
+def get_image_bookmarks(image_id: int, user: dict = Depends(get_user)):
+    conn = get_conn()
+    try:
+        uid = int(user["id"])
+        iid = int(image_id)
+
+        _assert_image_visible(conn, image_id=iid, viewer=user)
+
+        if not conn.execute("SELECT 1 FROM images WHERE id=?", (iid,)).fetchone():
+            raise HTTPException(status_code=404, detail="not found")
+
+        default_id = _ensure_default_bookmark_list(conn, uid)
+
+        lists, any_count = _list_bookmark_lists(conn, uid)
+        rows = conn.execute(
+            """
+            SELECT b.list_id
+            FROM bookmarks b
+            JOIN bookmark_lists bl ON bl.id=b.list_id
+            WHERE bl.user_id=? AND b.image_id=?
+            """,
+            (uid, iid),
+        ).fetchall()
+        checked = {int(r["list_id"]) for r in rows}
+
+        out_lists = []
+        for l in lists:
+            out_lists.append(
+                {
+                    "id": int(l["id"]),
+                    "name": str(l["name"] or ""),
+                    "is_default": int(l["is_default"] or 0),
+                    "checked": 1 if int(l["id"]) in checked else 0,
+                }
+            )
+
+        return {
+            "image_id": iid,
+            "default_list_id": int(default_id),
+            "favorite": 1 if checked else 0,
+            "lists": out_lists,
+            "any_count": int(any_count),
         }
     finally:
         conn.close()
 
 
-class FavReq(BaseModel):
-    favorite: int | None = None
-    toggle: bool = False
+class BookmarkSetReq(BaseModel):
+    list_ids: list[int] = Field(default_factory=list)
+
+
+@api_router.put("/bookmarks/images/{image_id}")
+def set_image_bookmarks(image_id: int, req: BookmarkSetReq, user: dict = Depends(get_user)):
+    conn = get_conn()
+    try:
+        uid = int(user["id"])
+        iid = int(image_id)
+
+        _assert_image_visible(conn, image_id=iid, viewer=user)
+
+        if not conn.execute("SELECT 1 FROM images WHERE id=?", (iid,)).fetchone():
+            raise HTTPException(status_code=404, detail="not found")
+
+        _ensure_default_bookmark_list(conn, uid)
+
+        # Keep only lists owned by the user.
+        wanted = _safe_int_list(req.list_ids, max_n=5000)
+        if wanted:
+            q = "SELECT id FROM bookmark_lists WHERE user_id=? AND id IN (" + ",".join(["?"] * len(wanted)) + ")"
+            rows = conn.execute(q, [uid] + wanted).fetchall()
+            allowed = {int(r["id"]) for r in rows}
+            wanted = [x for x in wanted if x in allowed]
+
+        # Clear current memberships for this user.
+        conn.execute(
+            """
+            DELETE FROM bookmarks
+            WHERE image_id=?
+              AND list_id IN (SELECT id FROM bookmark_lists WHERE user_id=?)
+            """,
+            (iid, uid),
+        )
+
+        # Insert new.
+        if wanted:
+            conn.executemany(
+                "INSERT OR IGNORE INTO bookmarks(list_id, image_id) VALUES (?,?)",
+                [(int(lid), iid) for lid in wanted],
+            )
+
+        conn.commit()
+        fav = _image_bookmarked(conn, uid, iid)
+        return {"ok": True, "favorite": int(fav), "list_ids": wanted}
+    finally:
+        conn.close()
+
+
+@api_router.post("/bookmarks/images/{image_id}/default")
+def add_default_bookmark(image_id: int, user: dict = Depends(get_user)):
+    conn = get_conn()
+    try:
+        uid = int(user["id"])
+        iid = int(image_id)
+        _assert_image_visible(conn, image_id=iid, viewer=user)
+        if not conn.execute("SELECT 1 FROM images WHERE id=?", (iid,)).fetchone():
+            raise HTTPException(status_code=404, detail="not found")
+        default_id = _ensure_default_bookmark_list(conn, uid)
+        conn.execute("INSERT OR IGNORE INTO bookmarks(list_id, image_id) VALUES (?,?)", (default_id, iid))
+        conn.commit()
+        return {"ok": True, "favorite": 1, "default_list_id": int(default_id)}
+    finally:
+        conn.close()
+
+
+@api_router.post("/bookmarks/images/{image_id}/clear")
+def clear_bookmarks_for_image(image_id: int, user: dict = Depends(get_user)):
+    conn = get_conn()
+    try:
+        uid = int(user["id"])
+        iid = int(image_id)
+        _assert_image_visible(conn, image_id=iid, viewer=user)
+        if not conn.execute("SELECT 1 FROM images WHERE id=?", (iid,)).fetchone():
+            raise HTTPException(status_code=404, detail="not found")
+        conn.execute(
+            """
+            DELETE FROM bookmarks
+            WHERE image_id=?
+              AND list_id IN (SELECT id FROM bookmark_lists WHERE user_id=?)
+            """,
+            (iid, uid),
+        )
+        conn.commit()
+        return {"ok": True, "favorite": 0}
+    finally:
+        conn.close()
 
 
 @api_router.post("/images/{image_id}/favorite")
 def set_favorite(image_id: int, req: FavReq, user: dict = Depends(get_user)):
+    """Compatibility endpoint. Now acts on *per-user* bookmarks.
+
+    - toggle: toggles between "bookmarked (default list)" and "not bookmarked (clear all)"
+    - favorite=1: add to default list
+    - favorite=0: clear from all lists
+    """
     conn = get_conn()
     try:
-        row = conn.execute("SELECT favorite FROM images WHERE id=?", (image_id,)).fetchone()
-        if not row:
+        uid = int(user["id"])
+        iid = int(image_id)
+        if not conn.execute("SELECT 1 FROM images WHERE id=?", (iid,)).fetchone():
             raise HTTPException(status_code=404, detail="not found")
-        cur = int(row["favorite"] or 0)
+
+        default_id = _ensure_default_bookmark_list(conn, uid)
+        cur = _image_bookmarked(conn, uid, iid)
+
         if req.toggle:
-            nxt = 0 if cur else 1
-        elif req.favorite is None:
-            nxt = cur
-        else:
-            nxt = 1 if int(req.favorite) else 0
-        conn.execute("UPDATE images SET favorite=? WHERE id=?", (nxt, image_id))
+            if cur:
+                conn.execute(
+                    """
+                    DELETE FROM bookmarks
+                    WHERE image_id=?
+                      AND list_id IN (SELECT id FROM bookmark_lists WHERE user_id=?)
+                    """,
+                    (iid, uid),
+                )
+                conn.commit()
+                return {"ok": True, "favorite": 0}
+            conn.execute("INSERT OR IGNORE INTO bookmarks(list_id, image_id) VALUES (?,?)", (default_id, iid))
+            conn.commit()
+            return {"ok": True, "favorite": 1, "default_list_id": int(default_id)}
+
+        if req.favorite is not None and int(req.favorite) == 0:
+            conn.execute(
+                """
+                DELETE FROM bookmarks
+                WHERE image_id=?
+                  AND list_id IN (SELECT id FROM bookmark_lists WHERE user_id=?)
+                """,
+                (iid, uid),
+            )
+            conn.commit()
+            return {"ok": True, "favorite": 0}
+
+        # default: add
+        conn.execute("INSERT OR IGNORE INTO bookmarks(list_id, image_id) VALUES (?,?)", (default_id, iid))
         conn.commit()
-        return {"ok": True, "favorite": nxt}
+        return {"ok": True, "favorite": 1, "default_list_id": int(default_id)}
     finally:
         conn.close()
 
@@ -4306,9 +6836,13 @@ class BulkDeleteQuery(BaseModel):
     creator: str = ""
     software: str = ""
     tags: list[str] = Field(default_factory=list)
+    tags_not: list[str] = Field(default_factory=list)
     date_from: str = ""   # YYYY-MM-DD
     date_to: str = ""     # YYYY-MM-DD
     dedup_only: int = 0
+    bm_any: int = 0
+    bm_list_id: int | None = None
+    # backward-compat
     fav_only: int = 0
 
 
@@ -4416,7 +6950,7 @@ def bulk_delete_images(req: BulkDeleteReq, user: dict = Depends(get_user)):
             if role == "user":
                 creator_id = user_id
             elif creator_username:
-                r = conn.execute("SELECT id FROM users WHERE username=?", (creator_username,)).fetchone()
+                r = _find_user_by_username(conn, creator_username, "id")
                 if not r:
                     return {"ok": True, "deleted": 0}
                 creator_id = int(r["id"])
@@ -4442,21 +6976,57 @@ def bulk_delete_images(req: BulkDeleteReq, user: dict = Depends(get_user)):
                     params.append(q.date_to)
             if int(q.dedup_only or 0):
                 where.append("images.dedup_flag = 1")
-            if int(q.fav_only or 0):
-                where.append("images.favorite = 1")
+            bm_any = int((getattr(q, "bm_any", 0) or 0) or (q.fav_only or 0) or 0)
+            bm_list_id = getattr(q, "bm_list_id", None)
+
+            # Bookmark filters are per-user (current session user).
+            if bm_list_id is not None:
+                try:
+                    lid = int(bm_list_id)
+                except Exception:
+                    lid = None
+                if lid:
+                    ok = conn.execute(
+                        "SELECT 1 FROM bookmark_lists WHERE id=? AND user_id=?",
+                        (lid, user_id),
+                    ).fetchone()
+                    if ok:
+                        where.append(
+                            "EXISTS(SELECT 1 FROM bookmarks b WHERE b.list_id = ? AND b.image_id = images.id)"
+                        )
+                        params.append(lid)
+            elif bm_any:
+                where.append(
+                    "EXISTS("
+                    "SELECT 1 FROM bookmarks b "
+                    "JOIN bookmark_lists bl ON bl.id=b.list_id "
+                    "WHERE bl.user_id = ? AND b.image_id = images.id"
+                    ")"
+                )
+                params.append(user_id)
+
 
             tag_list: list[str] = []
+            tag_not_list: list[str] = []
             if q.tags:
                 for t in q.tags:
                     tn = normalize_tag(str(t or ""))
                     if tn:
                         tag_list.append(tn)
                 tag_list = list(dict.fromkeys(tag_list))
-            for t in tag_list:
-                where.append(
-                    "EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = images.id AND it.tag_canonical = ?)"
-                )
-                params.append(t)
+
+            if q.tags_not:
+                for t in q.tags_not:
+                    tn = normalize_tag(str(t or ""))
+                    if tn:
+                        tag_not_list.append(tn)
+                tag_not_list = list(dict.fromkeys(tag_not_list))
+
+            if tag_list and tag_not_list:
+                inc = set(tag_list)
+                tag_not_list = [t for t in tag_not_list if t not in inc]
+
+            _apply_tag_filters(conn, where, params, tag_list, tag_not_list, image_alias="images")
 
             # Exclusions
             where.append("images.id NOT IN (SELECT id FROM tmp_excl)")
@@ -4483,6 +7053,14 @@ def bulk_delete_images(req: BulkDeleteReq, user: dict = Depends(get_user)):
             if p and str(p).strip():
                 disk_paths.append(str(p))
 
+        ddrows = conn.execute(
+            "SELECT image_derivatives.disk_path AS p FROM image_derivatives JOIN tmp_del_ids d ON d.id = image_derivatives.image_id"
+        ).fetchall()
+        for r in ddrows:
+            p = (r["p"] if not isinstance(r, tuple) else r[0])
+            if p and str(p).strip():
+                disk_paths.append(str(p))
+
         # touched sig hashes for incremental dedup recompute
         hrows = conn.execute(
             "SELECT DISTINCT images.main_sig_hash AS h FROM images JOIN tmp_del_ids d ON d.id = images.id "
@@ -4505,6 +7083,14 @@ def bulk_delete_images(req: BulkDeleteReq, user: dict = Depends(get_user)):
             "WHERE images.software IS NOT NULL AND TRIM(images.software) <> '' GROUP BY images.software"
         ).fetchall()
 
+        # per-creator software
+        c_softwares = conn.execute(
+            "SELECT images.uploader_user_id AS cid, images.software AS k, COUNT(*) AS c "
+            "FROM images JOIN tmp_del_ids d ON d.id = images.id "
+            "WHERE images.software IS NOT NULL AND TRIM(images.software) <> '' "
+            "GROUP BY images.uploader_user_id, images.software"
+        ).fetchall()
+
         # day/month/year
         days = conn.execute(
             "SELECT SUBSTR(images.file_mtime_utc,1,10) AS k, COUNT(*) AS c "
@@ -4523,6 +7109,26 @@ def bulk_delete_images(req: BulkDeleteReq, user: dict = Depends(get_user)):
             "FROM images JOIN tmp_del_ids d ON d.id = images.id "
             "WHERE images.file_mtime_utc IS NOT NULL AND LENGTH(images.file_mtime_utc) >= 4 "
             "GROUP BY SUBSTR(images.file_mtime_utc,1,4)"
+        ).fetchall()
+
+        # per-creator day/month/year for calendar
+        c_days = conn.execute(
+            "SELECT images.uploader_user_id AS cid, SUBSTR(images.file_mtime_utc,1,10) AS k, COUNT(*) AS c "
+            "FROM images JOIN tmp_del_ids d ON d.id = images.id "
+            "WHERE images.file_mtime_utc IS NOT NULL AND LENGTH(images.file_mtime_utc) >= 10 "
+            "GROUP BY images.uploader_user_id, SUBSTR(images.file_mtime_utc,1,10)"
+        ).fetchall()
+        c_months = conn.execute(
+            "SELECT images.uploader_user_id AS cid, SUBSTR(images.file_mtime_utc,1,7) AS k, COUNT(*) AS c "
+            "FROM images JOIN tmp_del_ids d ON d.id = images.id "
+            "WHERE images.file_mtime_utc IS NOT NULL AND LENGTH(images.file_mtime_utc) >= 7 "
+            "GROUP BY images.uploader_user_id, SUBSTR(images.file_mtime_utc,1,7)"
+        ).fetchall()
+        c_years = conn.execute(
+            "SELECT images.uploader_user_id AS cid, SUBSTR(images.file_mtime_utc,1,4) AS k, COUNT(*) AS c "
+            "FROM images JOIN tmp_del_ids d ON d.id = images.id "
+            "WHERE images.file_mtime_utc IS NOT NULL AND LENGTH(images.file_mtime_utc) >= 4 "
+            "GROUP BY images.uploader_user_id, SUBSTR(images.file_mtime_utc,1,4)"
         ).fetchall()
 
         # tags (distinct images per tag)
@@ -4546,6 +7152,19 @@ def bulk_delete_images(req: BulkDeleteReq, user: dict = Depends(get_user)):
             c = int(r["c"] if not isinstance(r, tuple) else r[1])
             _apply_bulk_dec(conn, "stat_software", "software", k, c)
 
+        for r in c_softwares:
+            cid = int(r["cid"] if not isinstance(r, tuple) else r[0])
+            k = str(r["k"] if not isinstance(r, tuple) else r[1])
+            c = int(r["c"] if not isinstance(r, tuple) else r[2])
+            conn.execute(
+                "UPDATE stat_creator_software SET image_count = image_count - ? WHERE creator_id=? AND software=?",
+                (c, cid, k),
+            )
+            conn.execute(
+                "DELETE FROM stat_creator_software WHERE creator_id=? AND software=? AND image_count <= 0",
+                (cid, k),
+            )
+
         for r in days:
             k = str(r["k"] if not isinstance(r, tuple) else r[0])
             c = int(r["c"] if not isinstance(r, tuple) else r[1])
@@ -4560,6 +7179,46 @@ def bulk_delete_images(req: BulkDeleteReq, user: dict = Depends(get_user)):
             k = str(r["k"] if not isinstance(r, tuple) else r[0])
             c = int(r["c"] if not isinstance(r, tuple) else r[1])
             _apply_bulk_dec(conn, "stat_year_counts", "year", k, c)
+
+        # per-creator calendar stats decrements
+        for r in c_days:
+            cid = int(r["cid"] if not isinstance(r, tuple) else r[0])
+            k = str(r["k"] if not isinstance(r, tuple) else r[1])
+            c = int(r["c"] if not isinstance(r, tuple) else r[2])
+            conn.execute(
+                "UPDATE stat_creator_day_counts SET image_count = image_count - ? WHERE creator_id=? AND ymd=?",
+                (c, cid, k),
+            )
+            conn.execute(
+                "DELETE FROM stat_creator_day_counts WHERE creator_id=? AND ymd=? AND image_count <= 0",
+                (cid, k),
+            )
+
+        for r in c_months:
+            cid = int(r["cid"] if not isinstance(r, tuple) else r[0])
+            k = str(r["k"] if not isinstance(r, tuple) else r[1])
+            c = int(r["c"] if not isinstance(r, tuple) else r[2])
+            conn.execute(
+                "UPDATE stat_creator_month_counts SET image_count = image_count - ? WHERE creator_id=? AND ym=?",
+                (c, cid, k),
+            )
+            conn.execute(
+                "DELETE FROM stat_creator_month_counts WHERE creator_id=? AND ym=? AND image_count <= 0",
+                (cid, k),
+            )
+
+        for r in c_years:
+            cid = int(r["cid"] if not isinstance(r, tuple) else r[0])
+            k = str(r["k"] if not isinstance(r, tuple) else r[1])
+            c = int(r["c"] if not isinstance(r, tuple) else r[2])
+            conn.execute(
+                "UPDATE stat_creator_year_counts SET image_count = image_count - ? WHERE creator_id=? AND year=?",
+                (c, cid, k),
+            )
+            conn.execute(
+                "DELETE FROM stat_creator_year_counts WHERE creator_id=? AND year=? AND image_count <= 0",
+                (cid, k),
+            )
 
         for r in tags:
             k = str(r["k"] if not isinstance(r, tuple) else r[0])

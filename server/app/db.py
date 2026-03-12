@@ -5,25 +5,49 @@ from pathlib import Path
 import sqlite3
 import gzip
 import csv
+import secrets
 from typing import Iterable, Optional
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT / "server" / "data"
 ASSETS_DIR = ROOT / "server" / "assets"
 
-# Store *original* uploaded images on disk (not in SQLite) to keep app.db small.
+# Store uploaded binaries on disk (not in SQLite) to keep app.db small.
 ORIGINALS_DIR = DATA_DIR / "originals"
+DERIVATIVES_DIR = DATA_DIR / "derivatives"
+PUBLIC_THUMBS_DIR = DATA_DIR / "public_thumbs"
 
 DB_PATH = DATA_DIR / "app.db"
+QUEUE_DB_PATH = DATA_DIR / "queue.db"
 
-def _connect() -> sqlite3.Connection:
+def _sqlite_busy_timeout_ms(*env_names: str) -> int:
+    for name in env_names:
+        raw = os.getenv(name)
+        if raw is None:
+            continue
+        try:
+            return max(0, int(raw or "0"))
+        except Exception:
+            continue
+    return 10000
+
+def _connect_path(path: Path, *, foreign_keys: bool = True, busy_timeout_envs: tuple[str, ...] = ("NAI_IM_SQLITE_BUSY_TIMEOUT_MS",)) -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
+    if foreign_keys:
+        conn.execute("PRAGMA foreign_keys = ON;")
     conn.execute("PRAGMA journal_mode = WAL;")
     conn.execute("PRAGMA synchronous = NORMAL;")
+    busy_timeout_ms = _sqlite_busy_timeout_ms(*busy_timeout_envs)
+    conn.execute(f"PRAGMA busy_timeout = {max(0, busy_timeout_ms)};")
     return conn
+
+def _connect() -> sqlite3.Connection:
+    return _connect_path(DB_PATH, foreign_keys=True, busy_timeout_envs=("NAI_IM_SQLITE_BUSY_TIMEOUT_MS",))
+
+def _connect_queue() -> sqlite3.Connection:
+    return _connect_path(QUEUE_DB_PATH, foreign_keys=False, busy_timeout_envs=("NAI_IM_QUEUE_SQLITE_BUSY_TIMEOUT_MS", "NAI_IM_SQLITE_BUSY_TIMEOUT_MS"))
 
 def init_db() -> None:
     conn = _connect()
@@ -37,6 +61,14 @@ def init_db() -> None:
         conn.commit()
     finally:
         conn.close()
+
+    qconn = _connect_queue()
+    try:
+        qconn.executescript(_QUEUE_SCHEMA_SQL)
+        migrate_queue_db(qconn)
+        qconn.commit()
+    finally:
+        qconn.close()
 
 
 def migrate_db(conn: sqlite3.Connection) -> None:
@@ -132,6 +164,7 @@ def migrate_db(conn: sqlite3.Connection) -> None:
                     CREATE TABLE IF NOT EXISTS users_new (
                       id                INTEGER PRIMARY KEY,
                       username          TEXT NOT NULL UNIQUE,
+                      username_norm     TEXT,
                       password_hash     TEXT NOT NULL,
                       role              TEXT NOT NULL CHECK(role IN ('master','admin','user')),
                       created_at        TEXT NOT NULL DEFAULT (datetime('now')),
@@ -154,8 +187,8 @@ def migrate_db(conn: sqlite3.Connection) -> None:
 
                 conn.execute(
                     f"""
-                    INSERT INTO users_new(id, username, password_hash, role, created_at, disabled, must_set_password, pw_set_at)
-                    SELECT {sel_id}, {sel_username}, {sel_ph},
+                    INSERT INTO users_new(id, username, username_norm, password_hash, role, created_at, disabled, must_set_password, pw_set_at)
+                    SELECT {sel_id}, {sel_username}, NULL, {sel_ph},
                            CASE WHEN {sel_role}='master' THEN 'master'
                                 WHEN {sel_role} IN ('admin','user') THEN {sel_role}
                                 ELSE 'user' END,
@@ -179,6 +212,32 @@ def migrate_db(conn: sqlite3.Connection) -> None:
     # Add new columns if the users table wasn't rebuilt.
     _ensure_col("users", "must_set_password", "must_set_password INTEGER NOT NULL DEFAULT 0")
     _ensure_col("users", "pw_set_at", "pw_set_at TEXT")
+    _ensure_col("users", "username_norm", "username_norm TEXT")
+
+    try:
+        import unicodedata
+
+        rows = conn.execute("SELECT id, username, username_norm FROM users").fetchall()
+        for r in rows:
+            username = str(r["username"] or "")
+            norm = unicodedata.normalize("NFKC", username).strip().casefold()
+            if str(r["username_norm"] or "") != norm:
+                conn.execute("UPDATE users SET username_norm=? WHERE id=?", (norm, int(r["id"])))
+
+        dup = conn.execute(
+            """
+            SELECT username_norm, COUNT(*) AS n
+            FROM users
+            WHERE username_norm IS NOT NULL AND TRIM(username_norm) <> ''
+            GROUP BY username_norm
+            HAVING COUNT(*) > 1
+            LIMIT 1
+            """
+        ).fetchone()
+        if not dup:
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_norm ON users(username_norm)")
+    except Exception:
+        pass
 
 
     # ---- Repair: foreign keys rewritten to users_old (caused by an earlier migration bug) ----
@@ -292,6 +351,54 @@ def migrate_db(conn: sqlite3.Connection) -> None:
     except Exception:
         pass
 
+    # ---- image_derivatives (move derivatives out of DB; allow disk_path) ----
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='image_derivatives'"
+        ).fetchone()
+        sql = (row["sql"] if row else "") or ""
+        # Old schema: image_derivatives(... bytes BLOB NOT NULL)
+        # New schema: disk_path/size, bytes optional (for migration only)
+        need_rebuild = False
+        if sql and "bytes" in sql.lower() and "disk_path" not in sql.lower():
+            need_rebuild = True
+        if sql and "blob not null" in sql.lower() and "bytes" in sql.lower():
+            need_rebuild = True
+
+        if need_rebuild:
+            conn.execute("ALTER TABLE image_derivatives RENAME TO image_derivatives_old")
+            conn.execute(
+                """
+                CREATE TABLE image_derivatives (
+                  id             INTEGER PRIMARY KEY,
+                  image_id       INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+                  kind           TEXT NOT NULL,
+                  format         TEXT NOT NULL,
+                  width          INTEGER NOT NULL,
+                  height         INTEGER NOT NULL,
+                  quality        INTEGER,
+                  disk_path      TEXT,
+                  size           INTEGER,
+                  bytes          BLOB,
+                  created_at_utc TEXT NOT NULL DEFAULT (datetime('now')),
+                  UNIQUE(image_id, kind, format)
+                );
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO image_derivatives(id, image_id, kind, format, width, height, quality, disk_path, size, bytes, created_at_utc)
+                SELECT id, image_id, kind, format, width, height, quality, NULL AS disk_path, LENGTH(bytes) AS size, bytes, created_at_utc
+                FROM image_derivatives_old;
+                """
+            )
+            conn.execute("DROP TABLE image_derivatives_old")
+    except Exception:
+        pass
+
+    _ensure_col("image_derivatives", "disk_path", "disk_path TEXT")
+    _ensure_col("image_derivatives", "size", "size INTEGER")
+
     # ---- image_tags columns ----
     _ensure_col("image_tags", "src_mask", "src_mask INTEGER NOT NULL DEFAULT 1")
     _ensure_col("image_tags", "seq", "seq INTEGER NOT NULL DEFAULT 0")
@@ -302,6 +409,8 @@ def migrate_db(conn: sqlite3.Connection) -> None:
     _ensure_col("images", "prompt_positive_raw", "prompt_positive_raw TEXT")
     _ensure_col("images", "prompt_negative_raw", "prompt_negative_raw TEXT")
     _ensure_col("images", "prompt_character_raw", "prompt_character_raw TEXT")
+    _ensure_col("images", "character_entries_json", "character_entries_json TEXT")
+    _ensure_col("images", "main_negative_combined_raw", "main_negative_combined_raw TEXT")
     _ensure_col("images", "seed", "seed INTEGER")
     _ensure_col("images", "params_json", "params_json TEXT")
     _ensure_col("images", "potion_raw", "potion_raw BLOB")
@@ -360,6 +469,33 @@ def migrate_db(conn: sqlite3.Connection) -> None:
     # ---- image_files columns (if table already existed) ----
     _ensure_col("image_files", "disk_path", "disk_path TEXT")
     _ensure_col("image_files", "size", "size INTEGER")
+    _ensure_col("upload_zip_jobs", "source_kind", "source_kind TEXT NOT NULL DEFAULT 'zip'")
+    _ensure_col("upload_zip_jobs", "staging_dir", "staging_dir TEXT")
+    _ensure_col("upload_zip_items", "staged_path", "staged_path TEXT")
+    _ensure_col("upload_zip_items", "mtime_iso", "mtime_iso TEXT")
+
+    # ---- images.public_id (external/public id for public grid thumbs) ----
+    _ensure_col("images", "public_id", "public_id TEXT")
+
+    try:
+        rows = conn.execute("SELECT id, public_id FROM images ORDER BY id").fetchall()
+        seen_public_ids: set[str] = set()
+
+        def _new_public_id() -> str:
+            while True:
+                candidate = secrets.token_hex(16)
+                if candidate not in seen_public_ids:
+                    return candidate
+
+        for row in rows:
+            raw_public_id = str(row["public_id"] or "").strip().lower()
+            needs_new = (not raw_public_id) or (raw_public_id in seen_public_ids)
+            if needs_new:
+                raw_public_id = _new_public_id()
+                conn.execute("UPDATE images SET public_id=? WHERE id=?", (raw_public_id, int(row["id"])))
+            seen_public_ids.add(raw_public_id)
+    except Exception:
+        pass
 
     # Keep file_mtime_utc usable for ordering (fallback to uploaded_at_utc if missing).
     try:
@@ -370,6 +506,51 @@ def migrate_db(conn: sqlite3.Connection) -> None:
             WHERE file_mtime_utc IS NULL OR TRIM(file_mtime_utc) = ''
             """
         )
+    except Exception:
+        pass
+
+    # ---- backfill per-creator calendar stats (best-effort, one-time) ----
+    # New tables introduced after existing installs already had stat_day/month/year.
+    # Populate them once if empty so the calendar works immediately.
+    try:
+        has_img = conn.execute("SELECT 1 FROM images LIMIT 1").fetchone()
+        if has_img:
+            cdn = int(conn.execute("SELECT COUNT(*) AS n FROM stat_creator_day_counts").fetchone()[0])
+            cmn = int(conn.execute("SELECT COUNT(*) AS n FROM stat_creator_month_counts").fetchone()[0])
+            cyn = int(conn.execute("SELECT COUNT(*) AS n FROM stat_creator_year_counts").fetchone()[0])
+            if cdn == 0:
+                conn.execute("DELETE FROM stat_creator_day_counts")
+                conn.execute(
+                    """
+                    INSERT INTO stat_creator_day_counts(creator_id, ymd, image_count)
+                    SELECT uploader_user_id AS creator_id, SUBSTR(file_mtime_utc,1,10) AS ymd, COUNT(*) AS image_count
+                    FROM images
+                    WHERE file_mtime_utc IS NOT NULL AND LENGTH(file_mtime_utc) >= 10
+                    GROUP BY uploader_user_id, SUBSTR(file_mtime_utc,1,10)
+                    """
+                )
+            if cmn == 0:
+                conn.execute("DELETE FROM stat_creator_month_counts")
+                conn.execute(
+                    """
+                    INSERT INTO stat_creator_month_counts(creator_id, ym, image_count)
+                    SELECT uploader_user_id AS creator_id, SUBSTR(file_mtime_utc,1,7) AS ym, COUNT(*) AS image_count
+                    FROM images
+                    WHERE file_mtime_utc IS NOT NULL AND LENGTH(file_mtime_utc) >= 7
+                    GROUP BY uploader_user_id, SUBSTR(file_mtime_utc,1,7)
+                    """
+                )
+            if cyn == 0:
+                conn.execute("DELETE FROM stat_creator_year_counts")
+                conn.execute(
+                    """
+                    INSERT INTO stat_creator_year_counts(creator_id, year, image_count)
+                    SELECT uploader_user_id AS creator_id, SUBSTR(file_mtime_utc,1,4) AS year, COUNT(*) AS image_count
+                    FROM images
+                    WHERE file_mtime_utc IS NOT NULL AND LENGTH(file_mtime_utc) >= 4
+                    GROUP BY uploader_user_id, SUBSTR(file_mtime_utc,1,4)
+                    """
+                )
     except Exception:
         pass
 
@@ -393,13 +574,50 @@ def migrate_db(conn: sqlite3.Connection) -> None:
     _ensure_index("idx_images_software_fav_mtime_id", "images", ["software", "favorite", "file_mtime_utc", "id"])
     _ensure_index("idx_images_uploader_fav_mtime_id", "images", ["uploader_user_id", "favorite", "file_mtime_utc", "id"])
     _ensure_index("idx_images_is_nsfw", "images", ["is_nsfw"])
+    try:
+        if _has_col("images", "public_id"):
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_images_public_id ON images(public_id)")
+    except Exception:
+        pass
     _ensure_index("idx_images_reparse_skip", "images", ["reparse_skip"])
+    # ---- bookmark tables ----
+    _ensure_index("idx_bookmark_lists_user", "bookmark_lists", ["user_id"])
+    _ensure_index("idx_bookmark_lists_user_default", "bookmark_lists", ["user_id", "is_default"])
+    _ensure_index("idx_bookmarks_list", "bookmarks", ["list_id"])
+    _ensure_index("idx_bookmarks_image", "bookmarks", ["image_id"])
+
+    # ---- per-user visibility/share + lists ----
+    _ensure_index("idx_user_settings_share_works", "user_settings", ["share_works"])
+    _ensure_index("idx_user_settings_share_bookmarks", "user_settings", ["share_bookmarks"])
+    _ensure_index("idx_user_creators_user", "user_creators", ["user_id"])
+    _ensure_index("idx_user_creators_creator", "user_creators", ["creator_user_id"])
+    _ensure_index("idx_user_bm_creators_user", "user_bookmark_creators", ["user_id"])
+    _ensure_index("idx_user_bm_creators_creator", "user_bookmark_creators", ["creator_user_id"])
+
+    # ---- per-creator date stats ----
+    _ensure_index("idx_stat_cday_ymd", "stat_creator_day_counts", ["ymd"])
+    _ensure_index("idx_stat_cmonth_ym", "stat_creator_month_counts", ["ym"])
+    _ensure_index("idx_stat_cyear_year", "stat_creator_year_counts", ["year"])
+
+    # ---- per-creator software stats ----
+    _ensure_index("idx_stat_csoft_creator", "stat_creator_software", ["creator_id"])
+    _ensure_index("idx_stat_csoft_software", "stat_creator_software", ["software"])
+
 
     try:
         if conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='image_derivatives'"
         ).fetchone():
             conn.execute("CREATE INDEX IF NOT EXISTS idx_deriv_kind ON image_derivatives(kind);")
+    except Exception:
+        pass
+
+    try:
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='derivative_jobs'"
+        ).fetchone():
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_derivative_jobs_status_requested ON derivative_jobs(status, requested_at_utc);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_derivative_jobs_requested ON derivative_jobs(requested_at_utc);")
     except Exception:
         pass
 
@@ -423,8 +641,101 @@ def migrate_db(conn: sqlite3.Connection) -> None:
     except Exception:
         pass
 
+
+_QUEUE_SCHEMA_SQL = r"""
+CREATE TABLE IF NOT EXISTS derivative_jobs (
+  image_id          INTEGER PRIMARY KEY,
+  need_grid         INTEGER NOT NULL DEFAULT 0,
+  need_overlay      INTEGER NOT NULL DEFAULT 0,
+  status            TEXT NOT NULL DEFAULT 'queued',
+  requested_at_utc  TEXT NOT NULL DEFAULT (datetime('now')),
+  started_at_utc    TEXT,
+  finished_at_utc   TEXT,
+  last_error        TEXT,
+  retry_count       INTEGER NOT NULL DEFAULT 0,
+  request_count     INTEGER NOT NULL DEFAULT 0,
+  last_source       TEXT,
+  last_trace_id     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_derivative_jobs_status_requested ON derivative_jobs(status, requested_at_utc);
+CREATE INDEX IF NOT EXISTS idx_derivative_jobs_requested ON derivative_jobs(requested_at_utc);
+
+CREATE TABLE IF NOT EXISTS upload_item_jobs (
+  item_id           INTEGER PRIMARY KEY,
+  status            TEXT NOT NULL DEFAULT 'queued',
+  requested_at_utc  TEXT NOT NULL DEFAULT (datetime('now')),
+  started_at_utc    TEXT,
+  finished_at_utc   TEXT,
+  last_error        TEXT,
+  retry_count       INTEGER NOT NULL DEFAULT 0,
+  request_count     INTEGER NOT NULL DEFAULT 0,
+  last_source       TEXT,
+  last_trace_id     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_upload_item_jobs_status_requested ON upload_item_jobs(status, requested_at_utc);
+CREATE INDEX IF NOT EXISTS idx_upload_item_jobs_requested ON upload_item_jobs(requested_at_utc);
+"""
+
+def migrate_queue_db(conn: sqlite3.Connection) -> None:
+    def _cols(table: str) -> set[str]:
+        try:
+            return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        except Exception:
+            return set()
+
+    def _has_col(table: str, col: str) -> bool:
+        return col in _cols(table)
+
+    def _ensure_col(table: str, col: str, ddl: str) -> None:
+        try:
+            if not _has_col(table, col):
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+        except Exception:
+            return
+
+    for name, ddl in (
+        ("need_grid", "need_grid INTEGER NOT NULL DEFAULT 0"),
+        ("need_overlay", "need_overlay INTEGER NOT NULL DEFAULT 0"),
+        ("status", "status TEXT NOT NULL DEFAULT 'queued'"),
+        ("requested_at_utc", "requested_at_utc TEXT NOT NULL DEFAULT (datetime('now'))"),
+        ("started_at_utc", "started_at_utc TEXT"),
+        ("finished_at_utc", "finished_at_utc TEXT"),
+        ("last_error", "last_error TEXT"),
+        ("retry_count", "retry_count INTEGER NOT NULL DEFAULT 0"),
+        ("request_count", "request_count INTEGER NOT NULL DEFAULT 0"),
+        ("last_source", "last_source TEXT"),
+        ("last_trace_id", "last_trace_id TEXT"),
+    ):
+        _ensure_col("derivative_jobs", name, ddl)
+
+    for name, ddl in (
+        ("status", "status TEXT NOT NULL DEFAULT 'queued'"),
+        ("requested_at_utc", "requested_at_utc TEXT NOT NULL DEFAULT (datetime('now'))"),
+        ("started_at_utc", "started_at_utc TEXT"),
+        ("finished_at_utc", "finished_at_utc TEXT"),
+        ("last_error", "last_error TEXT"),
+        ("retry_count", "retry_count INTEGER NOT NULL DEFAULT 0"),
+        ("request_count", "request_count INTEGER NOT NULL DEFAULT 0"),
+        ("last_source", "last_source TEXT"),
+        ("last_trace_id", "last_trace_id TEXT"),
+    ):
+        _ensure_col("upload_item_jobs", name, ddl)
+
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_derivative_jobs_status_requested ON derivative_jobs(status, requested_at_utc)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_derivative_jobs_requested ON derivative_jobs(requested_at_utc)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_upload_item_jobs_status_requested ON upload_item_jobs(status, requested_at_utc)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_upload_item_jobs_requested ON upload_item_jobs(requested_at_utc)")
+    except Exception:
+        pass
+
 def get_conn() -> sqlite3.Connection:
     return _connect()
+
+def get_queue_conn() -> sqlite3.Connection:
+    return _connect_queue()
 
 def ensure_bootstrap() -> None:
     """Initial bootstrap:
@@ -674,6 +985,7 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS users (
   id            INTEGER PRIMARY KEY,
   username      TEXT NOT NULL UNIQUE,
+  username_norm TEXT,
   password_hash TEXT NOT NULL,
   role          TEXT NOT NULL CHECK(role IN ('master','admin','user')),
   created_at    TEXT NOT NULL DEFAULT (datetime('now')),
@@ -694,6 +1006,7 @@ CREATE TABLE IF NOT EXISTS password_tokens (
 
 CREATE TABLE IF NOT EXISTS images (
   id                    INTEGER PRIMARY KEY,
+  public_id             TEXT NOT NULL UNIQUE,
   sha256                TEXT NOT NULL UNIQUE,
   original_filename     TEXT NOT NULL,
   ext                   TEXT NOT NULL,
@@ -710,6 +1023,8 @@ CREATE TABLE IF NOT EXISTS images (
   prompt_positive_raw   TEXT,
   prompt_negative_raw   TEXT,
   prompt_character_raw  TEXT,
+  character_entries_json TEXT,
+  main_negative_combined_raw TEXT,
   seed                  INTEGER,
   params_json           TEXT,
   potion_raw            BLOB,
@@ -722,6 +1037,51 @@ CREATE TABLE IF NOT EXISTS images (
   favorite              INTEGER NOT NULL DEFAULT 0,
   is_nsfw               INTEGER NOT NULL DEFAULT 0,
   reparse_skip          INTEGER NOT NULL DEFAULT 0
+);
+
+
+CREATE TABLE IF NOT EXISTS bookmark_lists (
+  id         INTEGER PRIMARY KEY,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  is_default INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(user_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS bookmarks (
+  list_id    INTEGER NOT NULL REFERENCES bookmark_lists(id) ON DELETE CASCADE,
+  image_id   INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY(list_id, image_id)
+);
+
+-- Per-user sharing settings.
+-- share_works: other users can see this user's uploaded images.
+-- share_bookmarks: other users can see this user's bookmark lists (read-only) when subscribed.
+CREATE TABLE IF NOT EXISTS user_settings (
+  user_id         INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  share_works     INTEGER NOT NULL DEFAULT 0,
+  share_bookmarks INTEGER NOT NULL DEFAULT 0,
+  updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Viewer -> Creator allow-list ("作者一覧").
+-- If a creator is registered here, viewer can see that creator's works even when share_works=OFF.
+CREATE TABLE IF NOT EXISTS user_creators (
+  user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  creator_user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY(user_id, creator_user_id)
+);
+
+-- Viewer -> Creator subscription list for bookmark lists ("ブックマーク一覧" creators).
+CREATE TABLE IF NOT EXISTS user_bookmark_creators (
+  user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  creator_user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY(user_id, creator_user_id)
 );
 
 CREATE TABLE IF NOT EXISTS admin_kv (
@@ -763,14 +1123,16 @@ CREATE TABLE IF NOT EXISTS image_files (
 );
 
 CREATE TABLE IF NOT EXISTS image_derivatives (
-  id            INTEGER PRIMARY KEY,
-  image_id      INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
-  kind          TEXT NOT NULL,
-  format        TEXT NOT NULL,
-  width         INTEGER NOT NULL,
-  height        INTEGER NOT NULL,
-  quality       INTEGER,
-  bytes         BLOB NOT NULL,
+  id             INTEGER PRIMARY KEY,
+  image_id       INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+  kind           TEXT NOT NULL,
+  format         TEXT NOT NULL,
+  width          INTEGER NOT NULL,
+  height         INTEGER NOT NULL,
+  quality        INTEGER,
+  disk_path      TEXT,
+  size           INTEGER,
+  bytes          BLOB,
   created_at_utc TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(image_id, kind, format)
 );
@@ -779,6 +1141,8 @@ CREATE TABLE IF NOT EXISTS upload_zip_jobs (
   id             INTEGER PRIMARY KEY,
   user_id        INTEGER,
   filename       TEXT,
+  source_kind    TEXT NOT NULL DEFAULT 'zip',
+  staging_dir    TEXT,
   total          INTEGER NOT NULL DEFAULT 0,
   done           INTEGER NOT NULL DEFAULT 0,
   failed         INTEGER NOT NULL DEFAULT 0,
@@ -797,6 +1161,8 @@ CREATE TABLE IF NOT EXISTS upload_zip_items (
   state          TEXT,
   image_id       INTEGER,
   message        TEXT,
+  staged_path    TEXT,
+  mtime_iso      TEXT,
   created_at_utc TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_upload_zip_items_job_seq ON upload_zip_items(job_id, seq);
@@ -841,9 +1207,39 @@ CREATE TABLE IF NOT EXISTS stat_software (
   image_count    INTEGER NOT NULL
 );
 
+-- Per-creator software counts used by the sidebar filter.
+CREATE TABLE IF NOT EXISTS stat_creator_software (
+  creator_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  software       TEXT NOT NULL,
+  image_count    INTEGER NOT NULL,
+  PRIMARY KEY(creator_id, software)
+);
+
 CREATE TABLE IF NOT EXISTS stat_day_counts (
   ymd            TEXT PRIMARY KEY,
   image_count    INTEGER NOT NULL
+);
+
+-- Per-creator day/month/year counts used by the calendar.
+CREATE TABLE IF NOT EXISTS stat_creator_day_counts (
+  creator_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  ymd            TEXT NOT NULL,
+  image_count    INTEGER NOT NULL,
+  PRIMARY KEY(creator_id, ymd)
+);
+
+CREATE TABLE IF NOT EXISTS stat_creator_month_counts (
+  creator_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  ym             TEXT NOT NULL,
+  image_count    INTEGER NOT NULL,
+  PRIMARY KEY(creator_id, ym)
+);
+
+CREATE TABLE IF NOT EXISTS stat_creator_year_counts (
+  creator_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  year           TEXT NOT NULL,
+  image_count    INTEGER NOT NULL,
+  PRIMARY KEY(creator_id, year)
 );
 
 CREATE TABLE IF NOT EXISTS stat_month_counts (

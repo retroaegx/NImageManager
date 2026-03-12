@@ -1,56 +1,20 @@
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
 import subprocess
 import sys
 import time
 import venv
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from installer_lib import ensure_cloudflared, repo_root, run_quick_tunnel, detect_named_tunnel_public_url
+from shared.dotenv_utils import ensure_dotenv
 
 PORT = 32287
-def _parse_dotenv(path: Path) -> dict[str, str]:
-    out: dict[str, str] = {}
-    try:
-        for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
-            s = raw.strip()
-            if not s or s.startswith("#"):
-                continue
-            if "=" not in s:
-                continue
-            k, v = s.split("=", 1)
-            k = k.strip()
-            v = v.strip()
-            if not k:
-                continue
-            # strip simple quotes
-            if len(v) >= 2 and ((v[0] == v[-1] == '"') or (v[0] == v[-1] == "'")):
-                v = v[1:-1]
-            out[k] = v
-    except Exception:
-        return out
-    return out
-
-
-def _ensure_dotenv(root: Path) -> None:
-    """Ensure .env exists; load its values into os.environ (without overriding existing env vars)."""
-    env_path = root / ".env"
-    tpl_path = root / ".env.template"
-    if (not env_path.exists()) and tpl_path.exists():
-        try:
-            shutil.copyfile(str(tpl_path), str(env_path))
-            print("[installer] created .env from .env.template")
-        except Exception:
-            # Non-fatal; continue without .env
-            pass
-
-    if env_path.exists() and env_path.stat().st_size > 0:
-        for k, v in _parse_dotenv(env_path).items():
-            if k not in os.environ:
-                os.environ[k] = v
-
 
 
 def _venv_python(venv_dir: Path) -> Path:
@@ -102,7 +66,7 @@ def _run_server(root: Path) -> subprocess.Popen:
 
 def main() -> int:
     root = repo_root()
-    _ensure_dotenv(root)
+    ensure_dotenv(root, log_prefix="[installer]")
     py = _ensure_venv(root)
     if not _is_running_in_venv(root):
         return _rerun_in_venv(py)

@@ -1,3 +1,8 @@
+import { $ } from "./lib/dom.js?v=20260307_01";
+import { apiFetch, apiJson, safeJson } from "./lib/http.js?v=20260307_01";
+import { bindUserMenu } from "./lib/userMenu.js?v=20260312_02";
+import { loadCurrentUser, logoutAndRedirect, isAdminRole } from "./lib/session.js?v=20260307_01";
+
 const API = {
   me: "/api/me",
   logout: "/api/auth/logout",
@@ -9,111 +14,40 @@ const API = {
   selfPwLink: "/api/auth/password_link",
 };
 
-function $(id){ return document.getElementById(id); }
-
-async function apiFetch(url, opts={}){
-  const o = { credentials: "include", ...opts };
-  o.headers = o.headers || {};
-  if(o.body && !o.headers["Content-Type"]) o.headers["Content-Type"] = "application/json";
-  const res = await fetch(url, o);
-  if(res.status === 401){
-    location.replace("/login.html");
-    throw new Error("unauthorized");
-  }
-  if(res.status === 403){
-    location.replace("/");
-    throw new Error("forbidden");
-  }
-  return res;
-}
-
-async function apiJson(res){
-  const text = await res.text();
-  if(!res.ok){
-    const head = (text || "").slice(0, 140);
-    throw new Error(`${res.status} ${head}`);
-  }
-  if(!text) return null;
-  try{ return JSON.parse(text); }
-  catch(_e){ throw new Error(`bad json: ${(text||"").slice(0,140)}`); }
-}
-
-async function safeJson(res){
-  try{
-    const t = await res.text();
-    if(!t) return {};
-    return JSON.parse(t) || {};
-  }catch(_e){
-    return {};
-  }
-}
-
-function isAdminRole(role){
-  return role === "admin" || role === "master";
-}
-
 let ME = null;
 
 async function loadMe(){
-  const res = await apiFetch(API.me);
-  const me = await apiJson(res);
-  if(!isAdminRole(me.role)){
-    location.replace("/");
-    return null;
-  }
-  ME = me;
-  $("meLabel").textContent = `${me.username} (${me.role})`;
-
-  // Only master can create admin users.
-  if(me.role !== "master"){
-    const sel = $("newUserRole");
-    if(sel){
-      // Remove admin option.
-      [...sel.querySelectorAll("option")].forEach(o => {
-        if(o.value === "admin") o.remove();
+  const me = await loadCurrentUser({
+    endpoint: API.me,
+    requireAdmin: true,
+    onLoaded: (user) => {
+      ME = user;
+      bindUserMenu({
+        logoutEndpoint: API.logout,
+        passwordLinkEndpoint: API.selfPwLink,
+        showAdmin: true,
+        showMaintenance: true,
       });
-      sel.value = "user";
-    }
-  }
-
+      if(user?.role !== "master"){
+        const sel = $("newUserRole");
+        if(sel){
+          [...sel.querySelectorAll("option")].forEach(o => {
+            if(o.value === "admin") o.remove();
+          });
+          sel.value = "user";
+        }
+      }
+    },
+  });
+  ME = me;
   return me;
 }
 
+
 async function doLogout(){
-  try{ await fetch(API.logout, { method: "POST", credentials: "include" }); }catch(_e){}
-  location.replace("/login.html");
+  await logoutAndRedirect(API.logout);
 }
 
-function bindUserMenu(){
-  const hamburger = $("hamburger");
-  const userMenu = $("userMenu");
-  const menuAdmin = $("menuAdmin");
-  const menuMaintenance = $("menuMaintenance");
-  const menuPwLink = $("menuPwLink");
-  const menuLogout = $("menuLogout");
-
-  const closeMenu = () => userMenu?.classList.add("hidden");
-  const toggleMenu = () => userMenu?.classList.toggle("hidden");
-
-  hamburger?.addEventListener("click", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    toggleMenu();
-  });
-  menuAdmin?.addEventListener("click", () => location.assign("/admin.html"));
-  menuMaintenance?.addEventListener("click", () => location.assign("/maintenance.html"));
-  menuPwLink?.addEventListener("click", async () => {
-    try{
-      const r = await apiFetch(API.selfPwLink, { method: "POST" });
-      const j = await apiJson(r);
-      if(j && j.reset_url) location.assign(j.reset_url);
-    }catch(_e){
-      alert("URL発行に失敗しました");
-    }
-  });
-  menuLogout?.addEventListener("click", doLogout);
-  document.addEventListener("click", () => closeMenu());
-}
 
 function showIssuedUrl(url){
   const box = $("issuedBox");
@@ -299,9 +233,6 @@ async function createUser(){
 }
 
 function bindUI(){
-  bindUserMenu();
-  $("navToUpload")?.addEventListener("click", () => location.assign("/?view=upload"));
-  $("navToPreview")?.addEventListener("click", () => location.assign("/?view=preview"));
   $("createUserBtn")?.addEventListener("click", createUser);
   $("copyIssuedBtn")?.addEventListener("click", copyIssued);
 }

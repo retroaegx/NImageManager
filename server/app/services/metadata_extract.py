@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import io
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import re
 
@@ -228,6 +229,77 @@ def _split_prompt_sections(text: str) -> tuple[str | None, str | None, str | Non
         " ".join(ch).strip() or None,
     )
 
+
+def _normalize_nai_choice_syntax(text: Any) -> Optional[str]:
+    """Normalize NovelAI choice syntax for fallback prompt extraction.
+
+    Example:
+      || A | B | C || -> A, B, C
+
+    This is intentionally used only for fallback/input-side prompt fields.
+    Confirmed/actual prompts should be preserved as-is.
+    """
+    if text is None:
+        return None
+    s = str(text).strip()
+    if not s:
+        return None
+    if "||" not in s:
+        return s
+
+    s = s.replace("||", "")
+    s = s.replace("|", ",")
+    s = re.sub(r"\s*,\s*", ", ", s)
+    s = re.sub(r",(?:\s*,)+", ", ", s)
+    s = re.sub(r"\s{2,}", " ", s)
+    s = re.sub(r"(^|[\s\(\[\{])+,", r"\1", s)
+    s = re.sub(r",\s*([\)\]\}])", r"\1", s)
+    s = s.strip(" ,")
+    return s or None
+
+
+def _join_char_captions(char_captions: Any, *, normalize_choice_syntax: bool = False) -> Optional[str]:
+    if not isinstance(char_captions, list):
+        return None
+    parts: list[str] = []
+    for it in char_captions:
+        val: Optional[str] = None
+        if isinstance(it, dict) and it.get("char_caption"):
+            val = str(it.get("char_caption")).strip()
+        elif isinstance(it, str) and it.strip():
+            val = it.strip()
+        if not val:
+            continue
+        if normalize_choice_syntax:
+            val = _normalize_nai_choice_syntax(val)
+        if val:
+            parts.append(val)
+    joined = "\n".join([p for p in parts if p])
+    return joined or None
+
+
+def _extract_caption_payload(node: Any, *, normalize_choice_syntax: bool = False) -> tuple[Optional[str], Optional[str]]:
+    """Extract (base_caption, joined_char_captions) from a prompt-like node."""
+    if isinstance(node, str):
+        s = node.strip()
+        if normalize_choice_syntax:
+            s = _normalize_nai_choice_syntax(s) or ""
+        return (s or None), None
+    if not isinstance(node, dict):
+        return None, None
+
+    base = node.get("base_caption")
+    if base is None and isinstance(node.get("caption"), str):
+        base = node.get("caption")
+    base_s: Optional[str] = None
+    if base not in (None, ""):
+        base_s = str(base).strip()
+        if normalize_choice_syntax:
+            base_s = _normalize_nai_choice_syntax(base_s)
+
+    chars = _join_char_captions(node.get("char_captions"), normalize_choice_syntax=normalize_choice_syntax)
+    return base_s, chars
+
 def _try_parse_json(val: Any) -> Optional[tuple[dict, str]]:
     if val is None:
         return None
@@ -248,8 +320,7 @@ def _try_parse_json(val: Any) -> Optional[tuple[dict, str]]:
             return None
     return None
 
-def extract_novelai_metadata(path: str | Path) -> NaiMeta:
-    path = Path(path)
+def _extract_novelai_metadata_from_source(source: Any) -> NaiMeta:
     raw: Dict[str, Any] = {}
 
     # NovelAI WebP exports often store metadata in EXIF UserComment.
@@ -258,7 +329,7 @@ def extract_novelai_metadata(path: str | Path) -> NaiMeta:
     usercomment_comment_raw: Optional[str] = None
     usercomment_source_raw: Optional[str] = None
 
-    with Image.open(path) as im:
+    with Image.open(source) as im:
         raw.update(im.info or {})
         _merge_exif(raw, im)
         # capture some common fields
@@ -375,6 +446,8 @@ def extract_novelai_metadata(path: str | Path) -> NaiMeta:
 
     character_prompt: Optional[str] = None
 
+    character_negative_prompt: Optional[str] = None
+
     if json_blob:
         # Some exports put the actual payload under a wrapper key.
         json_primary: dict = json_blob
@@ -394,8 +467,10 @@ def extract_novelai_metadata(path: str | Path) -> NaiMeta:
                 except Exception:
                     pass
 
-        # NovelAI v4.5 stores structured prompts under v4_prompt.caption.
-        # Some exports store v4_prompt / v4_negative_prompt as JSON strings.
+        # NovelAI stores structured prompts under versioned keys like:
+        #   v4_prompt.caption / v4_negative_prompt.caption
+        # Future versions may use v5_prompt, v5_5_prompt, etc.
+        # Some exports store these values as JSON strings.
         def _obj_maybe(v: Any) -> Any:
             if isinstance(v, dict):
                 return v
@@ -406,49 +481,174 @@ def extract_novelai_metadata(path: str | Path) -> NaiMeta:
                     return v
             return v
 
+        def _gather_prompt_scopes(primary: Any) -> list[tuple[str, dict]]:
+            # Prompt-like keys may live under root or nested wrappers like `params`.
+            scopes: list[tuple[str, dict]] = []
+            if not isinstance(primary, dict):
+                return scopes
+            scopes.append(("root", primary))
+
+            for key in ("params", "parameters", "nai_parameters", "naiParams", "naiParameters", "parameter", "payload", "data"):
+                v = primary.get(key)
+                if isinstance(v, str):
+                    try:
+                        v = json.loads(v)
+                    except Exception:
+                        pass
+                if isinstance(v, dict):
+                    scopes.append((key, v))
+            return scopes
+
+        def _best_versioned_obj(scopes: list[tuple[str, dict]], suffix: str) -> Tuple[Optional[str], Optional[str], Any]:
+            # Pick highest versioned key across scopes.
+            best_scope: Optional[str] = None
+            best_key: Optional[str] = None
+            best_obj: Any = None
+            best_v = (-1, -1)
+
+            rx = re.compile(rf"^v(\d+)(?:[._](\d+))?_{re.escape(suffix)}$", re.IGNORECASE)
+
+            for scope_name, d in (scopes or []):
+                if not isinstance(d, dict):
+                    continue
+                for k in d.keys():
+                    if not isinstance(k, str):
+                        continue
+                    m = rx.match(k)
+                    if not m:
+                        continue
+                    maj = int(m.group(1) or 0)
+                    minor = int(m.group(2) or 0)
+                    v = (maj, minor)
+                    if v > best_v:
+                        best_v = v
+                        best_scope = scope_name
+                        best_key = k
+                        best_obj = _obj_maybe(d.get(k))
+
+            if not best_key:
+                return None, None, None
+            return best_scope, best_key, best_obj
+
+        def _find_scope_value(scopes: list[tuple[str, dict]], *keys: str) -> tuple[Optional[str], Optional[str], Any]:
+            for scope_name, d in (scopes or []):
+                if not isinstance(d, dict):
+                    continue
+                for key in keys:
+                    if key in d:
+                        return scope_name, key, _obj_maybe(d.get(key))
+            return None, None, None
+
+        scopes = _gather_prompt_scopes(json_primary)
+
+        # Highest priority: NovelAI's resolved/actual prompts.
+        # These are post-choice-resolution values and must win over input-side
+        # base_caption/char_captions from versioned prompt structures.
         try:
-            v4 = _obj_maybe(json_primary.get("v4_prompt") if isinstance(json_primary, dict) else None)
-            cap = _obj_maybe(v4.get("caption") if isinstance(v4, dict) else None)
-            if isinstance(cap, dict):
-                if cap.get("base_caption"):
-                    prompt = str(cap.get("base_caption"))
-                cc = cap.get("char_captions")
-                if isinstance(cc, list):
-                    parts: list[str] = []
-                    for it in cc:
-                        if isinstance(it, dict) and it.get("char_caption"):
-                            parts.append(str(it.get("char_caption")).strip())
-                        elif isinstance(it, str) and it.strip():
-                            parts.append(it.strip())
-                    joined = "\n".join([p for p in parts if p])
-                    if joined:
-                        character_prompt = joined
-            elif isinstance(cap, str) and cap.strip():
-                prompt = cap.strip()
+            actual_scope, actual_key, actual_prompts = _find_scope_value(scopes, "actual_prompts")
+            if isinstance(actual_prompts, dict):
+                raw["_actual_prompts_key_used"] = f"{actual_scope}.{actual_key}" if actual_scope else str(actual_key)
+
+                p_base, p_chars = _extract_caption_payload(_obj_maybe(actual_prompts.get("prompt")), normalize_choice_syntax=False)
+                if p_base:
+                    prompt = p_base
+                    raw["_prompt_key_used"] = raw["_actual_prompts_key_used"] + ".prompt"
+                if p_chars:
+                    character_prompt = p_chars
+                    raw["_character_prompt_key_used"] = raw["_actual_prompts_key_used"] + ".prompt.char_captions"
+
+                n_base, n_chars = _extract_caption_payload(_obj_maybe(actual_prompts.get("negative_prompt")), normalize_choice_syntax=False)
+                if n_base:
+                    negative = n_base
+                    raw["_negative_prompt_key_used"] = raw["_actual_prompts_key_used"] + ".negative_prompt"
+                if n_chars:
+                    character_negative_prompt = n_chars
+                    raw["_character_negative_prompt_key_used"] = raw["_actual_prompts_key_used"] + ".negative_prompt.char_captions"
         except Exception:
             pass
 
-        # Fallback prompt fields
+        # Fallback: input-side structured prompts. Normalize NovelAI choice syntax
+        # because these may still contain raw `|| ... | ... ||` expressions.
+        if not prompt or not character_prompt:
+            try:
+                scope_used, k_used, vobj = _best_versioned_obj(scopes, "prompt")
+                cap = _obj_maybe(vobj.get("caption") if isinstance(vobj, dict) else None)
+                p_base, p_chars = _extract_caption_payload(cap, normalize_choice_syntax=True)
+                if k_used and (p_base or p_chars):
+                    raw["_prompt_fallback_key_used"] = f"{scope_used}.{k_used}" if scope_used else k_used
+                if not prompt and p_base:
+                    prompt = p_base
+                if not character_prompt and p_chars:
+                    character_prompt = p_chars
+            except Exception:
+                pass
+
+        if not negative or not character_negative_prompt:
+            try:
+                scope_used, k_used, vobj = _best_versioned_obj(scopes, "negative_prompt")
+                ncap = _obj_maybe(vobj.get("caption") if isinstance(vobj, dict) else None)
+                n_base, n_chars = _extract_caption_payload(ncap, normalize_choice_syntax=True)
+                if k_used and (n_base or n_chars):
+                    raw["_negative_prompt_fallback_key_used"] = f"{scope_used}.{k_used}" if scope_used else k_used
+                if not negative and n_base:
+                    negative = n_base
+                if not character_negative_prompt and n_chars:
+                    character_negative_prompt = n_chars
+            except Exception:
+                pass
+
+        # Flat/raw fallback fields.
         if not prompt:
-            prompt = json_primary.get("prompt") or json_primary.get("Prompt") or json_blob.get("prompt")
-
-        # Negative prompt
-        try:
-            v4n = _obj_maybe(json_primary.get("v4_negative_prompt") if isinstance(json_primary, dict) else None)
-            ncap = _obj_maybe(v4n.get("caption") if isinstance(v4n, dict) else None)
-            if isinstance(ncap, dict) and ncap.get("base_caption"):
-                negative = str(ncap.get("base_caption"))
-            elif isinstance(ncap, str) and ncap.strip():
-                negative = ncap.strip()
-        except Exception:
-            pass
-        if not negative:
-            negative = (
-                json_primary.get("uc")
-                or json_primary.get("negative_prompt")
-                or json_primary.get("Undesired Content")
-                or json_blob.get("uc")
+            scope_used, key_used, v = _find_scope_value(
+                scopes,
+                "prompt_positive_raw",
+                "promptPositiveRaw",
+                "prompt_positive",
+                "positive_prompt",
+                "positivePrompt",
+                "prompt",
+                "Prompt",
             )
+            if v not in (None, ""):
+                prompt = _normalize_nai_choice_syntax(v)
+                if prompt and key_used:
+                    raw["_prompt_fallback_key_used"] = f"{scope_used}.{key_used}" if scope_used else str(key_used)
+
+        if not negative:
+            scope_used, key_used, v = _find_scope_value(
+                scopes,
+                "prompt_negative_raw",
+                "promptNegativeRaw",
+                "prompt_negative",
+                "negative_prompt_raw",
+                "negativePrompt",
+                "uc",
+                "negative_prompt",
+                "Undesired Content",
+            )
+            if v not in (None, ""):
+                negative = _normalize_nai_choice_syntax(v)
+                if negative and key_used:
+                    raw["_negative_prompt_fallback_key_used"] = f"{scope_used}.{key_used}" if scope_used else str(key_used)
+
+        # Direct character prompt fallback (still input-side, so normalize choice syntax).
+        if not character_prompt:
+            scope_used, key_used, v = _find_scope_value(
+                scopes,
+                "character_prompt",
+                "characterPrompt",
+                "character_prompt_raw",
+                "prompt_character_raw",
+                "promptCharacterRaw",
+                "Character Prompt",
+                "character",
+                "char_prompt",
+                "characterPromptText",
+            )
+            if v not in (None, ""):
+                character_prompt = _normalize_nai_choice_syntax(v)
+                if character_prompt and key_used:
+                    raw["_character_prompt_fallback_key_used"] = f"{scope_used}.{key_used}" if scope_used else str(key_used)
 
         # model name (when present)
         # Do NOT overwrite the model hash extracted from Source/Software.
@@ -458,19 +658,6 @@ def extract_novelai_metadata(path: str | Path) -> NaiMeta:
                 jm = jm.strip()
                 if re.fullmatch(r"[0-9A-Fa-f]{8}", jm):
                     model = jm.upper()
-
-        for ck in (
-            "character_prompt",
-            "characterPrompt",
-            "character_prompt_raw",
-            "Character Prompt",
-            "character",
-            "char_prompt",
-            "characterPromptText",
-        ):
-            if ck in json_primary and json_primary.get(ck):
-                character_prompt = str(json_primary.get(ck))
-                break
 
         params = {
             k: v
@@ -497,6 +684,10 @@ def extract_novelai_metadata(path: str | Path) -> NaiMeta:
         # for dedup signature and UI grouping.
         params.setdefault("_character_prompt_raw", character_prompt)
 
+    if character_negative_prompt:
+        # Character negative prompt is kept in params only (no DB column).
+        params.setdefault("_character_negative_prompt_raw", character_negative_prompt)
+
     # Keep raw Source/Software strings (no replacement) for exporting / debugging.
     # These keys are internal (prefixed by underscore) to avoid collision with NovelAI keys.
     if source_raw is not None:
@@ -519,3 +710,11 @@ def extract_novelai_metadata(path: str | Path) -> NaiMeta:
         raw=raw,
         raw_json_str=raw_json_str,
     )
+
+
+def extract_novelai_metadata(path: str | Path) -> NaiMeta:
+    return _extract_novelai_metadata_from_source(Path(path))
+
+
+def extract_novelai_metadata_bytes(data: bytes) -> NaiMeta:
+    return _extract_novelai_metadata_from_source(io.BytesIO(bytes(data or b"")))

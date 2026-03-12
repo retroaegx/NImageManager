@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
 from typing import Iterable
 
 
@@ -13,75 +12,150 @@ def rebuild_all(conn: sqlite3.Connection) -> None:
     """
     rebuild_creators(conn)
     rebuild_software(conn)
+    rebuild_creator_software(conn)
     rebuild_day_counts(conn)
     rebuild_month_counts(conn)
     rebuild_year_counts(conn)
+    rebuild_creator_day_counts(conn)
+    rebuild_creator_month_counts(conn)
+    rebuild_creator_year_counts(conn)
     rebuild_tag_counts(conn)
 
 
+def _rebuild_grouped_counts(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    insert_cols: list[str],
+    select_cols: list[str],
+    from_sql: str,
+    where_sql: str = "",
+    group_by: list[str],
+) -> None:
+    conn.execute(f"DELETE FROM {table}")
+    insert_sql = ", ".join(insert_cols + ["image_count"])
+    select_sql = ", ".join(select_cols + ["COUNT(*) AS image_count"])
+    group_sql = ", ".join(group_by)
+    sql = (
+        f"INSERT INTO {table}({insert_sql}) "
+        f"SELECT {select_sql} {from_sql}"
+    )
+    if where_sql:
+        sql += f" WHERE {where_sql}"
+    sql += f" GROUP BY {group_sql}"
+    conn.execute(sql)
+
+
 def rebuild_creators(conn: sqlite3.Connection) -> None:
-    conn.execute("DELETE FROM stat_creators")
-    conn.execute(
-        """
-        INSERT INTO stat_creators(creator, image_count)
-        SELECT users.username AS creator, COUNT(*) AS image_count
-        FROM images
-        JOIN users ON users.id = images.uploader_user_id
-        GROUP BY users.username
-        """
+    _rebuild_grouped_counts(
+        conn,
+        table="stat_creators",
+        insert_cols=["creator"],
+        select_cols=["users.username AS creator"],
+        from_sql="FROM images JOIN users ON users.id = images.uploader_user_id",
+        group_by=["users.username"],
     )
 
 
 def rebuild_software(conn: sqlite3.Connection) -> None:
-    conn.execute("DELETE FROM stat_software")
-    conn.execute(
-        """
-        INSERT INTO stat_software(software, image_count)
-        SELECT software, COUNT(*) AS image_count
-        FROM images
-        WHERE software IS NOT NULL AND TRIM(software) <> ''
-        GROUP BY software
-        """
+    _rebuild_grouped_counts(
+        conn,
+        table="stat_software",
+        insert_cols=["software"],
+        select_cols=["software"],
+        from_sql="FROM images",
+        where_sql="software IS NOT NULL AND TRIM(software) <> ''",
+        group_by=["software"],
+    )
+
+
+def rebuild_creator_software(conn: sqlite3.Connection) -> None:
+    """Rebuild per-creator software counts.
+
+    Used by the sidebar software filter counts (must respect visibility by summing
+    visible creators on the fly).
+    """
+    _rebuild_grouped_counts(
+        conn,
+        table="stat_creator_software",
+        insert_cols=["creator_id", "software"],
+        select_cols=["uploader_user_id AS creator_id", "software"],
+        from_sql="FROM images",
+        where_sql="software IS NOT NULL AND TRIM(software) <> ''",
+        group_by=["uploader_user_id", "software"],
     )
 
 
 def rebuild_day_counts(conn: sqlite3.Connection) -> None:
-    conn.execute("DELETE FROM stat_day_counts")
-    conn.execute(
-        """
-        INSERT INTO stat_day_counts(ymd, image_count)
-        SELECT SUBSTR(file_mtime_utc,1,10) AS ymd, COUNT(*) AS image_count
-        FROM images
-        WHERE file_mtime_utc IS NOT NULL AND LENGTH(file_mtime_utc) >= 10
-        GROUP BY SUBSTR(file_mtime_utc,1,10)
-        """
+    _rebuild_grouped_counts(
+        conn,
+        table="stat_day_counts",
+        insert_cols=["ymd"],
+        select_cols=["SUBSTR(file_mtime_utc,1,10) AS ymd"],
+        from_sql="FROM images",
+        where_sql="file_mtime_utc IS NOT NULL AND LENGTH(file_mtime_utc) >= 10",
+        group_by=["SUBSTR(file_mtime_utc,1,10)"],
     )
 
+
+def rebuild_creator_day_counts(conn: sqlite3.Connection) -> None:
+    _rebuild_grouped_counts(
+        conn,
+        table="stat_creator_day_counts",
+        insert_cols=["creator_id", "ymd"],
+        select_cols=["uploader_user_id AS creator_id", "SUBSTR(file_mtime_utc,1,10) AS ymd"],
+        from_sql="FROM images",
+        where_sql="file_mtime_utc IS NOT NULL AND LENGTH(file_mtime_utc) >= 10",
+        group_by=["uploader_user_id", "SUBSTR(file_mtime_utc,1,10)"],
+    )
+
+
 def rebuild_month_counts(conn: sqlite3.Connection) -> None:
-    conn.execute("DELETE FROM stat_month_counts")
-    conn.execute(
-        """
-        INSERT INTO stat_month_counts(ym, image_count)
-        SELECT SUBSTR(file_mtime_utc,1,7) AS ym, COUNT(*) AS image_count
-        FROM images
-        WHERE file_mtime_utc IS NOT NULL AND LENGTH(file_mtime_utc) >= 7
-        GROUP BY SUBSTR(file_mtime_utc,1,7)
-        """
+    _rebuild_grouped_counts(
+        conn,
+        table="stat_month_counts",
+        insert_cols=["ym"],
+        select_cols=["SUBSTR(file_mtime_utc,1,7) AS ym"],
+        from_sql="FROM images",
+        where_sql="file_mtime_utc IS NOT NULL AND LENGTH(file_mtime_utc) >= 7",
+        group_by=["SUBSTR(file_mtime_utc,1,7)"],
+    )
+
+
+def rebuild_creator_month_counts(conn: sqlite3.Connection) -> None:
+    _rebuild_grouped_counts(
+        conn,
+        table="stat_creator_month_counts",
+        insert_cols=["creator_id", "ym"],
+        select_cols=["uploader_user_id AS creator_id", "SUBSTR(file_mtime_utc,1,7) AS ym"],
+        from_sql="FROM images",
+        where_sql="file_mtime_utc IS NOT NULL AND LENGTH(file_mtime_utc) >= 7",
+        group_by=["uploader_user_id", "SUBSTR(file_mtime_utc,1,7)"],
     )
 
 
 def rebuild_year_counts(conn: sqlite3.Connection) -> None:
-    conn.execute("DELETE FROM stat_year_counts")
-    conn.execute(
-        """
-        INSERT INTO stat_year_counts(year, image_count)
-        SELECT SUBSTR(file_mtime_utc,1,4) AS year, COUNT(*) AS image_count
-        FROM images
-        WHERE file_mtime_utc IS NOT NULL AND LENGTH(file_mtime_utc) >= 4
-        GROUP BY SUBSTR(file_mtime_utc,1,4)
-        """
+    _rebuild_grouped_counts(
+        conn,
+        table="stat_year_counts",
+        insert_cols=["year"],
+        select_cols=["SUBSTR(file_mtime_utc,1,4) AS year"],
+        from_sql="FROM images",
+        where_sql="file_mtime_utc IS NOT NULL AND LENGTH(file_mtime_utc) >= 4",
+        group_by=["SUBSTR(file_mtime_utc,1,4)"],
     )
 
+
+def rebuild_creator_year_counts(conn: sqlite3.Connection) -> None:
+    _rebuild_grouped_counts(
+        conn,
+        table="stat_creator_year_counts",
+        insert_cols=["creator_id", "year"],
+        select_cols=["uploader_user_id AS creator_id", "SUBSTR(file_mtime_utc,1,4) AS year"],
+        from_sql="FROM images",
+        where_sql="file_mtime_utc IS NOT NULL AND LENGTH(file_mtime_utc) >= 4",
+        group_by=["uploader_user_id", "SUBSTR(file_mtime_utc,1,4)"],
+    )
 
 
 def rebuild_tag_counts(conn: sqlite3.Connection) -> None:
@@ -178,146 +252,187 @@ def recompute_dedup_flags_for_hashes(conn: sqlite3.Connection, hashes: Iterable[
         )
 
 
+def _bump_counter(conn: sqlite3.Connection, table: str, key_cols: tuple[str, ...], key_vals: tuple, *, category: int | None = None) -> None:
+    if len(key_cols) != len(key_vals):
+        raise ValueError("key column/value length mismatch")
+    placeholders = ", ".join(["?"] * len(key_cols))
+    cols_sql = ", ".join(key_cols)
+    update_where = " AND ".join([f"{col} = ?" for col in key_cols])
+    if category is None:
+        conn.execute(
+            f"""
+            INSERT INTO {table}({cols_sql}, image_count)
+            VALUES ({placeholders}, 1)
+            ON CONFLICT({cols_sql}) DO UPDATE SET image_count = image_count + 1
+            """,
+            key_vals,
+        )
+        return
+    conn.execute(
+        f"""
+        INSERT INTO {table}({cols_sql}, image_count, category)
+        VALUES ({placeholders}, 1, ?)
+        ON CONFLICT({cols_sql}) DO UPDATE SET
+          image_count = image_count + 1,
+          category = COALESCE({table}.category, excluded.category)
+        """,
+        key_vals + (category,),
+    )
+
+
+def _dec_counter(conn: sqlite3.Connection, table: str, key_cols: tuple[str, ...], key_vals: tuple) -> None:
+    if len(key_cols) != len(key_vals):
+        raise ValueError("key column/value length mismatch")
+    update_where = " AND ".join([f"{col} = ?" for col in key_cols])
+    conn.execute(
+        f"UPDATE {table} SET image_count = image_count - 1 WHERE {update_where}",
+        key_vals,
+    )
+    conn.execute(
+        f"DELETE FROM {table} WHERE {update_where} AND image_count <= 0",
+        key_vals,
+    )
+
+
 def bump_creator(conn: sqlite3.Connection, creator: str) -> None:
     if not creator:
         return
-    conn.execute(
-        """
-        INSERT INTO stat_creators(creator, image_count)
-        VALUES (?, 1)
-        ON CONFLICT(creator) DO UPDATE SET image_count = image_count + 1
-        """,
-        (creator,),
-    )
+    _bump_counter(conn, "stat_creators", ("creator",), (creator,))
 
 
 def dec_creator(conn: sqlite3.Connection, creator: str) -> None:
     if not creator:
         return
-    conn.execute(
-        "UPDATE stat_creators SET image_count = image_count - 1 WHERE creator = ?",
-        (creator,),
-    )
-    conn.execute(
-        "DELETE FROM stat_creators WHERE creator = ? AND image_count <= 0",
-        (creator,),
-    )
+    _dec_counter(conn, "stat_creators", ("creator",), (creator,))
+
 
 def bump_software(conn: sqlite3.Connection, software: str) -> None:
     if not software:
         return
-    conn.execute(
-        """
-        INSERT INTO stat_software(software, image_count)
-        VALUES (?, 1)
-        ON CONFLICT(software) DO UPDATE SET image_count = image_count + 1
-        """,
-        (software,),
-    )
+    _bump_counter(conn, "stat_software", ("software",), (software,))
 
 
 def dec_software(conn: sqlite3.Connection, software: str) -> None:
     if not software:
         return
-    conn.execute(
-        "UPDATE stat_software SET image_count = image_count - 1 WHERE software = ?",
-        (software,),
-    )
-    conn.execute(
-        "DELETE FROM stat_software WHERE software = ? AND image_count <= 0",
-        (software,),
-    )
+    _dec_counter(conn, "stat_software", ("software",), (software,))
+
+
+def bump_creator_software(conn: sqlite3.Connection, creator_id: int, software: str) -> None:
+    if not software:
+        return
+    cid = int(creator_id or 0)
+    if cid <= 0:
+        return
+    _bump_counter(conn, "stat_creator_software", ("creator_id", "software"), (cid, software))
+
+
+def dec_creator_software(conn: sqlite3.Connection, creator_id: int, software: str) -> None:
+    if not software:
+        return
+    cid = int(creator_id or 0)
+    if cid <= 0:
+        return
+    _dec_counter(conn, "stat_creator_software", ("creator_id", "software"), (cid, software))
+
 
 def bump_day(conn: sqlite3.Connection, ymd: str) -> None:
     if not ymd:
         return
-    conn.execute(
-        """
-        INSERT INTO stat_day_counts(ymd, image_count)
-        VALUES (?, 1)
-        ON CONFLICT(ymd) DO UPDATE SET image_count = image_count + 1
-        """,
-        (ymd,),
-    )
+    _bump_counter(conn, "stat_day_counts", ("ymd",), (ymd,))
+
+
+def bump_creator_day(conn: sqlite3.Connection, creator_id: int, ymd: str) -> None:
+    if not ymd:
+        return
+    cid = int(creator_id or 0)
+    if cid <= 0:
+        return
+    _bump_counter(conn, "stat_creator_day_counts", ("creator_id", "ymd"), (cid, ymd))
 
 
 def dec_day(conn: sqlite3.Connection, ymd: str) -> None:
     if not ymd:
         return
-    conn.execute(
-        "UPDATE stat_day_counts SET image_count = image_count - 1 WHERE ymd = ?",
-        (ymd,),
-    )
-    conn.execute(
-        "DELETE FROM stat_day_counts WHERE ymd = ? AND image_count <= 0",
-        (ymd,),
-    )
+    _dec_counter(conn, "stat_day_counts", ("ymd",), (ymd,))
+
+
+def dec_creator_day(conn: sqlite3.Connection, creator_id: int, ymd: str) -> None:
+    if not ymd:
+        return
+    cid = int(creator_id or 0)
+    if cid <= 0:
+        return
+    _dec_counter(conn, "stat_creator_day_counts", ("creator_id", "ymd"), (cid, ymd))
+
 
 def bump_month(conn: sqlite3.Connection, ym: str) -> None:
     if not ym:
         return
-    conn.execute(
-        """
-        INSERT INTO stat_month_counts(ym, image_count)
-        VALUES (?, 1)
-        ON CONFLICT(ym) DO UPDATE SET image_count = image_count + 1
-        """
-        ,
-        (ym,),
-    )
+    _bump_counter(conn, "stat_month_counts", ("ym",), (ym,))
+
+
+def bump_creator_month(conn: sqlite3.Connection, creator_id: int, ym: str) -> None:
+    if not ym:
+        return
+    cid = int(creator_id or 0)
+    if cid <= 0:
+        return
+    _bump_counter(conn, "stat_creator_month_counts", ("creator_id", "ym"), (cid, ym))
 
 
 def dec_month(conn: sqlite3.Connection, ym: str) -> None:
     if not ym:
         return
-    conn.execute("UPDATE stat_month_counts SET image_count = image_count - 1 WHERE ym = ?", (ym,))
-    conn.execute("DELETE FROM stat_month_counts WHERE ym = ? AND image_count <= 0", (ym,))
+    _dec_counter(conn, "stat_month_counts", ("ym",), (ym,))
+
+
+def dec_creator_month(conn: sqlite3.Connection, creator_id: int, ym: str) -> None:
+    if not ym:
+        return
+    cid = int(creator_id or 0)
+    if cid <= 0:
+        return
+    _dec_counter(conn, "stat_creator_month_counts", ("creator_id", "ym"), (cid, ym))
 
 
 def bump_year(conn: sqlite3.Connection, year: str) -> None:
     if not year:
         return
-    conn.execute(
-        """
-        INSERT INTO stat_year_counts(year, image_count)
-        VALUES (?, 1)
-        ON CONFLICT(year) DO UPDATE SET image_count = image_count + 1
-        """
-        ,
-        (year,),
-    )
+    _bump_counter(conn, "stat_year_counts", ("year",), (year,))
+
+
+def bump_creator_year(conn: sqlite3.Connection, creator_id: int, year: str) -> None:
+    if not year:
+        return
+    cid = int(creator_id or 0)
+    if cid <= 0:
+        return
+    _bump_counter(conn, "stat_creator_year_counts", ("creator_id", "year"), (cid, year))
 
 
 def dec_year(conn: sqlite3.Connection, year: str) -> None:
     if not year:
         return
-    conn.execute("UPDATE stat_year_counts SET image_count = image_count - 1 WHERE year = ?", (year,))
-    conn.execute("DELETE FROM stat_year_counts WHERE year = ? AND image_count <= 0", (year,))
+    _dec_counter(conn, "stat_year_counts", ("year",), (year,))
+
+
+def dec_creator_year(conn: sqlite3.Connection, creator_id: int, year: str) -> None:
+    if not year:
+        return
+    cid = int(creator_id or 0)
+    if cid <= 0:
+        return
+    _dec_counter(conn, "stat_creator_year_counts", ("creator_id", "year"), (cid, year))
 
 
 def bump_tag(conn: sqlite3.Connection, tag: str, category: int | None) -> None:
     if not tag:
         return
-    conn.execute(
-        """
-        INSERT INTO stat_tag_counts(tag_canonical, image_count, category)
-        VALUES (?, 1, ?)
-        ON CONFLICT(tag_canonical) DO UPDATE SET
-          image_count = image_count + 1,
-          category = COALESCE(stat_tag_counts.category, excluded.category)
-        """,
-        (tag, category),
-    )
+    _bump_counter(conn, "stat_tag_counts", ("tag_canonical",), (tag,), category=category)
 
 
 def dec_tag(conn: sqlite3.Connection, tag: str) -> None:
     if not tag:
         return
-    conn.execute(
-        "UPDATE stat_tag_counts SET image_count = image_count - 1 WHERE tag_canonical = ?",
-        (tag,),
-    )
-    conn.execute(
-        "DELETE FROM stat_tag_counts WHERE tag_canonical = ? AND image_count <= 0",
-        (tag,),
-    )
+    _dec_counter(conn, "stat_tag_counts", ("tag_canonical",), (tag,))

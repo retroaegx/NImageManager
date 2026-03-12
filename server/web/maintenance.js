@@ -1,3 +1,8 @@
+import { $ } from "./lib/dom.js?v=20260307_01";
+import { apiFetch, apiJson } from "./lib/http.js?v=20260307_01";
+import { bindUserMenu } from "./lib/userMenu.js?v=20260312_02";
+import { loadCurrentUser, logoutAndRedirect } from "./lib/session.js?v=20260307_01";
+
 const API = {
   me: "/api/me",
   logout: "/api/auth/logout",
@@ -12,57 +17,24 @@ const API = {
   rebuildState: "/api/admin/rebuild_state",
 };
 
-function $(id){ return document.getElementById(id); }
-
-async function apiFetch(url, opts={}){
-  const o = { credentials: "include", ...opts };
-  o.headers = o.headers || {};
-  if(o.body && !o.headers["Content-Type"]) o.headers["Content-Type"] = "application/json";
-  const res = await fetch(url, o);
-  if(res.status === 401){
-    location.replace("/login.html");
-    throw new Error("unauthorized");
-  }
-  if(res.status === 403){
-    location.replace("/");
-    throw new Error("forbidden");
-  }
-  return res;
-}
-
-async function apiJson(res){
-  const text = await res.text();
-  if(!res.ok){
-    const head = (text || "").slice(0, 140);
-    throw new Error(`${res.status} ${head}`);
-  }
-  if(!text) return null;
-  try{
-    return JSON.parse(text);
-  }catch(_e){
-    const head = (text || "").slice(0, 140);
-    throw new Error(`bad json: ${head}`);
-  }
-}
-
 async function loadMe(){
-  const res = await apiFetch(API.me);
-  const me = await apiJson(res);
-  if(me.role !== "admin" && me.role !== "master"){
-    location.replace("/");
-    return null;
-  }
-  $("meLabel").textContent = `${me.username} (${me.role})`;
-
-  // menu items are admin-only
-  $("menuAdmin")?.classList.remove("hidden");
-  $("menuMaintenance")?.classList.remove("hidden");
-  return me;
+  return await loadCurrentUser({
+    endpoint: API.me,
+    requireAdmin: true,
+    onLoaded: () => {
+      bindUserMenu({
+        logoutEndpoint: API.logout,
+        passwordLinkEndpoint: API.selfPwLink,
+        showAdmin: true,
+        showMaintenance: true,
+      });
+    },
+  });
 }
+
 
 async function doLogout(){
-  try{ await fetch(API.logout, { method: "POST", credentials: "include" }); }catch(_e){}
-  location.replace("/login.html");
+  await logoutAndRedirect(API.logout);
 }
 
 function fmt(n){
@@ -79,37 +51,6 @@ function fmtAge(sec){
   const m = Math.floor(s/60);
   const r = Math.floor(s%60);
   return `${m}m ${r}s`;
-}
-
-function bindUserMenu(){
-  const hamburger = $("hamburger");
-  const userMenu = $("userMenu");
-  const menuAdmin = $("menuAdmin");
-  const menuMaintenance = $("menuMaintenance");
-  const menuPwLink = $("menuPwLink");
-  const menuLogout = $("menuLogout");
-
-  const closeMenu = () => userMenu?.classList.add("hidden");
-  const toggleMenu = () => userMenu?.classList.toggle("hidden");
-
-  hamburger?.addEventListener("click", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    toggleMenu();
-  });
-  menuAdmin?.addEventListener("click", () => location.assign("/admin.html"));
-  menuMaintenance?.addEventListener("click", () => location.assign("/maintenance.html"));
-  menuPwLink?.addEventListener("click", async () => {
-    try{
-      const r = await apiFetch(API.selfPwLink, { method: "POST" });
-      const j = await apiJson(r);
-      if(j && j.reset_url) location.assign(j.reset_url);
-    }catch(_e){
-      alert("URL発行に失敗しました");
-    }
-  });
-  menuLogout?.addEventListener("click", doLogout);
-  document.addEventListener("click", () => closeMenu());
 }
 
 function setButtonsLocked({ reparseActive=false, rebuildActive=false }={}){
@@ -448,9 +389,6 @@ async function refreshAll(force=false){
 }
 
 function bindUI(){
-  bindUserMenu();
-  $("navToUpload")?.addEventListener("click", () => location.assign("/?view=upload"));
-  $("navToPreview")?.addEventListener("click", () => location.assign("/?view=preview"));
   $("startReparseBtn")?.addEventListener("click", startReparse);
   $("startRebuildBtn")?.addEventListener("click", startRebuild);
 }
