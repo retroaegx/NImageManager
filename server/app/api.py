@@ -4572,9 +4572,11 @@ def _upload_image_from_path_core(
 @api_router.post("/upload_zip")
 async def upload_zip(
     bg: BackgroundTasks,
-    file: UploadFile = File(...),
+    request: Request,
     user: dict = Depends(get_user),
 ):
+    filename = request.query_params.get("filename") or "upload.zip"
+
     # Stream to disk (avoid loading large zip into memory)
     import tempfile
     fd, tmp = tempfile.mkstemp(prefix="nim_zip_", suffix=".zip")
@@ -4582,10 +4584,9 @@ async def upload_zip(
     total_bytes = 0
     try:
         with open(tmp, "wb") as f:
-            while True:
-                chunk = await file.read(1024 * 1024)
+            async for chunk in request.stream():
                 if not chunk:
-                    break
+                    continue
                 total_bytes += len(chunk)
                 f.write(chunk)
     except Exception:
@@ -4610,7 +4611,7 @@ async def upload_zip(
     try:
         cur = conn.execute(
             "INSERT INTO upload_zip_jobs(user_id, filename, source_kind, total, status, staging_dir) VALUES (?,?,?,?,?,?)",
-            (int(user["id"]), file.filename or "upload.zip", "zip", int(total), "queued", ""),
+            (int(user["id"]), filename, "zip", int(total), "queued", ""),
         )
         job_id = int(cur.lastrowid)
         conn.commit()
@@ -4650,10 +4651,15 @@ def _zip_incoming_gc() -> None:
 
 @api_router.post("/upload_zip_chunk/init")
 async def upload_zip_chunk_init(
-    filename: str = Form("upload.zip"),
-    total_bytes: int = Form(0),
+    request: Request,
     user: dict = Depends(get_user),
 ):
+    filename = request.query_params.get("filename") or "upload.zip"
+    try:
+        total_bytes = int(request.query_params.get("total_bytes") or 0)
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid total_bytes")
+
     _zip_incoming_gc()
     import tempfile
     fd, tmp = tempfile.mkstemp(prefix="nim_zipc_", suffix=".zip")
@@ -4662,7 +4668,7 @@ async def upload_zip_chunk_init(
     with _ZIP_INCOMING_LOCK:
         _ZIP_INCOMING[token] = {
             "user_id": int(user["id"]),
-            "filename": filename or "upload.zip",
+            "filename": filename,
             "total_bytes": int(total_bytes or 0),
             "received": 0,
             "tmp": tmp,
@@ -4673,11 +4679,17 @@ async def upload_zip_chunk_init(
 
 @api_router.post("/upload_zip_chunk/append")
 async def upload_zip_chunk_append(
-    token: str = Form(...),
-    offset: int = Form(0),
-    chunk: UploadFile = File(...),
+    request: Request,
     user: dict = Depends(get_user),
 ):
+    token = request.query_params.get("token") or ""
+    if not token:
+        raise HTTPException(status_code=400, detail="missing token")
+    try:
+        off = int(request.query_params.get("offset") or 0)
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid offset")
+
     _zip_incoming_gc()
     with _ZIP_INCOMING_LOCK:
         st = _ZIP_INCOMING.get(token)
@@ -4687,7 +4699,6 @@ async def upload_zip_chunk_append(
         raise HTTPException(status_code=403, detail="forbidden")
     tmp = str(st.get("tmp") or "")
     expected = int(st.get("received") or 0)
-    off = int(offset or 0)
 
     # Idempotent append: allow retry/resume.
     # - if off > expected: client skipped bytes
@@ -4709,10 +4720,9 @@ async def upload_zip_chunk_append(
         with open(tmp, "r+b") as f:
             f.seek(off)
             f.truncate(off)
-            while True:
-                b = await chunk.read(1024 * 1024)
+            async for b in request.stream():
                 if not b:
-                    break
+                    continue
                 wrote += len(b)
                 f.write(b)
     except FileNotFoundError:
@@ -4722,10 +4732,9 @@ async def upload_zip_chunk_append(
         with open(tmp, "r+b") as f:
             f.seek(off)
             f.truncate(off)
-            while True:
-                b = await chunk.read(1024 * 1024)
+            async for b in request.stream():
                 if not b:
-                    break
+                    continue
                 wrote += len(b)
                 f.write(b)
 
@@ -4745,9 +4754,13 @@ async def upload_zip_chunk_append(
 @api_router.post("/upload_zip_chunk/finish")
 async def upload_zip_chunk_finish(
     bg: BackgroundTasks,
-    token: str = Form(...),
+    request: Request,
     user: dict = Depends(get_user),
 ):
+    token = request.query_params.get("token") or ""
+    if not token:
+        raise HTTPException(status_code=400, detail="missing token")
+
     _zip_incoming_gc()
     with _ZIP_INCOMING_LOCK:
         st = _ZIP_INCOMING.get(token)
@@ -4815,15 +4828,18 @@ async def upload_batch_init(request: Request, user: dict = Depends(get_user)):
 @api_router.post("/upload_batch/{job_id}/append")
 async def upload_batch_append(
     job_id: int,
-    seq: int = Form(...),
-    file: UploadFile = File(...),
-    last_modified_ms: str | None = Form(default=None),
-    request: Request = None,
+    request: Request,
     user: dict = Depends(get_user),
 ):
-    seq_i = int(seq or 0)
+    try:
+        seq_i = int(request.query_params.get("seq") or 0)
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid seq")
     if seq_i <= 0:
         raise HTTPException(status_code=400, detail="invalid seq")
+
+    last_modified_ms = request.query_params.get("last_modified_ms")
+    filename = request.query_params.get("filename") or f"upload_{seq_i}"
 
     conn = get_conn()
     try:
@@ -4843,7 +4859,7 @@ async def upload_batch_append(
     if str(row["status"] or "") != "collecting":
         raise HTTPException(status_code=409, detail="upload closed")
 
-    safe_name = _safe_basename(file.filename or f"upload_{seq_i}")
+    safe_name = _safe_basename(filename)
     if not _allowed_image_ext(safe_name):
         raise HTTPException(status_code=400, detail="unsupported file type")
 
@@ -4852,10 +4868,9 @@ async def upload_batch_append(
     dst = staging_dir / f"{seq_i:06d}_{safe_name}"
     total = 0
     with open(dst, "wb") as out:
-        while True:
-            chunk = await file.read(1024 * 1024)
+        async for chunk in request.stream():
             if not chunk:
-                break
+                continue
             total += len(chunk)
             out.write(chunk)
     if total <= 0:
@@ -4878,7 +4893,7 @@ async def upload_batch_append(
         int(seq_i),
         str(safe_name),
         str(dst),
-        trace_id=(getattr(request.state, "trace_id", None) if request is not None else None),
+        trace_id=getattr(request.state, "trace_id", None),
     )
     return {"ok": True, "seq": int(seq_i)}
 
