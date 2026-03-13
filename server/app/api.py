@@ -2432,7 +2432,7 @@ def _rebuild_active(conn: sqlite3.Connection) -> bool:
         return False
 
 
-def _reparse_all_worker(run_id: int, batch_size: int = 50, interval_sec: float = 0.6) -> None:
+def _reparse_all_worker(run_id: int, batch_size: int = 100, interval_sec: float = 0.2) -> None:
     """Background worker: reparse all images in batches."""
     try:
         while True:
@@ -2532,7 +2532,7 @@ def admin_reparse_all_start(_admin: dict = Depends(require_admin)):
 
         if not run or run.get("status") != "running":
             # new run (reset cursor)
-            run_id = _create_run(conn, "reparse_all", {"batch": 50})
+            run_id = _create_run(conn, "reparse_all", {"batch": 100, "interval_sec": 0.2})
             _kv_set(conn, "reparse_run_id", str(int(run_id)))
             _kv_set(conn, "reparse_params", "{}")
             _kv_set(conn, "reparse_after_id", "0")

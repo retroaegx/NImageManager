@@ -47,12 +47,12 @@ const API = {
   userSuggest: (kind, q) => `/api/users/suggest?kind=${encodeURIComponent(kind||'')}&q=${encodeURIComponent(q||'')}&limit=20`,
 };
 
-function xhrPostForm(url, formData, onProgress){
-  // Use XHR so we can show upload progress (fetch doesn't expose upload progress).
+function xhrPostBinary(url, body, contentType, onProgress){
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", url, true);
     xhr.withCredentials = true;
+    if(contentType) xhr.setRequestHeader("Content-Type", contentType);
     if(xhr.upload && onProgress){
       xhr.upload.onprogress = (e) => {
         try{
@@ -69,6 +69,12 @@ function xhrPostForm(url, formData, onProgress){
         reject(new Error("unauthorized"));
         return;
       }
+      if(xhr.status === 403){
+        const target = (typeof window !== "undefined" && window.location && window.location.pathname !== "/") ? "/" : null;
+        if(target) location.replace(target);
+        reject(new Error("forbidden"));
+        return;
+      }
       const text = xhr.responseText || "";
       if(xhr.status < 200 || xhr.status >= 300){
         reject(new Error(`${xhr.status} ${(text||"").slice(0,140)}`));
@@ -78,11 +84,9 @@ function xhrPostForm(url, formData, onProgress){
       try{ resolve(JSON.parse(text)); }
       catch(_e){ reject(new Error(`bad json: ${(text||"").slice(0,140)}`)); }
     };
-    xhr.send(formData);
+    xhr.send(body);
   });
 }
-
-
 const state = {
   user: null,
   uploadQueue: [],
@@ -840,11 +844,15 @@ async function startUploadFiles(files){
     uploadListUpdateItem(it);
     uploadProgressUpdate();
     try{
-      const fd = new FormData();
-      fd.append("seq", String(it.seq || 0));
-      fd.append("last_modified_ms", String(it.file?.lastModified || ""));
-      fd.append("file", it.file, String(it.file?.name || "upload"));
-      await xhrPostForm(API.uploadBatchAppend(jobId), fd);
+      const qs = new URLSearchParams();
+      qs.set("seq", String(it.seq || 0));
+      qs.set("filename", String(it.file?.name || "upload"));
+      qs.set("last_modified_ms", String(it.file?.lastModified || ""));
+      await xhrPostBinary(
+        `${API.uploadBatchAppend(jobId)}?${qs.toString()}`,
+        it.file,
+        String((it.file && it.file.type) || "application/octet-stream"),
+      );
       it.state = "受信済み";
     }catch(_e){
       it.state = "失敗";
@@ -924,10 +932,11 @@ async function startZipUpload(zipFile){
 
   const doZipUploadChunked = async () => {
     const total = Number(zipFile.size || 0);
-    const initFd = new FormData();
-    initFd.append("filename", zipFile.name);
-    initFd.append("total_bytes", String(total));
-    const init = await xhrPostForm(API.uploadZipChunkInit, initFd);
+    const initQs = new URLSearchParams();
+    initQs.set("filename", zipFile.name);
+    initQs.set("total_bytes", String(total));
+    const initRes = await apiFetch(`${API.uploadZipChunkInit}?${initQs.toString()}`, { method: "POST" });
+    const init = await apiJson(initRes);
     const token = init?.token;
     if(!token) throw new Error("chunk init failed");
 
@@ -937,20 +946,25 @@ async function startZipUpload(zipFile){
       if(state.uploadStop) throw new Error("cancelled");
       const end = Math.min(total, offset + chunkSize);
       const blob = zipFile.slice(offset, end);
-      const fd = new FormData();
-      fd.append("token", token);
-      fd.append("offset", String(offset));
-      fd.append("chunk", blob, zipFile.name);
-      await xhrPostForm(API.uploadZipChunkAppend, fd, (l, _t) => {
-        setSendProgress(offset + Number(l||0), total);
-      });
+      const qs = new URLSearchParams();
+      qs.set("token", token);
+      qs.set("offset", String(offset));
+      await xhrPostBinary(
+        `${API.uploadZipChunkAppend}?${qs.toString()}`,
+        blob,
+        "application/octet-stream",
+        (l, _t) => {
+          setSendProgress(offset + Number(l || 0), total);
+        },
+      );
       offset = end;
       setSendProgress(offset, total);
     }
 
-    const finFd = new FormData();
-    finFd.append("token", token);
-    return await xhrPostForm(API.uploadZipChunkFinish, finFd);
+    const finQs = new URLSearchParams();
+    finQs.set("token", token);
+    const finRes = await apiFetch(`${API.uploadZipChunkFinish}?${finQs.toString()}`, { method: "POST" });
+    return await apiJson(finRes);
   };
 
   let data = null;
