@@ -83,46 +83,6 @@ function xhrPostForm(url, formData, onProgress){
 }
 
 
-function xhrPostBinary(url, body, contentType, onProgress){
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", url, true);
-    xhr.withCredentials = true;
-    if(contentType) xhr.setRequestHeader("Content-Type", contentType);
-    if(xhr.upload && onProgress){
-      xhr.upload.onprogress = (e) => {
-        try{
-          const loaded = Number(e.loaded || 0);
-          const total = e.lengthComputable ? Number(e.total || 0) : 0;
-          onProgress(loaded, total);
-        }catch(_e){}
-      };
-    }
-    xhr.onerror = () => reject(new TypeError("Failed to fetch"));
-    xhr.onload = () => {
-      if(xhr.status === 401){
-        location.replace("/login.html");
-        reject(new Error("unauthorized"));
-        return;
-      }
-      if(xhr.status === 403){
-        const target = (typeof window !== "undefined" && window.location && window.location.pathname !== "/") ? "/" : null;
-        if(target) location.replace(target);
-        reject(new Error("forbidden"));
-        return;
-      }
-      const text = xhr.responseText || "";
-      if(xhr.status < 200 || xhr.status >= 300){
-        reject(new Error(`${xhr.status} ${(text||"").slice(0,140)}`));
-        return;
-      }
-      if(!text){ resolve(null); return; }
-      try{ resolve(JSON.parse(text)); }
-      catch(_e){ reject(new Error(`bad json: ${(text||"").slice(0,140)}`)); }
-    };
-    xhr.send(body);
-  });
-}
 const state = {
   user: null,
   uploadQueue: [],
@@ -880,15 +840,11 @@ async function startUploadFiles(files){
     uploadListUpdateItem(it);
     uploadProgressUpdate();
     try{
-      const qs = new URLSearchParams();
-      qs.set("seq", String(it.seq || 0));
-      qs.set("filename", String(it.file?.name || "upload"));
-      qs.set("last_modified_ms", String(it.file?.lastModified || ""));
-      await xhrPostBinary(
-        `${API.uploadBatchAppend(jobId)}?${qs.toString()}`,
-        it.file,
-        String((it.file && it.file.type) || "application/octet-stream"),
-      );
+      const fd = new FormData();
+      fd.append("seq", String(it.seq || 0));
+      fd.append("last_modified_ms", String(it.file?.lastModified || ""));
+      fd.append("file", it.file, String(it.file?.name || "upload"));
+      await xhrPostForm(API.uploadBatchAppend(jobId), fd);
       it.state = "受信済み";
     }catch(_e){
       it.state = "失敗";

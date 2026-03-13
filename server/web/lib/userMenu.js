@@ -66,7 +66,8 @@ function buildUpdateNotice(state){
     link.href = releaseUrl;
     link.target = "_blank";
     link.rel = "noopener noreferrer";
-    link.textContent = releaseUrl;
+    link.textContent = "GitHubの最新版を開く";
+    link.title = releaseUrl;
     popup.appendChild(link);
   }
 
