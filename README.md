@@ -5,7 +5,7 @@
 - macOS/Linux: `sh run.sh`
 
 起動後にコンソールへ URL が表示されます。
-- Local: http://localhost:32287
+- Local: `http://localhost:32287`
 - Tunnel: https://...trycloudflare.com (有効な場合)
 ## 公開用アドレスを固定する（Quick Tunnel 以外で運用したい場合）
 
