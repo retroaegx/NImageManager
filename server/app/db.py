@@ -471,6 +471,8 @@ def migrate_db(conn: sqlite3.Connection) -> None:
     _ensure_col("image_files", "size", "size INTEGER")
     _ensure_col("upload_zip_jobs", "source_kind", "source_kind TEXT NOT NULL DEFAULT 'zip'")
     _ensure_col("upload_zip_jobs", "staging_dir", "staging_dir TEXT")
+    _ensure_col("upload_zip_jobs", "bookmark_enabled", "bookmark_enabled INTEGER NOT NULL DEFAULT 0")
+    _ensure_col("upload_zip_jobs", "bookmark_list_id", "bookmark_list_id INTEGER")
     _ensure_col("upload_zip_items", "staged_path", "staged_path TEXT")
     _ensure_col("upload_zip_items", "mtime_iso", "mtime_iso TEXT")
 
@@ -1143,6 +1145,8 @@ CREATE TABLE IF NOT EXISTS upload_zip_jobs (
   filename       TEXT,
   source_kind    TEXT NOT NULL DEFAULT 'zip',
   staging_dir    TEXT,
+  bookmark_enabled INTEGER NOT NULL DEFAULT 0,
+  bookmark_list_id INTEGER,
   total          INTEGER NOT NULL DEFAULT 0,
   done           INTEGER NOT NULL DEFAULT 0,
   failed         INTEGER NOT NULL DEFAULT 0,

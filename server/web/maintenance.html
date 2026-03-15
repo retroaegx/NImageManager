@@ -52,7 +52,7 @@
         <div class="card">
           <div class="panelTitleRow">
             <h2>メンテナンス</h2>
-            <div class="small">再解析は全件対象・100件ずつ・0.2秒間隔でバックグラウンド実行します。</div>
+            <div class="small">再解析は全件対象・100件ずつ・0.2秒間隔、派生画像補完は全件走査・100件ずつ・0.1秒間隔でバックグラウンド実行します。</div>
           </div>
 
           <div class="adminGrid">
@@ -125,10 +125,53 @@
                 <label>履歴（直近5回）</label>
                 <div id="rebuildHistory" class="maintHistory"></div>
               </div>
+
+              <div style="height:14px"></div>
+              <h3 style="margin-top:0">派生画像補完</h3>
+              <div id="derivativeFillSummary" class="maintSummary"></div>
+
+              <div class="row" style="gap:10px; align-items:center; flex-wrap:wrap">
+                <button id="startDerivativeFillBtn" class="primaryBtn" style="min-width:240px">派生画像補完</button>
+                <span id="derivativeFillErr" class="err"></span>
+              </div>
+              <div id="derivativeFillLockReason" class="small maintHint"></div>
+              <div class="small maintHint">サムネイル画像とオーバーレイ画像を全件走査し、未作成または利用不能なものを補完します。</div>
+
+              <div class="maintStateBox">
+                <div class="maintStateRow">
+                  <div class="maintStateLabel">状態</div>
+                  <div id="derivativeFillStatus" class="maintStateValue"></div>
+                </div>
+
+                <div class="maintProgress">
+                  <div id="derivativeFillProgressFill" class="maintProgressFill"></div>
+                </div>
+                <div id="derivativeFillProgressText" class="small maintHint"></div>
+
+                <div class="maintKvGrid">
+                  <div class="maintKv"><span class="k">開始</span><span id="derivativeFillStarted"></span></div>
+                  <div class="maintKv"><span class="k">最終更新</span><span id="derivativeFillUpdated"></span></div>
+                  <div class="maintKv"><span class="k">処理</span><span id="derivativeFillCounts"></span></div>
+                  <div class="maintKv"><span class="k">カーソル</span><span id="derivativeFillCursor"></span></div>
+                  <div class="maintKv"><span class="k">サムネ不足</span><span id="derivativeFillMissingGrid"></span></div>
+                  <div class="maintKv"><span class="k">オーバーレイ不足</span><span id="derivativeFillMissingOverlay"></span></div>
+                  <div class="maintKv"><span class="k">heartbeat</span><span id="derivativeFillHeartbeat"></span></div>
+                </div>
+              </div>
+
+              <div class="field" style="margin-top:14px">
+                <label>履歴（直近5回）</label>
+                <div id="derivativeFillHistory" class="maintHistory"></div>
+              </div>
+
+              <div class="field" style="margin-top:14px">
+                <label>失敗（直近100件）</label>
+                <div id="derivativeFillErrors" class="maintHistory"></div>
+              </div>
             </div>
 
             <div class="adminCard adminGrow">
-              <h3 style="margin-top:0">失敗一覧（最新100件） <span id="reparseSkippedLabel" class="small" style="opacity:.85"></span></h3>
+              <h3 style="margin-top:0">再解析失敗一覧（最新100件） <span id="reparseSkippedLabel" class="small" style="opacity:.85"></span></h3>
               <div class="adminTableWrap">
                 <table class="adminTable">
                   <thead>
@@ -150,6 +193,6 @@
     </main>
   </div>
 
-  <script type="module" src="/maintenance.js?v=42"></script>
+  <script type="module" src="/maintenance.js?v=43"></script>
 </body>
 </html>

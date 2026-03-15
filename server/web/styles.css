@@ -628,9 +628,70 @@ input:focus, select:focus{
 
 /* ===== Upload page ===== */
 .panelTitleRow{ display:flex; flex-direction:column; gap: 6px; margin-bottom: 10px; }
-.uploadLayout{ display:grid; grid-template-columns: 1fr 360px; gap: 14px; align-items:start; }
+.uploadPanelHead{
+  display:grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items:start;
+  gap: 8px 14px;
+  margin-bottom: 12px;
+}
+.uploadPanelTitle{
+  min-width: 0;
+  padding-top: 2px;
+}
+.uploadHeaderTools{
+  min-width: 0;
+  display:flex;
+  justify-content:flex-end;
+  align-items:flex-start;
+  align-self:start;
+}
+.uploadBookmarkInline{
+  min-width: 0;
+  max-width: min(100%, 420px);
+  display:flex;
+  flex-direction:column;
+  align-items:flex-end;
+  gap: 6px;
+}
+.uploadBookmarkInlineRow{
+  display:inline-flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap: 10px;
+  min-width: 0;
+}
+.uploadBookmarkInlineHead{
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  color: rgba(255,255,255,0.78);
+  white-space: nowrap;
+  line-height: 1.1;
+}
+.uploadBookmarkInlineBody{
+  min-width: 0;
+  width: min(340px, 100%);
+  display:flex;
+  justify-content:flex-end;
+  align-items:center;
+}
+.uploadBookmarkInlineToggle{
+  min-width: 58px;
+}
+.uploadBookmarkInlineSelect{
+  width: 100%;
+  min-width: 0;
+  max-width: 340px;
+}
+.uploadBookmarkInlineSelect.hidden{
+  display:none !important;
+}
+.uploadLayout{ display:grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 14px; align-items:start; }
 .uploadMain{ min-width: 0; display:flex; flex-direction:column; }
 .uploadSide{ padding: 12px; border-radius: var(--r20); border:1px solid rgba(255,255,255,0.14); background: rgba(0,0,0,0.14); backdrop-filter: blur(18px); box-shadow: 0 18px 50px rgba(0,0,0,0.44); }
+.uploadSummaryHead{ margin: 0 0 10px; }
 
 .dropZone{
   border:1px dashed rgba(255,255,255,0.22);
@@ -969,8 +1030,48 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
   .card{ padding: 10px; }
 
   /* Layout packs */
+  .uploadPanelHead{
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items:start;
+    gap: 6px 12px;
+    margin-bottom: 10px;
+  }
+  .uploadHeaderTools{
+    justify-content:flex-end;
+    align-self:start;
+  }
+  .uploadBookmarkInline{
+    max-width: min(100%, 360px);
+    gap: 5px;
+  }
+  .uploadBookmarkInlineRow{
+    gap: 8px;
+  }
+  .uploadBookmarkInlineHead{
+    font-size: 11px;
+  }
+  .uploadBookmarkInlineBody{
+    width: min(280px, 100%);
+  }
+  .uploadBookmarkInlineToggle{
+    min-width: 56px;
+    padding: 7px 12px;
+  }
+  .uploadBookmarkInlineSelect{
+    max-width: none;
+  }
   .uploadLayout{ grid-template-columns: 1fr; }
-  .uploadSide{ margin-top: 12px; }
+
+  .uploadSide{
+    margin: 10px 0 0;
+    padding: 8px 10px;
+  }
+  .uploadSummaryHead{ margin: 0 0 8px; }
+  .uploadSumItem{ padding: 7px 9px; }
+  .dropZone{ padding: 14px 12px; }
+  .dzText{ margin-top: 6px; font-size: 14px; }
+  .uploadMain .row[style]{ flex-wrap: wrap; gap: 8px; }
+  .uploadMain .row[style] > button{ flex: 1 1 140px; }
 
   /* grid: mobile is ALWAYS 3 columns */
   .grid:not(.list){ grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
@@ -1611,6 +1712,45 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
 
 
 /* thumbnails square: handled by the single 1024px breakpoint above */
+@media (max-width: 640px){
+  .uploadPanelHead{
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items:start;
+    gap: 4px 8px;
+  }
+  .uploadPanelTitle{
+    padding-top: 0;
+  }
+  .uploadHeaderTools{
+    width: auto;
+    justify-self:end;
+  }
+  .uploadBookmarkInline{
+    max-width: none;
+    gap: 4px;
+  }
+  .uploadBookmarkInlineRow{
+    gap: 6px;
+  }
+  .uploadBookmarkInlineHead{
+    font-size: 10px;
+    max-width: 108px;
+    text-align: right;
+    white-space: normal;
+  }
+  .uploadBookmarkInlineBody{
+    width: min(180px, 48vw);
+  }
+  .uploadBookmarkInlineToggle{
+    min-width: 54px;
+  }
+  .uploadBookmarkInlineSelect{
+    max-width: none;
+    padding: 8px 10px;
+    font-size: 12px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce){
   .tile{ animation: none; }
   .overlay{ transition: none; }

@@ -2064,6 +2064,8 @@ def admin_reparse(req: ReparseReq, _admin: dict = Depends(require_admin)):
     try:
         if _rebuild_active(conn):
             raise HTTPException(status_code=409, detail="統計再集計が実行中です")
+        if _derivative_fill_active(conn):
+            raise HTTPException(status_code=409, detail="派生画像補完が実行中です")
         # ---- persistent ops state (best-effort) ----
         params_key = {
             "date_from": (req.date_from or "") or None,
@@ -2432,6 +2434,118 @@ def _rebuild_active(conn: sqlite3.Connection) -> bool:
         return False
 
 
+def _derivative_fill_active(conn: sqlite3.Connection) -> bool:
+    try:
+        running_flag = int(_kv_get(conn, "derivative_fill_bg_running") or "0")
+        hb_ts = int(_kv_get(conn, "derivative_fill_bg_heartbeat") or "0")
+        return _hb_active(running_flag, hb_ts)
+    except Exception:
+        return False
+
+
+def _derivative_kind_ready(conn: sqlite3.Connection, image_id: int, kind: str) -> bool:
+    for fmt in ("avif", "webp"):
+        if not _derivative_format_enabled(kind, fmt):
+            continue
+        row = conn.execute(
+            "SELECT image_id, width, height, quality, disk_path, size, bytes FROM image_derivatives WHERE image_id=? AND kind=? AND format=?",
+            (int(image_id), str(kind), str(fmt)),
+        ).fetchone()
+        if _derivative_row_is_ready(conn, row, kind=str(kind), fmt=str(fmt)):
+            return True
+    return False
+
+
+def _missing_derivative_kinds(conn: sqlite3.Connection, image_id: int) -> tuple[str, ...]:
+    missing: list[str] = []
+    for kind in ("grid", "overlay"):
+        if not _derivative_kind_ready(conn, int(image_id), kind):
+            missing.append(kind)
+    return tuple(missing)
+
+
+def _estimate_missing_derivative_count(conn: sqlite3.Connection, kind: str) -> int:
+    try:
+        row = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM images i
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM image_derivatives d
+              WHERE d.image_id = i.id
+                AND d.kind = ?
+                AND d.format = 'webp'
+            )
+            """,
+            (str(kind),),
+        ).fetchone()
+        return int(row[0] if isinstance(row, tuple) else row[0] or 0)
+    except Exception:
+        return 0
+
+
+def _fill_missing_derivatives_worker(run_id: int, batch_size: int = 100, interval_sec: float = 0.1) -> None:
+    try:
+        while True:
+            conn = get_conn()
+            try:
+                _kv_set(conn, "derivative_fill_bg_running", "1")
+                _kv_set(conn, "derivative_fill_bg_heartbeat", str(_hb_now()))
+
+                after_id = int(_kv_get(conn, "derivative_fill_after_id") or "0")
+                rows = conn.execute(
+                    "SELECT id FROM images WHERE id > ? ORDER BY id ASC LIMIT ?",
+                    (after_id, int(batch_size)),
+                ).fetchall()
+                ids = [int(r[0] if isinstance(r, tuple) else r["id"]) for r in rows]
+
+                if not ids:
+                    _run_add_counts(conn, run_id, last_image_id=after_id, processed=0, updated=0, error_count=0, done=True)
+                    _set_run_status(conn, run_id, "done")
+                    _kv_set(conn, "derivative_fill_bg_running", "0")
+                    _kv_set(conn, "derivative_fill_bg_heartbeat", str(_hb_now()))
+                    conn.commit()
+                    break
+
+                updated_n = 0
+                error_n = 0
+                last_id = after_id
+                for iid in ids:
+                    last_id = int(iid)
+                    try:
+                        missing_kinds = _missing_derivative_kinds(conn, int(iid))
+                        if missing_kinds:
+                            _ensure_derivatives(int(iid), missing_kinds, trigger="maintenance_fill")
+                            updated_n += 1
+                    except Exception as exc:
+                        error_n += 1
+                        _run_log_error(conn, run_id, int(iid), "derivative_fill", str(exc) or "error")
+                    if (last_id % 20) == 0:
+                        _kv_set(conn, "derivative_fill_bg_heartbeat", str(_hb_now()))
+
+                _kv_set(conn, "derivative_fill_after_id", str(int(last_id)))
+                _run_add_counts(conn, run_id, last_image_id=int(last_id), processed=len(ids), updated=updated_n, error_count=error_n, done=False)
+                _kv_set(conn, "derivative_fill_bg_heartbeat", str(_hb_now()))
+                conn.commit()
+            finally:
+                conn.close()
+
+            time.sleep(max(0.05, float(interval_sec)))
+    except Exception:
+        try:
+            conn = get_conn()
+            try:
+                _kv_set(conn, "derivative_fill_bg_running", "0")
+                _kv_set(conn, "derivative_fill_bg_heartbeat", str(_hb_now()))
+                _set_run_status(conn, run_id, "stopped")
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+
 def _reparse_all_worker(run_id: int, batch_size: int = 100, interval_sec: float = 0.2) -> None:
     """Background worker: reparse all images in batches."""
     try:
@@ -2526,6 +2640,8 @@ def admin_reparse_all_start(_admin: dict = Depends(require_admin)):
     try:
         if _rebuild_active(conn):
             raise HTTPException(status_code=409, detail="統計再集計が実行中です")
+        if _derivative_fill_active(conn):
+            raise HTTPException(status_code=409, detail="派生画像補完が実行中です")
 
         run_id = int(_kv_get(conn, "reparse_run_id") or "0")
         run = _fetch_run(conn, run_id)
@@ -2615,6 +2731,8 @@ def admin_rebuild_stats_start(_admin: dict = Depends(require_admin)):
     try:
         if _reparse_active(conn):
             raise HTTPException(status_code=409, detail="再解析が実行中です")
+        if _derivative_fill_active(conn):
+            raise HTTPException(status_code=409, detail="派生画像補完が実行中です")
 
         run_id = int(_kv_get(conn, "rebuild_run_id") or "0")
         run = _fetch_run(conn, run_id)
@@ -2701,6 +2819,161 @@ def admin_rebuild_state(_admin: dict = Depends(require_admin)):
             "run": run,
             "active": bool(active),
             "hb_age_sec": hb_age_sec,
+            "history": history,
+        }
+    finally:
+        conn.close()
+
+
+@api_router.post("/admin/derivative_fill_start")
+def admin_derivative_fill_start(_admin: dict = Depends(require_admin)):
+    conn = get_conn()
+    try:
+        if _reparse_active(conn):
+            raise HTTPException(status_code=409, detail="再解析が実行中です")
+        if _rebuild_active(conn):
+            raise HTTPException(status_code=409, detail="統計再集計が実行中です")
+
+        run_id = int(_kv_get(conn, "derivative_fill_run_id") or "0")
+        run = _fetch_run(conn, run_id)
+
+        if not run or run.get("status") != "running":
+            run_id = _create_run(conn, "fill_derivatives_missing", {"batch": 100, "interval_sec": 0.1})
+            _kv_set(conn, "derivative_fill_run_id", str(int(run_id)))
+            _kv_set(conn, "derivative_fill_after_id", "0")
+            _kv_set(conn, "derivative_fill_bg_running", "0")
+            _kv_set(conn, "derivative_fill_bg_heartbeat", "0")
+            conn.commit()
+
+        active = _derivative_fill_active(conn)
+        started = False
+        if not active:
+            with _MAINT_LOCK:
+                if not _derivative_fill_active(conn):
+                    _kv_set(conn, "derivative_fill_bg_running", "1")
+                    _kv_set(conn, "derivative_fill_bg_heartbeat", str(_hb_now()))
+                    conn.commit()
+                    threading.Thread(target=_fill_missing_derivatives_worker, args=(int(run_id),), daemon=True).start()
+                    started = True
+
+        return {"ok": True, "run_id": int(run_id), "started": bool(started)}
+    finally:
+        conn.close()
+
+
+@api_router.get("/admin/derivative_fill_state")
+def admin_derivative_fill_state(_admin: dict = Depends(require_admin)):
+    conn = get_conn()
+    try:
+        run_id = int(_kv_get(conn, "derivative_fill_run_id") or "0")
+        after_id = int(_kv_get(conn, "derivative_fill_after_id") or "0")
+        run = _fetch_run(conn, run_id)
+
+        running_flag = int(_kv_get(conn, "derivative_fill_bg_running") or "0")
+        hb_ts = int(_kv_get(conn, "derivative_fill_bg_heartbeat") or "0")
+        active = _hb_active(running_flag, hb_ts) and (not run or (run.get("status") == "running"))
+
+        hb_age_sec = None
+        try:
+            hb_age_sec = int(_hb_now() - int(hb_ts or 0)) if int(hb_ts or 0) > 0 else None
+        except Exception:
+            hb_age_sec = None
+
+        total_images = 0
+        max_image_id = 0
+        try:
+            total_images = int(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0] or 0)
+            max_image_id = int(conn.execute("SELECT COALESCE(MAX(id),0) FROM images").fetchone()[0] or 0)
+        except Exception:
+            total_images = 0
+            max_image_id = 0
+
+        grid_missing = _estimate_missing_derivative_count(conn, "grid")
+        overlay_missing = _estimate_missing_derivative_count(conn, "overlay")
+
+        errors: list[dict] = []
+        if run_id > 0:
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT id, image_id, stage, error, created_at
+                    FROM maintenance_errors
+                    WHERE run_id=?
+                    ORDER BY id DESC
+                    LIMIT 100
+                    """,
+                    (run_id,),
+                ).fetchall()
+                for r in rows:
+                    if isinstance(r, tuple):
+                        errors.append({
+                            "id": int(r[0]),
+                            "image_id": int(r[1] or 0),
+                            "stage": r[2],
+                            "error": r[3],
+                            "created_at": r[4],
+                        })
+                    else:
+                        errors.append({
+                            "id": int(r["id"]),
+                            "image_id": int(r["image_id"] or 0),
+                            "stage": r["stage"],
+                            "error": r["error"],
+                            "created_at": r["created_at"],
+                        })
+            except Exception:
+                errors = []
+
+        history: list[dict] = []
+        try:
+            rows2 = conn.execute(
+                """
+                SELECT id, kind, status, created_at, updated_at, last_image_id, processed, updated, error_count
+                FROM maintenance_runs
+                WHERE kind='fill_derivatives_missing'
+                ORDER BY id DESC
+                LIMIT 5
+                """
+            ).fetchall()
+            for r in rows2:
+                if isinstance(r, tuple):
+                    history.append({
+                        "id": int(r[0]),
+                        "kind": r[1],
+                        "status": r[2],
+                        "created_at": r[3],
+                        "updated_at": r[4],
+                        "last_image_id": int(r[5] or 0),
+                        "processed": int(r[6] or 0),
+                        "updated": int(r[7] or 0),
+                        "error_count": int(r[8] or 0),
+                    })
+                else:
+                    history.append({
+                        "id": int(r["id"]),
+                        "kind": r["kind"],
+                        "status": r["status"],
+                        "created_at": r["created_at"],
+                        "updated_at": r["updated_at"],
+                        "last_image_id": int(r["last_image_id"] or 0),
+                        "processed": int(r["processed"] or 0),
+                        "updated": int(r["updated"] or 0),
+                        "error_count": int(r["error_count"] or 0),
+                    })
+        except Exception:
+            history = []
+
+        return {
+            "run_id": run_id,
+            "after_id": after_id,
+            "run": run,
+            "active": bool(active),
+            "hb_age_sec": hb_age_sec,
+            "total_images": total_images,
+            "max_image_id": max_image_id,
+            "grid_missing": grid_missing,
+            "overlay_missing": overlay_missing,
+            "errors": errors,
             "history": history,
         }
     finally:
@@ -3700,6 +3973,8 @@ async def upload_image(
     bg: BackgroundTasks,
     file: UploadFile = File(...),
     last_modified_ms: str | None = Form(default=None),
+    bookmark_enabled: str | None = Form(default=None),
+    bookmark_list_id: str | None = Form(default=None),
     user: dict = Depends(get_user),
 ):
     safe_name = _safe_basename(file.filename or "upload")
@@ -3724,6 +3999,12 @@ async def upload_image(
 
         conn = get_conn()
         try:
+            upload_bookmark_list_id = _normalize_upload_bookmark_list_id(
+                conn,
+                user_id=int(user["id"]),
+                bookmark_enabled=bookmark_enabled,
+                bookmark_list_id=bookmark_list_id,
+            )
             return _upload_image_from_path_core(
                 conn=conn,
                 bg=bg,
@@ -3733,6 +4014,7 @@ async def upload_image(
                 mtime_iso=mtime,
                 user_id=int(user["id"]),
                 username=str(user["username"]),
+                upload_bookmark_list_id=upload_bookmark_list_id,
             )
         finally:
             conn.close()
@@ -3767,6 +4049,7 @@ def _upload_image_core(
     mtime_iso: str,
     user_id: int,
     username: str,
+    upload_bookmark_list_id: int | None = None,
 ) -> dict:
     """Core upload logic used by both direct upload and zip jobs.
 
@@ -3791,6 +4074,8 @@ def _upload_image_core(
     row = conn.execute("SELECT id FROM images WHERE sha256=?", (sha,)).fetchone()
     if row:
         iid = int(row["id"])
+        _apply_upload_bookmark(conn, user_id=int(user_id), image_id=iid, bookmark_list_id=upload_bookmark_list_id)
+        conn.commit()
         return {"ok": True, "dedup": True, "image_id": iid, "thumb": _thumb_url(conn, iid, kind="grid"), "detail": _image_detail_summary(conn, iid, user_id=int(user_id)), "dedup_reason": "binary"}
 
     # basic image info
@@ -3886,6 +4171,8 @@ def _upload_image_core(
         ).fetchone()
         if row2:
             iid = int(row2["id"])
+            _apply_upload_bookmark(conn, user_id=int(user_id), image_id=iid, bookmark_list_id=upload_bookmark_list_id)
+            conn.commit()
             return {"ok": True, "dedup": True, "image_id": iid, "thumb": _thumb_url(conn, iid, kind="grid"), "detail": _image_detail_summary(conn, iid, user_id=int(user_id)), "dedup_reason": "full"}
 
     # tags
@@ -4066,6 +4353,8 @@ def _upload_image_core(
         stats_service.bump_creator_month(conn, int(user_id), ymd[:7])
         stats_service.bump_creator_year(conn, int(user_id), ymd[:4])
 
+    _apply_upload_bookmark(conn, user_id=int(user_id), image_id=int(image_id), bookmark_list_id=upload_bookmark_list_id)
+
     conn.commit()
 
     _queue_derivative_request(
@@ -4194,6 +4483,7 @@ def _process_upload_item_job(item_id: int, source: str | None = None, trace_id: 
             """
             SELECT i.id, i.job_id, i.filename, i.staged_path, i.mtime_iso, i.state,
                    j.status AS job_status, j.source_kind, j.staging_dir, j.user_id,
+                   j.bookmark_enabled, j.bookmark_list_id,
                    u.username AS username
             FROM upload_zip_items i
             JOIN upload_zip_jobs j ON j.id=i.job_id
@@ -4216,6 +4506,12 @@ def _process_upload_item_job(item_id: int, source: str | None = None, trace_id: 
         conn.execute("UPDATE upload_zip_items SET state='処理中', message=NULL WHERE id=?", (int(item_id),))
         status, _staging_dir, _source_kind = _refresh_upload_job_progress(conn, job_id, seal=False)
         conn.commit()
+        upload_bookmark_list_id = _job_upload_bookmark_list_id(
+            conn,
+            user_id=int(row["user_id"]),
+            bookmark_enabled=row["bookmark_enabled"],
+            bookmark_list_id=row["bookmark_list_id"],
+        )
         res = _upload_image_from_path_core(
             conn=conn,
             bg=None,
@@ -4227,6 +4523,7 @@ def _process_upload_item_job(item_id: int, source: str | None = None, trace_id: 
             username=str(row["username"] or ""),
             ensure_derivatives=True,
             derivative_kinds=("grid", "overlay"),
+            upload_bookmark_list_id=upload_bookmark_list_id,
         )
         state_txt = "重複" if bool(res.get("dedup")) else "完了"
         image_id = int(res.get("image_id") or 0) or None
@@ -4276,6 +4573,7 @@ def _upload_image_from_path_core(
     username: str,
     ensure_derivatives: bool = True,
     derivative_kinds: tuple[str, ...] = ("grid", "overlay"),
+    upload_bookmark_list_id: int | None = None,
 ) -> dict:
     import hashlib
     from PIL import Image, ImageOps
@@ -4288,7 +4586,10 @@ def _upload_image_from_path_core(
     sha = hashlib.sha256(raw).hexdigest()
     row = conn.execute("SELECT id FROM images WHERE sha256=?", (sha,)).fetchone()
     if row:
-        return {"ok": True, "dedup": True, "image_id": int(row["id"]), "dedup_reason": "binary"}
+        iid = int(row["id"])
+        _apply_upload_bookmark(conn, user_id=int(user_id), image_id=iid, bookmark_list_id=upload_bookmark_list_id)
+        conn.commit()
+        return {"ok": True, "dedup": True, "image_id": iid, "dedup_reason": "binary"}
 
     width = height = None
     _fmt = ""
@@ -4543,6 +4844,8 @@ def _upload_image_from_path_core(
         stats_service.bump_creator_month(conn, int(user_id), ymd[:7])
         stats_service.bump_creator_year(conn, int(user_id), ymd[:4])
 
+    _apply_upload_bookmark(conn, user_id=int(user_id), image_id=int(image_id), bookmark_list_id=upload_bookmark_list_id)
+
     if ensure_derivatives and base_image is not None:
         derivative_created_at_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         for kind, fmt, dw, dh, quality, blob in _build_derivative_rows_from_base_image(base_image, kinds=derivative_kinds):
@@ -4576,6 +4879,8 @@ async def upload_zip(
     user: dict = Depends(get_user),
 ):
     filename = request.query_params.get("filename") or "upload.zip"
+    bookmark_enabled = request.query_params.get("bookmark_enabled")
+    bookmark_list_id = request.query_params.get("bookmark_list_id")
 
     # Stream to disk (avoid loading large zip into memory)
     import tempfile
@@ -4609,9 +4914,15 @@ async def upload_zip(
 
     conn = get_conn()
     try:
+        upload_bookmark_list_id = _normalize_upload_bookmark_list_id(
+            conn,
+            user_id=int(user["id"]),
+            bookmark_enabled=bookmark_enabled,
+            bookmark_list_id=bookmark_list_id,
+        )
         cur = conn.execute(
-            "INSERT INTO upload_zip_jobs(user_id, filename, source_kind, total, status, staging_dir) VALUES (?,?,?,?,?,?)",
-            (int(user["id"]), filename, "zip", int(total), "queued", ""),
+            "INSERT INTO upload_zip_jobs(user_id, filename, source_kind, staging_dir, bookmark_enabled, bookmark_list_id, total, status) VALUES (?,?,?,?,?,?,?,?)",
+            (int(user["id"]), filename, "zip", "", 1 if upload_bookmark_list_id else 0, upload_bookmark_list_id, int(total), "queued"),
         )
         job_id = int(cur.lastrowid)
         conn.commit()
@@ -4655,6 +4966,8 @@ async def upload_zip_chunk_init(
     user: dict = Depends(get_user),
 ):
     filename = request.query_params.get("filename") or "upload.zip"
+    bookmark_enabled = request.query_params.get("bookmark_enabled")
+    bookmark_list_id = request.query_params.get("bookmark_list_id")
     try:
         total_bytes = int(request.query_params.get("total_bytes") or 0)
     except Exception:
@@ -4665,6 +4978,16 @@ async def upload_zip_chunk_init(
     fd, tmp = tempfile.mkstemp(prefix="nim_zipc_", suffix=".zip")
     os.close(fd)
     token = uuid.uuid4().hex
+    conn = get_conn()
+    try:
+        upload_bookmark_list_id = _normalize_upload_bookmark_list_id(
+            conn,
+            user_id=int(user["id"]),
+            bookmark_enabled=bookmark_enabled,
+            bookmark_list_id=bookmark_list_id,
+        )
+    finally:
+        conn.close()
     with _ZIP_INCOMING_LOCK:
         _ZIP_INCOMING[token] = {
             "user_id": int(user["id"]),
@@ -4672,6 +4995,8 @@ async def upload_zip_chunk_init(
             "total_bytes": int(total_bytes or 0),
             "received": 0,
             "tmp": tmp,
+            "bookmark_enabled": 1 if upload_bookmark_list_id else 0,
+            "bookmark_list_id": upload_bookmark_list_id,
             "updated_at": time.time(),
         }
     return {"ok": True, "token": token}
@@ -4771,6 +5096,8 @@ async def upload_zip_chunk_finish(
 
     tmp = str(st.get("tmp") or "")
     filename = str(st.get("filename") or "upload.zip")
+    bookmark_enabled = int(st.get("bookmark_enabled") or 0)
+    bookmark_list_id = st.get("bookmark_list_id")
     received = int(st.get("received") or 0)
     total_bytes = int(st.get("total_bytes") or 0)
 
@@ -4783,8 +5110,8 @@ async def upload_zip_chunk_finish(
     conn = get_conn()
     try:
         cur = conn.execute(
-            "INSERT INTO upload_zip_jobs(user_id, filename, source_kind, total, status, staging_dir) VALUES (?,?,?,?,?,?)",
-            (int(user["id"]), filename, "zip", int(total), "queued", ""),
+            "INSERT INTO upload_zip_jobs(user_id, filename, source_kind, staging_dir, bookmark_enabled, bookmark_list_id, total, status) VALUES (?,?,?,?,?,?,?,?)",
+            (int(user["id"]), filename, "zip", "", int(bookmark_enabled or 0), (int(bookmark_list_id) if bookmark_list_id else None), int(total), "queued"),
         )
         job_id = int(cur.lastrowid)
         conn.commit()
@@ -4800,6 +5127,8 @@ async def upload_zip_chunk_finish(
 
 class UploadBatchInitReq(BaseModel):
     total: int = 0
+    bookmark_enabled: int | bool | str | None = None
+    bookmark_list_id: int | None = None
 
 
 @api_router.post("/upload_batch/init")
@@ -4808,9 +5137,15 @@ async def upload_batch_init(request: Request, user: dict = Depends(get_user)):
     requested_total = max(0, min(100000, int(req.total or 0)))
     conn = get_conn()
     try:
+        upload_bookmark_list_id = _normalize_upload_bookmark_list_id(
+            conn,
+            user_id=int(user["id"]),
+            bookmark_enabled=req.bookmark_enabled,
+            bookmark_list_id=req.bookmark_list_id,
+        )
         cur = conn.execute(
-            "INSERT INTO upload_zip_jobs(user_id, filename, source_kind, total, status, staging_dir) VALUES (?,?,?,?,?,?)",
-            (int(user["id"]), "direct upload", "direct", int(requested_total), "collecting", ""),
+            "INSERT INTO upload_zip_jobs(user_id, filename, source_kind, staging_dir, bookmark_enabled, bookmark_list_id, total, status) VALUES (?,?,?,?,?,?,?,?)",
+            (int(user["id"]), "direct upload", "direct", "", 1 if upload_bookmark_list_id else 0, upload_bookmark_list_id, int(requested_total), "collecting"),
         )
         job_id = int(cur.lastrowid)
         staging_dir = _job_staging_dir(job_id)
@@ -6565,6 +6900,79 @@ def _image_bookmarked(conn: sqlite3.Connection, user_id: int, image_id: int) -> 
         (uid, iid),
     ).fetchone()
     return 1 if r else 0
+
+
+def _parse_upload_bookmark_enabled(value) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, (int, float)):
+        return 1 if int(value) != 0 else 0
+    txt = str(value or "").strip().lower()
+    if not txt:
+        return 0
+    if txt in {"1", "true", "on", "yes", "y"}:
+        return 1
+    if txt in {"0", "false", "off", "no", "n"}:
+        return 0
+    raise HTTPException(status_code=400, detail="invalid bookmark_enabled")
+
+
+def _normalize_upload_bookmark_list_id(
+    conn: sqlite3.Connection,
+    *,
+    user_id: int,
+    bookmark_enabled,
+    bookmark_list_id,
+    require_owned: bool = True,
+) -> int | None:
+    enabled = _parse_upload_bookmark_enabled(bookmark_enabled)
+    if enabled != 1:
+        return None
+
+    uid = int(user_id)
+    default_id = _ensure_default_bookmark_list(conn, uid)
+
+    if bookmark_list_id in (None, "", 0, "0"):
+        return int(default_id)
+
+    try:
+        lid = int(bookmark_list_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid bookmark_list_id")
+    if lid <= 0:
+        return int(default_id)
+    if (not require_owned) or _user_owns_bookmark_list(conn, uid, lid):
+        return int(lid)
+    raise HTTPException(status_code=400, detail="invalid bookmark_list_id")
+
+
+def _job_upload_bookmark_list_id(conn: sqlite3.Connection, *, user_id: int, bookmark_enabled, bookmark_list_id) -> int | None:
+    try:
+        return _normalize_upload_bookmark_list_id(
+            conn,
+            user_id=int(user_id),
+            bookmark_enabled=bookmark_enabled,
+            bookmark_list_id=bookmark_list_id,
+            require_owned=False,
+        )
+    except HTTPException:
+        return _ensure_default_bookmark_list(conn, int(user_id)) if _parse_upload_bookmark_enabled(bookmark_enabled) == 1 else None
+
+
+def _apply_upload_bookmark(conn: sqlite3.Connection, *, user_id: int, image_id: int, bookmark_list_id: int | None) -> None:
+    lid = int(bookmark_list_id or 0)
+    if lid <= 0:
+        return
+    uid = int(user_id)
+    iid = int(image_id)
+    if not _user_owns_bookmark_list(conn, uid, lid):
+        lid = _ensure_default_bookmark_list(conn, uid)
+    conn.execute(
+        "INSERT OR IGNORE INTO bookmarks(list_id, image_id) VALUES (?,?)",
+        (int(lid), iid),
+    )
 
 
 @api_router.get("/bookmarks/lists")

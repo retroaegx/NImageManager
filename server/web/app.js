@@ -97,6 +97,10 @@ const state = {
     software: new Map(),
     tags: new Map(),
   },
+  uploadBookmark: {
+    enabled: false,
+    list_id: 0,
+  },
   perfEnabled: false,
   preview: {
     items: [],
@@ -295,6 +299,11 @@ function isDesktop(){
 let _activeView = "preview";
 let _previewInited = false;
 
+function isPreviewVisible(){
+  const panel = $("viewPreview");
+  return _activeView === "preview" && !!panel && !panel.classList.contains("hidden");
+}
+
 function setView(active, opts={}){
   const { pushState=true } = opts;
   const prev = _activeView;
@@ -334,6 +343,13 @@ function setView(active, opts={}){
   const appEl = $("app");
   appEl?.classList.toggle("view-preview", active === "preview");
   appEl?.classList.toggle("view-upload", active === "upload");
+
+  if(active !== "preview" && scrollObserver){
+    try{ scrollObserver.disconnect(); }catch(_e){}
+    scrollObserver = null;
+  }else if(active === "preview" && state.preview.mode === "scroll"){
+    ensureScrollObserver();
+  }
 
   if(pushState){
     try{ history.pushState(null, "", `#${active}`); }catch(_e){}
@@ -496,6 +512,70 @@ function renderUploadSummary(){
 
   box.innerHTML = "";
   box.appendChild(renderList("ソフト", softwares));
+}
+
+function _defaultUploadBookmarkListId(){
+  const lists = Array.isArray(state.bookmarks.lists) ? state.bookmarks.lists : [];
+  const def = lists.find((x) => Number(x?.is_default || 0) === 1) || lists[0] || null;
+  return def ? Number(def.id || 0) : 0;
+}
+
+function syncUploadBookmarkControls(){
+  const toggle = $("uploadBookmarkToggle");
+  const sel = $("uploadBookmarkList");
+  if(!toggle || !sel) return;
+
+  const lists = Array.isArray(state.bookmarks.lists) ? state.bookmarks.lists : [];
+  const selected = Number(state.uploadBookmark.list_id || 0);
+  const defaultId = _defaultUploadBookmarkListId();
+  const nextSelected = lists.some((x) => Number(x?.id || 0) === selected) ? selected : defaultId;
+  state.uploadBookmark.list_id = nextSelected;
+
+  sel.innerHTML = "";
+  if(!lists.length){
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "ブックマークなし";
+    sel.appendChild(opt);
+    state.uploadBookmark.enabled = false;
+  }else{
+    lists.forEach((item) => {
+      const opt = document.createElement("option");
+      const id = Number(item?.id || 0);
+      opt.value = String(id);
+      opt.textContent = Number(item?.is_default || 0) === 1 ? `${String(item?.name || "")}（既定）` : String(item?.name || "");
+      if(id === Number(state.uploadBookmark.list_id || 0)) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  }
+
+  const hasLists = lists.length > 0;
+  const enabled = !!state.uploadBookmark.enabled && hasLists;
+  toggle.classList.toggle("on", enabled);
+  toggle.classList.toggle("off", !enabled);
+  toggle.textContent = enabled ? "ON" : "OFF";
+  toggle.disabled = !hasLists;
+  toggle.title = hasLists ? "アップロード完了時にブックマークへ追加" : "ブックマークリストがありません";
+  sel.disabled = !enabled;
+  sel.classList.toggle("hidden", !enabled);
+  if(enabled && Number(state.uploadBookmark.list_id || 0) > 0){
+    sel.value = String(state.uploadBookmark.list_id || 0);
+  }
+}
+
+function getUploadBookmarkConfig(){
+  const lists = Array.isArray(state.bookmarks.lists) ? state.bookmarks.lists : [];
+  if(!state.uploadBookmark.enabled || !lists.length){
+    return { bookmark_enabled: 0, bookmark_list_id: null };
+  }
+  const sel = $("uploadBookmarkList");
+  const fallbackId = _defaultUploadBookmarkListId();
+  const selectedId = Number(sel?.value || state.uploadBookmark.list_id || fallbackId || 0);
+  state.uploadBookmark.list_id = selectedId > 0 ? selectedId : fallbackId;
+  return {
+    bookmark_enabled: 1,
+    bookmark_list_id: Number(state.uploadBookmark.list_id || fallbackId || 0) || null,
+  };
 }
 
 function pickTopTags(detail, limit=6){
@@ -825,9 +905,10 @@ async function startUploadFiles(files){
 
   let jobId = 0;
   try{
+    const bookmarkConfig = getUploadBookmarkConfig();
     const initRes = await apiFetch(API.uploadBatchInit, {
       method: "POST",
-      body: JSON.stringify({ total: state.uploadQueue.length }),
+      body: JSON.stringify({ total: state.uploadQueue.length, ...bookmarkConfig }),
     });
     const initData = await apiJson(initRes);
     jobId = Number(initData?.job_id || 0);
@@ -932,9 +1013,14 @@ async function startZipUpload(zipFile){
 
   const doZipUploadChunked = async () => {
     const total = Number(zipFile.size || 0);
+    const bookmarkConfig = getUploadBookmarkConfig();
     const initQs = new URLSearchParams();
     initQs.set("filename", zipFile.name);
     initQs.set("total_bytes", String(total));
+    initQs.set("bookmark_enabled", String(Number(bookmarkConfig.bookmark_enabled || 0)));
+    if(bookmarkConfig.bookmark_list_id){
+      initQs.set("bookmark_list_id", String(bookmarkConfig.bookmark_list_id));
+    }
     const initRes = await apiFetch(`${API.uploadZipChunkInit}?${initQs.toString()}`, { method: "POST" });
     const init = await apiJson(initRes);
     const token = init?.token;
@@ -1091,6 +1177,7 @@ async function refreshFacets(){
     state.bookmarks.any_count = Number((mine && mine.any_count) || 0);
     state.bookmarks.others = (bms && bms.others) ? bms.others : [];
     renderBookmarkList();
+    syncUploadBookmarkControls();
   }catch(e){}
 }
 
@@ -1243,6 +1330,7 @@ async function refreshBookmarkLists(){
     state.bookmarks.any_count = Number((mine && mine.any_count) || 0);
     state.bookmarks.others = (j && j.others) ? j.others : [];
     renderBookmarkList();
+    syncUploadBookmarkControls();
   }catch(_e){}
 }
 
@@ -1822,12 +1910,14 @@ function getScrollMetrics(){
 }
 
 function shouldDrainMore(){
+  if(!isPreviewVisible()) return false;
   if(state.preview.mode !== "scroll" || state.preview.done) return false;
   const threshold = Math.max(240, Math.round((window.innerHeight || 0) * 1.2));
   return getScrollMetrics().remaining <= threshold;
 }
 
 function queueLoadMore(){
+  if(!isPreviewVisible()) return;
   if(state.preview.mode !== "scroll" || state.preview.done) return;
   _drainPending = true;
   if(state.preview.loading){
@@ -1866,6 +1956,7 @@ function ensureBottomTrigger(){
   if(_bottomBindingsInstalled) return;
   _bottomBindingsInstalled = true;
   const onMaybeNeedMore = () => {
+    if(!isPreviewVisible()) return;
     if(shouldDrainMore()) queueLoadMore();
   };
   window.addEventListener("scroll", onMaybeNeedMore, { passive: true });
@@ -1880,6 +1971,7 @@ function ensureScrollObserver(){
   const sentinel = $("scrollSentinel");
   if(!sentinel) return;
   scrollObserver = new IntersectionObserver(async (entries) => {
+    if(!isPreviewVisible()) return;
     const e = entries[0];
     if(!e || !e.isIntersecting) return;
     await loadMore();
@@ -1986,6 +2078,7 @@ async function search(page=1){
 }
 
 async function loadMore(){
+  if(!isPreviewVisible()) return;
   if(state.preview.mode !== "scroll") return;
   if(state.preview.done) return;
   if(state.preview.loading){
@@ -4401,6 +4494,18 @@ function bindUI(){
 
 
   bindDropZone();
+  $("uploadBookmarkToggle")?.addEventListener("click", () => {
+    state.uploadBookmark.enabled = !state.uploadBookmark.enabled;
+    if(state.uploadBookmark.enabled && !Number(state.uploadBookmark.list_id || 0)){
+      state.uploadBookmark.list_id = _defaultUploadBookmarkListId();
+    }
+    syncUploadBookmarkControls();
+  });
+  $("uploadBookmarkList")?.addEventListener("change", (e) => {
+    state.uploadBookmark.list_id = Number(e?.target?.value || 0);
+    syncUploadBookmarkControls();
+  });
+  syncUploadBookmarkControls();
   // stopUploadBtn was removed from UI (uploads are auto-processed).
 
   $("searchBtn").addEventListener("click", async () => {

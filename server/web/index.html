@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>NIM</title>
-  <link rel="stylesheet" href="/styles.css?v=53" />
+  <link rel="stylesheet" href="/styles.css?v=58" />
 </head>
 <body>
   <div class="bg" aria-hidden="true"></div>
@@ -176,9 +176,23 @@
 
       <section id="viewUpload" class="panel hidden">
         <div class="card">
-          <div class="panelTitleRow">
-            <h2>画像アップロード</h2>
-            <div class="small">画像ファイルをアップロードし、メタデータとタグを登録します。</div>
+          <div class="uploadPanelHead">
+            <div class="uploadPanelTitle">
+              <h2>画像アップロード</h2>
+            </div>
+            <div class="uploadHeaderTools">
+              <div class="uploadBookmarkInline" aria-label="アップロード時ブックマーク設定">
+                <div class="uploadBookmarkInlineRow">
+                  <div class="uploadBookmarkInlineHead">アップロード時ブックマーク</div>
+                  <button id="uploadBookmarkToggle" class="toggle off uploadBookmarkInlineToggle" type="button" title="アップロード完了時にブックマークへ追加">OFF</button>
+                </div>
+                <div class="uploadBookmarkInlineBody">
+                  <select id="uploadBookmarkList" class="miniSelect uploadBookmarkInlineSelect hidden" aria-label="アップロード時ブックマークの登録先" disabled>
+                    <option value="">既定のリスト</option>
+                  </select>
+                </div>
+              </div>
+            </div>
           </div>
 
           <div class="uploadLayout">
@@ -207,7 +221,7 @@
             </div>
 
             <aside class="uploadSide">
-              <div class="sideHead" style="margin-bottom:10px">
+              <div class="sideHead uploadSummaryHead">
                 <div class="sideHeadTitle">タグアップロードサマリー</div>
                 <div class="small">このバッチの集計</div>
               </div>
@@ -330,7 +344,7 @@
     </div>
   </div>
 
-  <script type="module" src="/app.js?v=50"></script>
+  <script type="module" src="/app.js?v=53"></script>
 
   <div id="filterOverlay" class="filterOverlay hidden" aria-hidden="true">
     <div id="filterOverlayBg" class="filterOverlayBg"></div>
