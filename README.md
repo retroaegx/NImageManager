@@ -1,4 +1,4 @@
-# NovelAI Image Manager
+# NImage Manager
 
 ## Python のインストール
 
