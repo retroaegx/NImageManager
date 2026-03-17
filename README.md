@@ -14,7 +14,8 @@
 - macOS (Homebrew): `brew install python`
 - Ubuntu / Debian: `sudo apt update && sudo apt install -y python3 python3-pip python3-venv`
 
-Windows はインストール時に `Add Python to PATH` を ON にしてください。
+Windows はインストール時に `Add Python to PATH` を ON にしてください。  
+原則として最新のPython(公式のCPython)でプリインストールされるpipとvenvを使用します。導入時エラーが発生する場合は個別で調べて導入してください。  
 
 ## 起動
 - Windows: `run.bat`
