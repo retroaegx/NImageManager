@@ -85,6 +85,27 @@ DB/画像/派生: `server/data/`
 - 「ファイルを選択」から画像ファイル（単体・複数）または zip ファイルを選ぶ
 - 「フォルダを選択」から画像が入ったフォルダを選ぶ
 
+### 監視フォルダによる自動取り込み
+監視フォルダへ `png` / `webp` を置くと、アップロードと同じ扱いで自動登録されます。登録作者はマスターアカウントです。使う場合はアプリ直下の `.env` に設定してください。
+
+- `NAI_IM_DROP_IMPORT_ENABLED`：監視フォルダによる自動取り込みを使う設定。`1` で有効、`0` で無効
+- `NAI_IM_DROP_IMPORT_DIR`：監視するフォルダの設定。相対パス・絶対パスの両方に対応
+- `NAI_IM_DROP_IMPORT_SETTLE_SEC`：ファイル配置後、取り込み開始まで待つ秒数の設定
+- `NAI_IM_DROP_IMPORT_MAX_DEPTH`：監視する階層の深さ設定。`1` なら直下と1階層下まで
+
+```env
+NAI_IM_DROP_IMPORT_ENABLED=1
+NAI_IM_DROP_IMPORT_DIR=./input_image
+NAI_IM_DROP_IMPORT_SETTLE_SEC=3
+NAI_IM_DROP_IMPORT_MAX_DEPTH=1
+```
+
+```env
+NAI_IM_DROP_IMPORT_DIR=D:/NImageManager/input_image
+```
+
+成功時は元ファイルが元の場所からなくなります。失敗時は元の場所に残ります。
+
 ### 画像の一覧表示
 画像を探すときはプレビュー管理画面を使います。ここでは検索条件の指定、絞り込み、並び替え、表示切り替えができます。
 
@@ -146,4 +167,3 @@ DB/画像/派生: `server/data/`
 - 「統計再集計」を押して統計を作り直す
 - 失敗一覧から「再試行」を押して対象画像だけやり直す
 - 再解析の対象から外したい画像は「skip」を押す
-
