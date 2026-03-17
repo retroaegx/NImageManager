@@ -8,3 +8,5 @@ passlib==1.7.4
 pydantic==2.8.2
 pydantic-settings==2.4.0
 python-jose[cryptography]==3.3.0
+
+watchdog>=4.0.0

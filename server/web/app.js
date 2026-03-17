@@ -33,6 +33,8 @@ const API = {
   bookmarkImage: (id) => `/api/bookmarks/images/${id}`,
   bookmarkDefault: (id) => `/api/bookmarks/images/${id}/default`,
   bookmarkClear: (id) => `/api/bookmarks/images/${id}/clear`,
+  bookmarkBulkStatus: "/api/bookmarks/bulk/status",
+  bookmarkBulkApply: "/api/bookmarks/bulk/apply",
   bulkDelete: "/api/images/bulk_delete",
   creators: "/api/creators/list",
   software: "/api/stats/software",
@@ -46,6 +48,23 @@ const API = {
   bookmarkSubDel: (id) => `/api/bookmarks/subscriptions/${id}`,
   userSuggest: (kind, q) => `/api/users/suggest?kind=${encodeURIComponent(kind||'')}&q=${encodeURIComponent(q||'')}&limit=20`,
 };
+
+function currentBookmarkContextListId(){
+  const lid = Number(state?.preview?.bm_list_id || 0);
+  return lid > 0 ? lid : null;
+}
+
+function withBookmarkContext(url, bmListId = currentBookmarkContextListId()){
+  const lid = Number(bmListId || 0);
+  if(!url || !(lid > 0)) return url;
+  return `${url}${String(url).includes("?") ? "&" : "?"}bm_list_id=${encodeURIComponent(String(lid))}`;
+}
+
+function detailCacheKey(id, bmListId = currentBookmarkContextListId()){
+  const iid = Number(id || 0);
+  const lid = Number(bmListId || 0) || 0;
+  return `${iid}:${lid}`;
+}
 
 function xhrPostBinary(url, body, contentType, onProgress){
   return new Promise((resolve, reject) => {
@@ -183,8 +202,60 @@ let _scrollPrefetch = null;   // { key, promise, data, ts }
 const PREVIEW_CACHE_TTL_MS = 15000;
 const _overlayWarmSet = new Set();
 const _thumbWarmSet = new Set();
+const _thumbWarmImages = new Set();
 let _thumbPreferredFormat = "webp";
 let _thumbPreferredFormatReady = null;
+let _suspendPreviewWarmup = false;
+const _previewRequestControllers = new Set();
+let _previewSearchSeq = 0;
+
+function _registerPreviewRequestController(controller){
+  if(!controller) return controller;
+  _previewRequestControllers.add(controller);
+  return controller;
+}
+
+function _releasePreviewRequestController(controller){
+  if(!controller) return;
+  _previewRequestControllers.delete(controller);
+}
+
+function _abortPreviewRequests(){
+  for(const controller of Array.from(_previewRequestControllers)){
+    try{ controller.abort(); }catch(_e){}
+  }
+  _previewRequestControllers.clear();
+}
+
+function _isAbortError(err){
+  const name = String(err?.name || "");
+  const msg = String(err?.message || "");
+  return name === "AbortError" || /aborted|aborterror/i.test(msg);
+}
+
+function _cancelThumbWarmers(){
+  _thumbWarmImages.forEach((img) => {
+    try{
+      img.onload = null;
+      img.onerror = null;
+      img.src = "";
+    }catch(_e){}
+  });
+  _thumbWarmImages.clear();
+}
+
+function _abortGridImageLoads(){
+  const grid = $("grid");
+  if(!grid) return;
+  grid.querySelectorAll("img").forEach((img) => {
+    try{
+      img.loading = "eager";
+      img.removeAttribute("srcset");
+      img.removeAttribute("sizes");
+      img.src = "";
+    }catch(_e){}
+  });
+}
 
 function _thumbWebpUrl(it){
   if(typeof it === "string") return String(it || "");
@@ -257,6 +328,9 @@ function invalidatePreviewCaches(){
   _scrollPrefetch = null;
   _overlayWarmSet.clear();
   _thumbWarmSet.clear();
+  _abortPreviewRequests();
+  _cancelThumbWarmers();
+  _abortGridImageLoads();
   // Detail cache can contain deleted ids; keep it simple.
   _detailCache.clear();
   _detailInFlight.clear();
@@ -344,6 +418,7 @@ function setView(active, opts={}){
   appEl?.classList.toggle("view-preview", active === "preview");
   appEl?.classList.toggle("view-upload", active === "upload");
 
+  if(active !== "preview") _abortPreviewRequests();
   if(active !== "preview" && scrollObserver){
     try{ scrollObserver.disconnect(); }catch(_e){}
     scrollObserver = null;
@@ -1185,13 +1260,20 @@ async function refreshFacets(){
 async function refreshStatsAndPreviewAfterChange(){
   // Used when the underlying dataset changes (e.g. upload / bulk delete / zip completion).
   // Important: paging caches must be invalidated even when filter key stays the same.
+  _suspendPreviewWarmup = true;
+  _abortPreviewRequests();
   invalidatePreviewCaches();
-  await refreshFacets();
-  await loadYearCounts();
-  await loadYearMonthCounts(state.calendar.month.getFullYear());
-  await loadMonthCounts(state.calendar.month);
-  renderCalendar();
-  await search(1);
+  resetGrid();
+  try{
+    await refreshFacets();
+    await search(1);
+    await loadYearCounts();
+    await loadYearMonthCounts(state.calendar.month.getFullYear());
+    await loadMonthCounts(state.calendar.month);
+    renderCalendar();
+  }finally{
+    _suspendPreviewWarmup = false;
+  }
 }
 
 function fillSelect(sel, items){
@@ -1586,10 +1668,12 @@ function resetPreviewCachesIfNeeded(){
   _scrollPrefetch = null;
   _overlayWarmSet.clear();
   _thumbWarmSet.clear();
+  _cancelThumbWarmers();
   return true;
 }
 
 function warmThumbUrls(urls, maxN){
+  if(_suspendPreviewWarmup) return;
   const n = Math.min(maxN || 0, urls.length);
   for(let i=0;i<n;i++){
     const rawUrl = urls[i];
@@ -1599,6 +1683,9 @@ function warmThumbUrls(urls, maxN){
     const img = new Image();
     img.decoding = "async";
     img.loading = "eager";
+    img.onload = () => { _thumbWarmImages.delete(img); };
+    img.onerror = () => { _thumbWarmImages.delete(img); };
+    _thumbWarmImages.add(img);
     img.src = u;
   }
 }
@@ -1663,8 +1750,8 @@ function warmOverlayDerivatives(items){
 }
 
 // Detail prefetch cache: we want the detail text to be instant when opening the overlay.
-const _detailCache = new Map();      // id -> detail json
-const _detailInFlight = new Map();   // id -> Promise
+const _detailCache = new Map();      // `${id}:${bm_list_id||0}` -> detail json
+const _detailInFlight = new Map();   // `${id}:${bm_list_id||0}` -> Promise
 let _detailRenderToken = 0;
 
 async function fetchDetailsBatchCached(ids, opts={}){
@@ -1672,11 +1759,13 @@ async function fetchDetailsBatchCached(ids, opts={}){
   const page = Number.isFinite(Number(opts?.page)) && Number(opts?.page) > 0 ? Number(opts?.page) : currentPreviewPage();
   const mode = String(opts?.mode || currentPreviewMode());
   const traceId = isPerfClientEnabled() ? String(opts?.traceId || newClientTraceId()) : "";
+  const bmListId = Number(opts?.bm_list_id || currentBookmarkContextListId() || 0) || 0;
   const uniqueIds = [];
   for(const rawId of (ids || [])){
     const iid = Number(rawId || 0);
+    const key = detailCacheKey(iid, bmListId);
     if(!iid || uniqueIds.includes(iid)) continue;
-    if(_detailCache.has(iid) || _detailInFlight.has(iid)) continue;
+    if(_detailCache.has(key) || _detailInFlight.has(key)) continue;
     uniqueIds.push(iid);
   }
   if(!uniqueIds.length) return {};
@@ -1695,17 +1784,19 @@ async function fetchDetailsBatchCached(ids, opts={}){
       return items[iid];
     });
     perIdPromises.set(iid, itemPromise);
-    _detailInFlight.set(iid, itemPromise);
+    _detailInFlight.set(detailCacheKey(iid, bmListId), itemPromise);
   }
 
+  const controller = _registerPreviewRequestController(new AbortController());
   try{
     const res = await apiFetch(API.detailsBatch, {
       method: "POST",
+      signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
         ...buildPerfRequestHeaders({ traceId, source, page, mode }),
       },
-      body: JSON.stringify({ ids: uniqueIds }),
+      body: JSON.stringify({ ids: uniqueIds, bm_list_id: bmListId || null }),
     });
     const fetchedAt = performance.now();
     const data = await apiJson(res);
@@ -1717,7 +1808,7 @@ async function fetchDetailsBatchCached(ids, opts={}){
       if(item) itemMap[iid] = item;
     }
     for(const [iid, item] of Object.entries(itemMap)){
-      _detailCache.set(Number(iid), item);
+      _detailCache.set(detailCacheKey(Number(iid), bmListId), item);
     }
     resolveAll(itemMap);
     sendPerfLog({
@@ -1746,8 +1837,9 @@ async function fetchDetailsBatchCached(ids, opts={}){
     });
     throw err;
   }finally{
+    _releasePreviewRequestController(controller);
     for(const iid of uniqueIds){
-      _detailInFlight.delete(iid);
+      _detailInFlight.delete(detailCacheKey(iid, bmListId));
     }
   }
 }
@@ -1759,7 +1851,9 @@ async function fetchDetailCached(id, opts={}){
   const page = Number.isFinite(Number(opts?.page)) && Number(opts?.page) > 0 ? Number(opts?.page) : currentPreviewPage();
   const mode = String(opts?.mode || currentPreviewMode());
   const traceId = isPerfClientEnabled() ? String(opts?.traceId || newClientTraceId()) : "";
-  if(_detailCache.has(iid)){
+  const bmListId = Number(opts?.bm_list_id || currentBookmarkContextListId() || 0) || 0;
+  const cacheKey = detailCacheKey(iid, bmListId);
+  if(_detailCache.has(cacheKey)){
     sendPerfLog({
       event: "detail_cache_hit",
       trace_id: traceId,
@@ -1770,9 +1864,9 @@ async function fetchDetailCached(id, opts={}){
       total_ms: 0,
       note: "memory_cache",
     });
-    return _detailCache.get(iid);
+    return _detailCache.get(cacheKey);
   }
-  if(_detailInFlight.has(iid)){
+  if(_detailInFlight.has(cacheKey)){
     sendPerfLog({
       event: "detail_join_inflight",
       trace_id: traceId,
@@ -1782,12 +1876,12 @@ async function fetchDetailCached(id, opts={}){
       source,
       note: "join_existing_request",
     });
-    return await _detailInFlight.get(iid);
+    return await _detailInFlight.get(cacheKey);
   }
   const started = performance.now();
   const p = (async () => {
     try{
-      const res = await apiFetch(API.detail(iid), {
+      const res = await apiFetch(withBookmarkContext(API.detail(iid), bmListId), {
         headers: buildPerfRequestHeaders({ traceId, source, page, mode }),
       });
       const fetchedAt = performance.now();
@@ -1820,13 +1914,13 @@ async function fetchDetailCached(id, opts={}){
       throw err;
     }
   })();
-  _detailInFlight.set(iid, p);
+  _detailInFlight.set(cacheKey, p);
   try{
     const d = await p;
-    _detailCache.set(iid, d);
+    _detailCache.set(cacheKey, d);
     return d;
   }finally{
-    _detailInFlight.delete(iid);
+    _detailInFlight.delete(cacheKey);
   }
 }
 
@@ -1840,7 +1934,8 @@ function prefetchDetails(items){
     const id = Number(it?.id||0);
     if(!id || seen.has(id)) continue;
     seen.add(id);
-    if(_detailCache.has(id) || _detailInFlight.has(id)) continue;
+    const key = detailCacheKey(id);
+    if(_detailCache.has(key) || _detailInFlight.has(key)) continue;
     ids.push(id);
   }
   if(!ids.length) return;
@@ -1859,9 +1954,14 @@ async function fetchPageCached(page, includeTotal){
   if(hit?.promise) return await hit.promise;
 
   const qs = key + `&include_total=${includeTotal ? 1 : 0}`;
+  const controller = _registerPreviewRequestController(new AbortController());
   const p = (async () => {
-    const res = await apiFetch(`${API.pageList}?${qs}`);
-    return await apiJson(res);
+    try{
+      const res = await apiFetch(`${API.pageList}?${qs}`, { signal: controller.signal });
+      return await apiJson(res);
+    }finally{
+      _releasePreviewRequestController(controller);
+    }
   })();
   _pageCache.set(key, { promise: p, data: null, ts: Date.now() });
   try{
@@ -1876,6 +1976,8 @@ async function fetchPageCached(page, includeTotal){
 }
 
 function prefetchPage(page){
+  if(_suspendPreviewWarmup) return;
+  const seq = _previewSearchSeq;
   const p = Math.max(1, Number(page || 1));
   const total = Number(state.preview.total_pages || 0);
   if(total && p > total) return;
@@ -1885,11 +1987,14 @@ function prefetchPage(page){
 
   // Prefetch without COUNT to keep DB light.
   fetchPageCached(p, 0).then((data) => {
+    if(seq !== _previewSearchSeq) return;
     const items = data?.items || [];
     warmThumbUrls(items.map(x=>x.thumb), 16);
     warmOverlayDerivatives(items);
     prefetchDetails(items);
-  }).catch(()=>{});
+  }).catch((err) => {
+    if(_isAbortError(err)) return;
+  });
 }
 
 function getScrollMetrics(){
@@ -1939,7 +2044,9 @@ async function drainScrollLoads(){
       }
       if(!_drainPending && !shouldDrainMore()) break;
       _drainPending = false;
-      await loadMore();
+      const seq = _previewSearchSeq;
+      await loadMore(seq);
+      if(seq !== _previewSearchSeq) break;
       guard += 1;
       await new Promise((resolve) => requestAnimationFrame(() => resolve()));
       if(!_queuedLoadMore && !_drainPending && !shouldDrainMore()) break;
@@ -1974,7 +2081,7 @@ function ensureScrollObserver(){
     if(!isPreviewVisible()) return;
     const e = entries[0];
     if(!e || !e.isIntersecting) return;
-    await loadMore();
+    await loadMore(_previewSearchSeq);
   }, { root: null, rootMargin: "1200px 0px", threshold: 0.01 });
   scrollObserver.observe(sentinel);
 }
@@ -2003,6 +2110,7 @@ function buildPageQuery(page, includeTotal=1){
 }
 
 async function search(page=1){
+  const seq = ++_previewSearchSeq;
   // Keep state in sync with UI controls (some actions modify selects directly).
   state.preview.creator = getCreatorFilter();
   state.preview.software = getSoftwareFilter();
@@ -2014,6 +2122,8 @@ async function search(page=1){
   setPagingUI();
   resetGrid();
   _resetBulkSelection();
+
+  if(state.preview.mode === "page") _abortPreviewRequests();
 
   if(state.preview.mode === "page"){
     state.preview.page = Math.max(1, Number(page || 1));
@@ -2030,6 +2140,7 @@ async function search(page=1){
       });
 
       const data = await fetchPageCached(state.preview.page, includeTotal ? 1 : 0);
+      if(seq !== _previewSearchSeq) return;
 
       state.preview.items = data.items || [];
       state.preview.page = Number(data.page || state.preview.page);
@@ -2052,6 +2163,7 @@ async function search(page=1){
       prefetchPage(state.preview.page + 1);
       prefetchPage(state.preview.page + 2);
     }catch(_e){
+      if(seq !== _previewSearchSeq || _isAbortError(_e)) return;
       state.preview.items = [];
       updateGalleryTitle();
       syncGalleryControls();
@@ -2073,11 +2185,12 @@ async function search(page=1){
   syncGalleryControls();
   ensureScrollObserver();
   ensureBottomTrigger();
-  await loadMore();
-  if(!state.preview.done) queueLoadMore();
+  await loadMore(seq);
+  if(seq === _previewSearchSeq && !state.preview.done) queueLoadMore();
 }
 
-async function loadMore(){
+async function loadMore(seq=_previewSearchSeq){
+  if(seq !== _previewSearchSeq) return;
   if(!isPreviewVisible()) return;
   if(state.preview.mode !== "scroll") return;
   if(state.preview.done) return;
@@ -2104,11 +2217,18 @@ async function loadMore(){
       _scrollPrefetch = null;
     }
     if(!data){
-      const res = await apiFetch(`${API.scrollList}?${qs}`);
-      data = await apiJson(res);
+      const controller = _registerPreviewRequestController(new AbortController());
+      try{
+        const res = await apiFetch(`${API.scrollList}?${qs}`, { signal: controller.signal });
+        data = await apiJson(res);
+      }finally{
+        _releasePreviewRequestController(controller);
+      }
     }
 
+    if(seq !== _previewSearchSeq) return;
     const items = data.items || [];
+
     if(data.sort) state.preview.sort = data.sort;      if(typeof data.bm_any !== "undefined") state.preview.bm_any = Number(data.bm_any || 0);
       if(typeof data.bm_list_id !== "undefined") state.preview.bm_list_id = Number(data.bm_list_id || 0);
     if(typeof data.total_count !== "undefined" && data.total_count !== null){
@@ -2140,11 +2260,16 @@ async function loadMore(){
       const nextQs = buildScrollQuery(state.preview.cursor, 0);
       if(!_getFreshScrollPrefetch(nextQs)){
         const p = (async () => {
-          const r = await apiFetch(`${API.scrollList}?${nextQs}`);
-          const d = await apiJson(r);
-          const prefItems = d?.items || [];
-          if(prefItems.length) warmThumbUrls(prefItems.map(x => x.thumb), state.preview.limit);
-          return d;
+          const controller = _registerPreviewRequestController(new AbortController());
+          try{
+            const r = await apiFetch(`${API.scrollList}?${nextQs}`, { signal: controller.signal });
+            const d = await apiJson(r);
+            const prefItems = d?.items || [];
+            if(prefItems.length) warmThumbUrls(prefItems.map(x => x.thumb), state.preview.limit);
+            return d;
+          }finally{
+            _releasePreviewRequestController(controller);
+          }
         })();
         _scrollPrefetch = { key: nextQs, promise: p, data: null, ts: Date.now() };
         p.then(d => { if(_scrollPrefetch && _scrollPrefetch.key === nextQs){ _scrollPrefetch.data = d; _scrollPrefetch.promise = null; _scrollPrefetch.ts = Date.now(); } }).catch(()=>{ if(_scrollPrefetch && _scrollPrefetch.key === nextQs) _scrollPrefetch = null; });
@@ -2227,6 +2352,7 @@ function updateGalleryTitle(){
 }
 
 function resetGrid(){
+  _abortGridImageLoads();
   const grid = $("grid");
   if(grid) grid.innerHTML = "";
 }
@@ -2281,6 +2407,40 @@ function _refreshTileChecks(){
   });
 }
 
+function _hasBulkSelection(){
+  const b = state.preview.bulk;
+  return !!(b && (b.all || (b.selected && b.selected.size > 0)));
+}
+
+function _currentBulkSelectionPayload(){
+  const b = state.preview.bulk;
+  if(!b) return null;
+  const bmListId = Number(state.preview.bm_list_id || 0) || null;
+  if(b.all){
+    return {
+      mode: "query",
+      query: _currentFilterQuery(),
+      exclude_ids: Array.from(b.deselected || []),
+      bm_list_id: bmListId,
+    };
+  }
+  const ids = Array.from(b.selected || []);
+  if(!ids.length) return null;
+  return {
+    mode: "ids",
+    ids,
+    exclude_ids: [],
+    bm_list_id: bmListId,
+  };
+}
+
+function _bulkBookmarkStatus(msg, kind){
+  const el = $("bulkBmOverlayStatus");
+  if(!el) return;
+  el.textContent = msg || "";
+  el.className = "small" + (kind ? (" " + kind) : "");
+}
+
 function _bulkStatus(msg, kind){
   const el = $("bulkStatus");
   if(!el) return;
@@ -2292,15 +2452,20 @@ function _bulkStatus(msg, kind){
 function _updateBulkActions(){
   const b = state.preview.bulk;
   const btnDel = $("bulkDeleteBtn");
+  const btnBm = $("bulkBookmarkBtn");
   const btnPage = $("pageSelectBtn");
   const btnAll = $("allSelectBtn");
 
   if(!b){
     btnDel && (btnDel.disabled = true);
+    btnBm && (btnBm.disabled = true);
     return;
   }
 
-  const hasSel = b.all || (b.selected.size > 0);
+  const hasSel = _hasBulkSelection();
+  if(btnBm){
+    btnBm.disabled = !hasSel;
+  }
   if(btnDel){
     btnDel.disabled = !hasSel || !!b.deleting;
     if(b.all){
@@ -2340,6 +2505,7 @@ function _resetBulkSelection(){
   b.deselected = new Set();
   b.all = false;
   b.deleting = false;
+  closeBulkBookmarkOverlay();
   _refreshTileChecks();
   _updateBulkActions();
 }
@@ -2777,7 +2943,7 @@ function _applyFavoriteState(id, fav){
 
 async function addBookmarkDefault(id){
   try{
-    const res = await apiFetch(API.bookmarkDefault(id), { method: "POST" });
+    const res = await apiFetch(withBookmarkContext(API.bookmarkDefault(id)), { method: "POST" });
     const data = await apiJson(res);
     _applyFavoriteState(id, Number(data.favorite || 0));
     await refreshBookmarkLists();
@@ -2791,6 +2957,7 @@ async function addBookmarkDefault(id){
 
 let _bmOverlayImageId = 0;
 let _bmSaveTimer = null;
+let _bulkBmState = null;
 
 function _bmSetStatus(msg, cls){
   const el = $("bmOverlayStatus");
@@ -3023,6 +3190,304 @@ function syncAddCreatorFromDetailBtn(){
   btn.disabled = !!(set && set.has(name));
 }
 
+function closeBulkBookmarkOverlay(){
+  _bulkBmState = null;
+  const el = $("bulkBmOverlay");
+  if(el) el.classList.add("hidden");
+  if(el) el.setAttribute("aria-hidden", "true");
+  _bulkBookmarkStatus("", null);
+}
+
+async function _createBookmarkListInteractive(){
+  const nm0 = prompt("新しいリスト名", "");
+  if(nm0 === null) return null;
+  const nm = String(nm0 || "").trim();
+  if(!nm) return null;
+  const res = await apiFetch(API.bookmarkLists, {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ name: nm }),
+  });
+  const data = await apiJson(res);
+  await refreshBookmarkLists();
+  return data;
+}
+
+async function _renameBookmarkListInteractive(listId, currentName){
+  const cur = String(currentName || "");
+  const nxt = prompt("リスト名", cur);
+  if(nxt === null) return null;
+  const nm = String(nxt || "").trim();
+  if(!nm || nm === cur) return null;
+  const res = await apiFetch(API.bookmarkList(listId), {
+    method: "PATCH",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ name: nm }),
+  });
+  const data = await apiJson(res);
+  await refreshBookmarkLists();
+  return data;
+}
+
+function _syncBulkBookmarkListsMeta(serverLists){
+  const st = _bulkBmState;
+  if(!st || !Array.isArray(st.lists) || !Array.isArray(serverLists)) return;
+  const prev = new Map();
+  st.lists.forEach((item) => {
+    const id = Number(item?.id || 0);
+    if(id > 0) prev.set(id, item);
+  });
+  st.lists = serverLists
+    .map((list) => {
+      const id = Number(list?.id || 0);
+      if(!(id > 0)) return null;
+      const existing = prev.get(id);
+      if(existing){
+        existing.name = String(list?.name || "");
+        existing.is_default = Number(list?.is_default || 0);
+        return existing;
+      }
+      return {
+        id,
+        name: String(list?.name || ""),
+        is_default: Number(list?.is_default || 0),
+        initialState: "none",
+        editState: null,
+      };
+    })
+    .filter(Boolean);
+  _renderBulkBookmarkLists();
+  _updateBulkBookmarkSaveButton();
+}
+
+function _bulkBookmarkInitialState(item){
+  return String(item?.initialState || "none");
+}
+
+function _bulkBookmarkResolvedState(item){
+  return String(item?.editState || _bulkBookmarkInitialState(item));
+}
+
+function _bulkBookmarkHasChange(item){
+  return !!(item && item.editState);
+}
+
+function _bulkBookmarkStateGlyph(state){
+  const key = String(state || "none");
+  if(key === "all") return "☑";
+  if(key === "some") return "▣";
+  return "□";
+}
+
+function _cycleBulkBookmarkEditState(item){
+  if(!item) return;
+  const initial = _bulkBookmarkInitialState(item);
+  const edit = item.editState ? String(item.editState) : "";
+
+  if(initial === "some"){
+    if(!edit) item.editState = "all";
+    else if(edit === "all") item.editState = "none";
+    else item.editState = null;
+    return;
+  }
+
+  const opposite = initial === "all" ? "none" : "all";
+  item.editState = edit === opposite ? null : opposite;
+}
+
+function _bulkBookmarkRowVisuals(row, stateCtl, item){
+  if(!row || !stateCtl || !item) return;
+  const state = _bulkBookmarkResolvedState(item);
+  const glyph = _bulkBookmarkStateGlyph(state);
+  stateCtl.textContent = glyph;
+  stateCtl.dataset.state = state;
+  stateCtl.setAttribute("aria-checked", state === "some" ? "mixed" : (state === "all" ? "true" : "false"));
+  stateCtl.setAttribute("title", state === "all" ? "全件登録" : (state === "some" ? "一部登録" : "未登録"));
+  row.dataset.state = state;
+  row.classList.toggle("mixed", state === "some");
+  row.classList.toggle("all", state === "all");
+  row.classList.toggle("none", state === "none");
+  row.classList.toggle("changed", _bulkBookmarkHasChange(item));
+}
+
+function _renderBulkBookmarkLists(){
+  const box = $("bulkBmOverlayLists");
+  if(!box) return;
+  box.innerHTML = "";
+  const st = _bulkBmState;
+  if(!st || !Array.isArray(st.lists) || !st.lists.length){
+    box.innerHTML = `<div class="small">(リストがありません)</div>`;
+    return;
+  }
+  st.lists.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "bmListRow bulkBmListRow";
+    row.dataset.listId = String(item.id || 0);
+    row.setAttribute("role", "button");
+    row.setAttribute("tabindex", "0");
+
+    const main = document.createElement("div");
+    main.className = "bulkBmMain";
+
+    const stateCtl = document.createElement("span");
+    stateCtl.className = "bulkBmStateCtl";
+    stateCtl.setAttribute("aria-hidden", "true");
+
+    const textWrap = document.createElement("div");
+    textWrap.className = "bulkBmText";
+
+    const name = document.createElement("div");
+    name.className = "bmListName";
+    name.textContent = String(item.name || "");
+    textWrap.appendChild(name);
+
+    if(Number(item.is_default || 0)){
+      const badge = document.createElement("span");
+      badge.className = "bmListBadge";
+      badge.textContent = "default";
+      textWrap.appendChild(badge);
+    }
+
+    main.appendChild(stateCtl);
+    main.appendChild(textWrap);
+
+    const btns = document.createElement("div");
+    btns.className = "bmListBtns bulkBmListBtns";
+
+    const renameBtn = document.createElement("button");
+    renameBtn.type = "button";
+    renameBtn.className = "mini ghostBtn";
+    renameBtn.textContent = "✎";
+    renameBtn.title = "名前変更";
+    renameBtn.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      try{
+        const data = await _renameBookmarkListInteractive(item.id, item.name);
+        if(data?.lists) _syncBulkBookmarkListsMeta(data.lists);
+      }catch(_e){
+        alert("名前変更に失敗しました");
+      }
+    });
+    btns.appendChild(renameBtn);
+
+    const applyState = () => {
+      _bulkBookmarkRowVisuals(row, stateCtl, item);
+    };
+    applyState();
+
+    const toggleRow = (e) => {
+      e.preventDefault();
+      _cycleBulkBookmarkEditState(item);
+      applyState();
+      _updateBulkBookmarkSaveButton();
+    };
+    row.addEventListener("click", toggleRow);
+    row.addEventListener("keydown", (e) => {
+      if(e.key === "Enter" || e.key === " ") toggleRow(e);
+    });
+
+    row.appendChild(main);
+    row.appendChild(btns);
+    box.appendChild(row);
+  });
+}
+
+function _updateBulkBookmarkSaveButton(){
+  const btn = $("bulkBmSaveBtn");
+  if(!btn) return;
+  const st = _bulkBmState;
+  const changed = !!(st && Array.isArray(st.lists) && st.lists.some((item) => _bulkBookmarkHasChange(item)));
+  btn.disabled = !(changed && st && !st.saving);
+}
+
+async function openBulkBookmarkOverlay(){
+  const payload = _currentBulkSelectionPayload();
+  if(!payload) return;
+
+  const overlay = $("bulkBmOverlay");
+  if(!overlay) return;
+  overlay.classList.remove("hidden");
+  overlay.setAttribute("aria-hidden", "false");
+  const hint = $("bulkBmOverlayHint");
+  if(hint) hint.textContent = "読み込み中…";
+  const box = $("bulkBmOverlayLists");
+  if(box) box.innerHTML = `<div class="small">(loading…)</div>`;
+  _bulkBookmarkStatus("", null);
+
+  try{
+    const res = await apiFetch(withBookmarkContext(API.bookmarkBulkStatus), {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify(payload),
+    });
+    const data = await apiJson(res);
+    _bulkBmState = {
+      selection: payload,
+      selectedCount: Number(data?.selected_count || 0),
+      lists: Array.isArray(data?.lists)
+        ? data.lists.map((item) => ({
+            id: Number(item?.id || 0),
+            name: String(item?.name || ""),
+            is_default: Number(item?.is_default || 0),
+            initialState: String(item?.state || "none"),
+            editState: null,
+          }))
+        : [],
+      saving: false,
+    };
+    if(hint){
+      const n = Number(_bulkBmState.selectedCount || 0);
+      hint.textContent = n > 0 ? `選択: ${n.toLocaleString()}件` : "選択対象がありません";
+    }
+    _renderBulkBookmarkLists();
+    _updateBulkBookmarkSaveButton();
+  }catch(_e){
+    if(hint) hint.textContent = "読み込みに失敗しました";
+    if(box) box.innerHTML = "";
+    _bulkBookmarkStatus("読み込みに失敗しました", "error");
+  }
+}
+
+async function saveBulkBookmarkOverlay(){
+  const st = _bulkBmState;
+  if(!st || st.saving) return;
+  const addListIds = [];
+  const removeListIds = [];
+  (st.lists || []).forEach((item) => {
+    const edit = item?.editState ? String(item.editState) : "";
+    if(!edit) return;
+    if(edit === "all") addListIds.push(Number(item.id || 0));
+    else if(edit === "none") removeListIds.push(Number(item.id || 0));
+  });
+  if(!addListIds.length && !removeListIds.length){
+    closeBulkBookmarkOverlay();
+    return;
+  }
+
+  st.saving = true;
+  _bulkBookmarkStatus("保存中…", null);
+  _updateBulkBookmarkSaveButton();
+  try{
+    await apiFetch(withBookmarkContext(API.bookmarkBulkApply), {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({
+        ...(st.selection || {}),
+        add_list_ids: addListIds,
+        remove_list_ids: removeListIds,
+      }),
+    });
+    closeBulkBookmarkOverlay();
+    await refreshBookmarkLists();
+    await search();
+  }catch(_e){
+    st.saving = false;
+    _bulkBookmarkStatus("保存に失敗しました", "error");
+    _updateBulkBookmarkSaveButton();
+  }
+}
+
 async function openBookmarkOverlay(imageId){
   const iid = Number(imageId || 0);
   if(!iid) return;
@@ -3036,7 +3501,7 @@ async function openBookmarkOverlay(imageId){
   if(box) box.innerHTML = `<div class="small">(loading…)</div>`;
 
   try{
-    const res = await apiFetch(API.bookmarkImage(iid));
+    const res = await apiFetch(withBookmarkContext(API.bookmarkImage(iid)));
     const data = await apiJson(res);
     renderBookmarkOverlayLists(data);
   }catch(_e){
@@ -3065,7 +3530,7 @@ function _bmScheduleSave(){
     const ids = _bmCheckedListIds();
     _bmSetStatus("保存中…", null);
     try{
-      const res = await apiFetch(API.bookmarkImage(iid), {
+      const res = await apiFetch(withBookmarkContext(API.bookmarkImage(iid)), {
         method: "PUT",
         headers: {"Content-Type":"application/json"},
         body: JSON.stringify({ list_ids: ids }),
@@ -3471,7 +3936,7 @@ async function openDetail(id){
   const token = ++_detailRenderToken;
 
   // If we already prefetched detail, render instantly.
-  const cached = _detailCache.get(iid);
+  const cached = _detailCache.get(detailCacheKey(iid));
   if(cached){
     currentDetail = cached;
     renderDetailFull(cached);
@@ -4568,6 +5033,7 @@ function bindUI(){
   // Bulk selection / delete (preview)
   $("pageSelectBtn")?.addEventListener("click", (e) => { e.preventDefault(); _togglePageSelect(); });
   $("allSelectBtn")?.addEventListener("click", (e) => { e.preventDefault(); _toggleAllSelect(); });
+  $("bulkBookmarkBtn")?.addEventListener("click", async (e) => { e.preventDefault(); await openBulkBookmarkOverlay(); });
   $("bulkDeleteBtn")?.addEventListener("click", async (e) => { e.preventDefault(); await _bulkDelete(); });
 
   // Detail overlay close (be robust against partial merges / timing issues)
@@ -4618,6 +5084,19 @@ function bindUI(){
 // bookmark overlay
 $("bmOverlayBg")?.addEventListener("click", closeBookmarkOverlay);
 $("bmOverlayClose")?.addEventListener("click", closeBookmarkOverlay);
+$("bulkBmOverlayBg")?.addEventListener("click", closeBulkBookmarkOverlay);
+$("bulkBmOverlayClose")?.addEventListener("click", closeBulkBookmarkOverlay);
+$("bulkBmCancelBtn")?.addEventListener("click", (e) => { e.preventDefault(); closeBulkBookmarkOverlay(); });
+$("bulkBmCreateListBtn")?.addEventListener("click", async (e) => {
+  e.preventDefault();
+  try{
+    const data = await _createBookmarkListInteractive();
+    if(data?.lists) _syncBulkBookmarkListsMeta(data.lists);
+  }catch(_e){
+    alert("作成に失敗しました");
+  }
+});
+$("bulkBmSaveBtn")?.addEventListener("click", async (e) => { e.preventDefault(); await saveBulkBookmarkOverlay(); });
 
 // creator / bookmark creator picker
 bindUserPick();
@@ -4627,18 +5106,9 @@ $("addCreatorFromDetailBtn")?.addEventListener("click", (e) => { e.preventDefaul
 
 $("bmCreateListBtn")?.addEventListener("click", async (e) => {
   e.preventDefault();
-  const nm0 = prompt("新しいリスト名", "");
-  if(nm0 === null) return;
-  const nm = String(nm0 || "").trim();
-  if(!nm) return;
   try{
-    await apiFetch(API.bookmarkLists, {
-      method: "POST",
-      headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({ name: nm }),
-    });
-    await refreshBookmarkLists();
-    if(_bmOverlayImageId) await openBookmarkOverlay(_bmOverlayImageId);
+    const data = await _createBookmarkListInteractive();
+    if(data && _bmOverlayImageId) await openBookmarkOverlay(_bmOverlayImageId);
   }catch(_e){
     alert("作成に失敗しました");
   }
@@ -4649,7 +5119,7 @@ $("bmClearThisBtn")?.addEventListener("click", async (e) => {
   const iid = Number(_bmOverlayImageId || 0);
   if(!iid) return;
   try{
-    const r = await apiFetch(API.bookmarkClear(iid), { method: "POST" });
+    const r = await apiFetch(withBookmarkContext(API.bookmarkClear(iid)), { method: "POST" });
     const j = await apiJson(r);
     _applyFavoriteState(iid, Number(j.favorite || 0));
     await refreshBookmarkLists();

@@ -8,6 +8,7 @@ import sqlite3
 import csv
 import math
 import threading
+import queue
 import fnmatch
 import time
 import unicodedata
@@ -116,11 +117,354 @@ def _normalize_derivative_kinds(kinds: tuple[str, ...] | list[str] | None) -> tu
     return tuple(out)
 
 
+_DROP_IMPORT_OBSERVER = None
+_DROP_IMPORT_WORKER_THREAD: threading.Thread | None = None
+_DROP_IMPORT_STOP = threading.Event()
+_DROP_IMPORT_QUEUE: "queue.Queue[Path]" = queue.Queue()
+_DROP_IMPORT_PENDING: dict[str, float] = {}
+_DROP_IMPORT_PENDING_LOCK = threading.Lock()
+
+
+def _app_root_dir() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _drop_import_enabled() -> bool:
+    return str(os.getenv("NAI_IM_DROP_IMPORT_ENABLED", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _drop_import_settle_sec() -> float:
+    raw = str(os.getenv("NAI_IM_DROP_IMPORT_SETTLE_SEC", "3") or "3").strip()
+    try:
+        return max(0.5, float(raw))
+    except Exception:
+        return 3.0
+
+
+def _drop_import_max_depth() -> int:
+    raw = str(os.getenv("NAI_IM_DROP_IMPORT_MAX_DEPTH", "1") or "1").strip()
+    try:
+        return max(0, int(raw))
+    except Exception:
+        return 1
+
+
+def _drop_import_root_dir() -> Path | None:
+    raw = str(os.getenv("NAI_IM_DROP_IMPORT_DIR", "") or "").strip()
+    if not raw:
+        return None
+    p = Path(os.path.expandvars(os.path.expanduser(raw)))
+    if not p.is_absolute():
+        p = _app_root_dir() / p
+    try:
+        return p.resolve(strict=False)
+    except Exception:
+        return p.absolute()
+
+
+def _drop_import_path_key(path: Path) -> str:
+    try:
+        return str(path.resolve(strict=False))
+    except Exception:
+        return str(path.absolute())
+
+
+def _drop_import_is_allowed_file(path: Path) -> bool:
+    return path.is_file() and path.suffix.lower() in {".png", ".webp"}
+
+
+def _drop_import_relative_depth(root: Path, path: Path) -> int | None:
+    try:
+        rel = path.relative_to(root)
+    except Exception:
+        return None
+    return max(0, len(rel.parts) - 1)
+
+
+def _drop_import_is_watched_path(path: Path) -> bool:
+    root = _drop_import_root_dir()
+    if root is None:
+        return False
+    try:
+        p = path.resolve(strict=False)
+    except Exception:
+        return False
+    depth = _drop_import_relative_depth(root, p)
+    if depth is None:
+        return False
+    return depth <= _drop_import_max_depth()
+
+
+def _drop_import_log(message: str) -> None:
+    print(f"[nim] drop-import: {message}", flush=True)
+
+
+def _schedule_drop_import_path(path: Path) -> None:
+    if not _drop_import_is_watched_path(path):
+        return
+    key = _drop_import_path_key(path)
+    with _DROP_IMPORT_PENDING_LOCK:
+        _DROP_IMPORT_PENDING[key] = time.monotonic()
+    _DROP_IMPORT_QUEUE.put(path)
+
+
+def _drop_import_take_due_paths() -> list[Path]:
+    now = time.monotonic()
+    due: list[Path] = []
+    settle_sec = _drop_import_settle_sec()
+    with _DROP_IMPORT_PENDING_LOCK:
+        for key, seen_at in list(_DROP_IMPORT_PENDING.items()):
+            if now - float(seen_at) < settle_sec:
+                continue
+            _DROP_IMPORT_PENDING.pop(key, None)
+            due.append(Path(key))
+    return due
+
+
+def _drop_import_wait_until_stable(path: Path) -> bool:
+    settle_sec = _drop_import_settle_sec()
+    stable_since: float | None = None
+    last_sig: tuple[int, int] | None = None
+    deadline = time.monotonic() + max(15.0, settle_sec * 6.0)
+    while not _DROP_IMPORT_STOP.is_set():
+        try:
+            st = path.stat()
+        except FileNotFoundError:
+            return False
+        except Exception:
+            time.sleep(0.2)
+            continue
+        if not path.is_file() or st.st_size <= 0:
+            stable_since = None
+            last_sig = None
+            if time.monotonic() >= deadline:
+                return False
+            _DROP_IMPORT_STOP.wait(0.25)
+            continue
+        sig = (int(st.st_size), int(st.st_mtime_ns))
+        if sig != last_sig:
+            last_sig = sig
+            stable_since = time.monotonic()
+        elif stable_since is not None and (time.monotonic() - stable_since) >= settle_sec:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        _DROP_IMPORT_STOP.wait(min(0.5, max(0.2, settle_sec / 2.0)))
+    return False
+
+
+def _record_drop_import_failure(conn: sqlite3.Connection, path: Path, *, error: str) -> None:
+    try:
+        st = path.stat()
+        size = int(st.st_size)
+        mtime_ns = int(st.st_mtime_ns)
+    except Exception:
+        size = -1
+        mtime_ns = -1
+    conn.execute(
+        """
+        INSERT INTO drop_import_failures(path, size, mtime_ns, error, failed_at_utc)
+        VALUES (?,?,?,?,?)
+        ON CONFLICT(path) DO UPDATE SET
+          size=excluded.size,
+          mtime_ns=excluded.mtime_ns,
+          error=excluded.error,
+          failed_at_utc=excluded.failed_at_utc
+        """,
+        (_drop_import_path_key(path), size, mtime_ns, str(error or "")[:500], datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")),
+    )
+
+
+def _clear_drop_import_failure(conn: sqlite3.Connection, path: Path) -> None:
+    conn.execute("DELETE FROM drop_import_failures WHERE path=?", (_drop_import_path_key(path),))
+
+
+def _drop_import_should_skip_failed(conn: sqlite3.Connection, path: Path) -> bool:
+    try:
+        st = path.stat()
+    except Exception:
+        return False
+    row = conn.execute(
+        "SELECT size, mtime_ns FROM drop_import_failures WHERE path=?",
+        (_drop_import_path_key(path),),
+    ).fetchone()
+    if not row:
+        return False
+    return int(row["size"] or -1) == int(st.st_size) and int(row["mtime_ns"] or -1) == int(st.st_mtime_ns)
+
+
+def _get_master_uploader(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT id, username FROM users WHERE role='master' AND disabled=0 ORDER BY id LIMIT 1"
+    ).fetchone()
+
+
+def _process_drop_import_path(path: Path) -> None:
+    if not _drop_import_is_watched_path(path):
+        return
+    if not path.exists():
+        return
+    if not _drop_import_is_allowed_file(path):
+        return
+    if not _drop_import_wait_until_stable(path):
+        if path.exists():
+            _schedule_drop_import_path(path)
+        return
+    conn = get_conn()
+    try:
+        if _drop_import_should_skip_failed(conn, path):
+            return
+        master = _get_master_uploader(conn)
+        if not master:
+            raise RuntimeError("master user not found")
+        st = path.stat()
+        res = _upload_image_from_path_core(
+            conn=conn,
+            bg=None,
+            file_path=str(path),
+            filename=path.name,
+            mime=(mimetypes.guess_type(path.name)[0] or "application/octet-stream"),
+            mtime_iso=datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(),
+            user_id=int(master["id"]),
+            username=str(master["username"]),
+            ensure_derivatives=True,
+            derivative_kinds=("grid", "overlay"),
+            upload_bookmark_list_id=None,
+        )
+        if bool(res.get("dedup")):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        _clear_drop_import_failure(conn, path)
+        conn.commit()
+        _drop_import_log(f"imported: {path.name} (image_id={int(res.get('image_id') or 0)}, dedup={'yes' if bool(res.get('dedup')) else 'no'})")
+    except Exception as exc:
+        try:
+            _record_drop_import_failure(conn, path, error=f"{type(exc).__name__}: {exc}")
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        _drop_import_log(f"failed: {path.name} ({type(exc).__name__}: {exc})")
+    finally:
+        conn.close()
+
+
+def _drop_import_initial_scan() -> None:
+    root = _drop_import_root_dir()
+    if root is None or not root.exists():
+        return
+    max_depth = _drop_import_max_depth()
+    for p in sorted(root.rglob("*")):
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in {".png", ".webp"}:
+            continue
+        depth = _drop_import_relative_depth(root, p)
+        if depth is None or depth > max_depth:
+            continue
+        _schedule_drop_import_path(p)
+
+
+def _drop_import_worker_loop() -> None:
+    while not _DROP_IMPORT_STOP.is_set():
+        try:
+            _DROP_IMPORT_QUEUE.get(timeout=0.5)
+        except queue.Empty:
+            pass
+        for path in _drop_import_take_due_paths():
+            if _DROP_IMPORT_STOP.is_set():
+                return
+            _process_drop_import_path(path)
+
+
+def start_drop_import_watcher() -> None:
+    global _DROP_IMPORT_OBSERVER, _DROP_IMPORT_WORKER_THREAD
+    if not _drop_import_enabled():
+        return
+    root = _drop_import_root_dir()
+    if root is None:
+        _drop_import_log("disabled: NAI_IM_DROP_IMPORT_DIR is empty")
+        return
+    root.mkdir(parents=True, exist_ok=True)
+    if _DROP_IMPORT_WORKER_THREAD and _DROP_IMPORT_WORKER_THREAD.is_alive():
+        return
+    try:
+        from watchdog.events import FileSystemEventHandler
+        from watchdog.observers import Observer
+    except Exception as exc:
+        _drop_import_log(f"disabled: watchdog unavailable ({exc})")
+        return
+
+    class _DropImportHandler(FileSystemEventHandler):
+        def on_created(self, event):
+            if not event.is_directory:
+                _schedule_drop_import_path(Path(event.src_path))
+
+        def on_modified(self, event):
+            if not event.is_directory:
+                _schedule_drop_import_path(Path(event.src_path))
+
+        def on_moved(self, event):
+            if not event.is_directory:
+                _schedule_drop_import_path(Path(event.dest_path))
+
+    _DROP_IMPORT_STOP.clear()
+    with _DROP_IMPORT_PENDING_LOCK:
+        _DROP_IMPORT_PENDING.clear()
+    while True:
+        try:
+            _DROP_IMPORT_QUEUE.get_nowait()
+        except queue.Empty:
+            break
+    observer = Observer()
+    observer.schedule(_DropImportHandler(), str(root), recursive=True)
+    observer.start()
+    worker = threading.Thread(target=_drop_import_worker_loop, name="nim-drop-import", daemon=True)
+    worker.start()
+    _DROP_IMPORT_OBSERVER = observer
+    _DROP_IMPORT_WORKER_THREAD = worker
+    _drop_import_log(f"watching: {root} (max_depth={_drop_import_max_depth()}, settle={_drop_import_settle_sec():g}s)")
+    _drop_import_initial_scan()
+
+
+def stop_drop_import_watcher() -> None:
+    global _DROP_IMPORT_OBSERVER, _DROP_IMPORT_WORKER_THREAD
+    _DROP_IMPORT_STOP.set()
+    observer = _DROP_IMPORT_OBSERVER
+    worker = _DROP_IMPORT_WORKER_THREAD
+    _DROP_IMPORT_OBSERVER = None
+    _DROP_IMPORT_WORKER_THREAD = None
+    if observer is not None:
+        try:
+            observer.stop()
+            observer.join(timeout=3.0)
+        except Exception:
+            pass
+    if worker is not None:
+        try:
+            worker.join(timeout=3.0)
+        except Exception:
+            pass
+    with _DROP_IMPORT_PENDING_LOCK:
+        _DROP_IMPORT_PENDING.clear()
+    while True:
+        try:
+            _DROP_IMPORT_QUEUE.get_nowait()
+        except queue.Empty:
+            break
+
+
 def start_background_workers() -> None:
     start_derivative_worker(_process_upload_item_job, _process_derivative_job)
+    start_drop_import_watcher()
 
 
 def stop_background_workers() -> None:
+    stop_drop_import_watcher()
     stop_derivative_worker()
 
 
@@ -493,6 +837,13 @@ def _thumb_url_map(conn: sqlite3.Connection, ids: list[int] | tuple[int, ...], *
         return _public_thumb_url_map(conn, ids)
     rev_by_id = _thumb_rev_map(conn, ids, kind=kind)
     return {int(iid): _thumb_url(conn, int(iid), kind=kind, rev=rev_by_id.get(int(iid), "0")) for iid in rev_by_id.keys()}
+
+
+def _append_bm_list_id_to_url(url: str, bm_list_id: int | None) -> str:
+    if not url or bm_list_id is None:
+        return url
+    sep = '&' if '?' in str(url) else '?'
+    return f"{url}{sep}bm_list_id={int(bm_list_id)}"
 
 
 def publish_existing_public_thumbs() -> None:
@@ -2485,6 +2836,136 @@ def _estimate_missing_derivative_count(conn: sqlite3.Connection, kind: str) -> i
         return 0
 
 
+_SOURCE_DECODE_DELETE_MARKERS = (
+    "cannot identify image file",
+    "image file is truncated",
+)
+
+
+def _is_unrecoverable_source_decode_error(exc: Exception) -> bool:
+    msg = str(exc or "").strip().lower()
+    if not msg:
+        return False
+    return any(marker in msg for marker in _SOURCE_DECODE_DELETE_MARKERS)
+
+
+def _delete_invalid_image_record(conn: sqlite3.Connection, image_id: int) -> bool:
+    iid = int(image_id)
+    row = conn.execute(
+        """
+        SELECT images.id, images.uploader_user_id, images.software, images.file_mtime_utc,
+               images.main_sig_hash, users.username AS creator
+        FROM images
+        JOIN users ON users.id = images.uploader_user_id
+        WHERE images.id=?
+        """,
+        (iid,),
+    ).fetchone()
+    if not row:
+        return False
+
+    disk_paths: list[str] = []
+
+    drows = conn.execute("SELECT disk_path FROM image_files WHERE image_id=?", (iid,)).fetchall()
+    for r in drows:
+        p = r["disk_path"] if not isinstance(r, tuple) else r[0]
+        if p and str(p).strip():
+            disk_paths.append(str(p))
+
+    ddrows = conn.execute("SELECT disk_path FROM image_derivatives WHERE image_id=?", (iid,)).fetchall()
+    for r in ddrows:
+        p = r["disk_path"] if not isinstance(r, tuple) else r[0]
+        if p and str(p).strip():
+            disk_paths.append(str(p))
+
+    creator = str(row["creator"] if not isinstance(row, tuple) else row[5])
+    creator_id = int(row["uploader_user_id"] if not isinstance(row, tuple) else row[1])
+    software = row["software"] if not isinstance(row, tuple) else row[2]
+    file_mtime_utc = str((row["file_mtime_utc"] if not isinstance(row, tuple) else row[3]) or "")
+    sig_hash = str((row["main_sig_hash"] if not isinstance(row, tuple) else row[4]) or "")
+
+    day_key = file_mtime_utc[:10] if len(file_mtime_utc) >= 10 else ""
+    month_key = file_mtime_utc[:7] if len(file_mtime_utc) >= 7 else ""
+    year_key = file_mtime_utc[:4] if len(file_mtime_utc) >= 4 else ""
+
+    tags = conn.execute(
+        "SELECT tag_canonical FROM image_tags WHERE image_id=? GROUP BY tag_canonical",
+        (iid,),
+    ).fetchall()
+
+    conn.execute("DELETE FROM images WHERE id=?", (iid,))
+
+    if creator:
+        _apply_bulk_dec(conn, "stat_creators", "creator", creator, 1)
+
+    if software is not None and str(software).strip():
+        software_key = str(software)
+        _apply_bulk_dec(conn, "stat_software", "software", software_key, 1)
+        conn.execute(
+            "UPDATE stat_creator_software SET image_count = image_count - 1 WHERE creator_id=? AND software=?",
+            (creator_id, software_key),
+        )
+        conn.execute(
+            "DELETE FROM stat_creator_software WHERE creator_id=? AND software=? AND image_count <= 0",
+            (creator_id, software_key),
+        )
+
+    if day_key:
+        _apply_bulk_dec(conn, "stat_day_counts", "ymd", day_key, 1)
+        conn.execute(
+            "UPDATE stat_creator_day_counts SET image_count = image_count - 1 WHERE creator_id=? AND ymd=?",
+            (creator_id, day_key),
+        )
+        conn.execute(
+            "DELETE FROM stat_creator_day_counts WHERE creator_id=? AND ymd=? AND image_count <= 0",
+            (creator_id, day_key),
+        )
+
+    if month_key:
+        _apply_bulk_dec(conn, "stat_month_counts", "ym", month_key, 1)
+        conn.execute(
+            "UPDATE stat_creator_month_counts SET image_count = image_count - 1 WHERE creator_id=? AND ym=?",
+            (creator_id, month_key),
+        )
+        conn.execute(
+            "DELETE FROM stat_creator_month_counts WHERE creator_id=? AND ym=? AND image_count <= 0",
+            (creator_id, month_key),
+        )
+
+    if year_key:
+        _apply_bulk_dec(conn, "stat_year_counts", "year", year_key, 1)
+        conn.execute(
+            "UPDATE stat_creator_year_counts SET image_count = image_count - 1 WHERE creator_id=? AND year=?",
+            (creator_id, year_key),
+        )
+        conn.execute(
+            "DELETE FROM stat_creator_year_counts WHERE creator_id=? AND year=? AND image_count <= 0",
+            (creator_id, year_key),
+        )
+
+    for r in tags:
+        tag_key = str(r["tag_canonical"] if not isinstance(r, tuple) else r[0])
+        if tag_key:
+            _apply_bulk_dec(conn, "stat_tag_counts", "tag_canonical", tag_key, 1)
+
+    if sig_hash:
+        try:
+            stats_service.recompute_dedup_flags_for_hashes(conn, [sig_hash])
+        except Exception:
+            pass
+
+    conn.commit()
+
+    for p in disk_paths:
+        try:
+            if p and os.path.exists(p):
+                os.remove(p)
+        except Exception:
+            pass
+
+    return True
+
+
 def _fill_missing_derivatives_worker(run_id: int, batch_size: int = 100, interval_sec: float = 0.1) -> None:
     try:
         while True:
@@ -2519,8 +3000,23 @@ def _fill_missing_derivatives_worker(run_id: int, batch_size: int = 100, interva
                             _ensure_derivatives(int(iid), missing_kinds, trigger="maintenance_fill")
                             updated_n += 1
                     except Exception as exc:
-                        error_n += 1
-                        _run_log_error(conn, run_id, int(iid), "derivative_fill", str(exc) or "error")
+                        if _is_unrecoverable_source_decode_error(exc):
+                            deleted = False
+                            try:
+                                deleted = _delete_invalid_image_record(conn, int(iid))
+                            except Exception as delete_exc:
+                                error_n += 1
+                                _run_log_error(conn, run_id, int(iid), "derivative_fill", f"{str(exc) or 'error'} / delete_failed: {type(delete_exc).__name__}: {delete_exc}")
+                            else:
+                                if deleted:
+                                    updated_n += 1
+                                    _run_log_error(conn, run_id, int(iid), "derivative_fill_delete", f"source image invalid; deleted from DB: {str(exc) or 'error'}")
+                                else:
+                                    error_n += 1
+                                    _run_log_error(conn, run_id, int(iid), "derivative_fill", str(exc) or "error")
+                        else:
+                            error_n += 1
+                            _run_log_error(conn, run_id, int(iid), "derivative_fill", str(exc) or "error")
                     if (last_id % 20) == 0:
                         _kv_set(conn, "derivative_fill_bg_heartbeat", str(_hb_now()))
 
@@ -3220,7 +3716,6 @@ def stats_software(user: dict = Depends(get_user)):
                 WHERE software IS NOT NULL AND TRIM(software) <> ''
                   AND (
                     cs.creator_id = ?
-                    OR EXISTS(SELECT 1 FROM user_settings us WHERE us.user_id=cs.creator_id AND us.share_works=1)
                     OR EXISTS(SELECT 1 FROM user_creators uc WHERE uc.user_id=? AND uc.creator_user_id=cs.creator_id)
                   )
                 GROUP BY software
@@ -3238,7 +3733,6 @@ def stats_software(user: dict = Depends(get_user)):
                 WHERE images.software IS NOT NULL AND TRIM(images.software) <> ''
                   AND (
                     images.uploader_user_id = ?
-                    OR EXISTS(SELECT 1 FROM user_settings us WHERE us.user_id=images.uploader_user_id AND us.share_works=1)
                     OR EXISTS(SELECT 1 FROM user_creators uc WHERE uc.user_id=? AND uc.creator_user_id=images.uploader_user_id)
                   )
                 GROUP BY images.software
@@ -3272,7 +3766,12 @@ def my_creator_list(user: dict = Depends(get_user)):
             LEFT JOIN user_settings us ON us.user_id=u.id
             LEFT JOIN user_creators uc ON uc.user_id=? AND uc.creator_user_id=u.id
             LEFT JOIN stat_creators sc ON sc.creator=u.username
-            WHERE u.id = ? OR uc.creator_user_id IS NOT NULL
+            WHERE u.id = ?
+               OR (
+                    uc.creator_user_id IS NOT NULL
+                    AND u.disabled=0
+                    AND COALESCE(us.share_works,0)=1
+               )
             ORDER BY is_self DESC, LOWER(u.username) ASC
             """,
             (uid, uid, uid),
@@ -3393,10 +3892,8 @@ def bookmark_sidebar(user: dict = Depends(get_user)):
             cid = int(r["id"])
             if cid == uid:
                 continue
-            # show only when creator shares bookmarks AND shares works
+            # show only when creator currently shares bookmarks
             if int(r["share_bookmarks"] or 0) != 1:
-                continue
-            if int(r["share_works"] or 0) != 1:
                 continue
 
             # Ensure shared creators have at least the default list; otherwise the UI looks broken.
@@ -3459,7 +3956,7 @@ def add_bookmark_subscription(req: BookmarkSubReq, user: dict = Depends(get_user
         if int(target_id) == uid:
             return {"ok": True}
 
-        # Only allow subscribing to creators that share bookmarks and works.
+        # Only allow subscribing to creators that currently share bookmarks.
         srow = conn.execute(
             """
             SELECT u.id,
@@ -3474,8 +3971,6 @@ def add_bookmark_subscription(req: BookmarkSubReq, user: dict = Depends(get_user
         ).fetchone()
         if not srow or int(srow["disabled"] or 0) == 1:
             raise HTTPException(status_code=404, detail="user not found")
-        if int(srow["share_works"] or 0) != 1:
-            raise HTTPException(status_code=400, detail="user does not share works")
         if int(srow["share_bookmarks"] or 0) != 1:
             raise HTTPException(status_code=400, detail="user does not share bookmarks")
 
@@ -3523,10 +4018,10 @@ def users_suggest(kind: str = "creators", q: str = "", limit: int = 20, user: di
 
         # Filter candidates by kind to match UI rules.
         # - creators: must share works
-        # - bookmarks: must share works AND bookmarks
+        # - bookmarks: must share bookmarks
         cond = "1=1"
         if kind == "bookmarks":
-            cond = "COALESCE(us.share_works,0)=1 AND COALESCE(us.share_bookmarks,0)=1"
+            cond = "COALESCE(us.share_bookmarks,0)=1"
         else:
             cond = "COALESCE(us.share_works,0)=1"
 
@@ -3620,7 +4115,6 @@ def stats_day_counts(month: str, user: dict = Depends(get_user)):
             WHERE ymd LIKE ?
               AND (
                 sc.creator_id = ?
-                OR EXISTS(SELECT 1 FROM user_settings us WHERE us.user_id=sc.creator_id AND us.share_works=1)
                 OR EXISTS(SELECT 1 FROM user_creators uc WHERE uc.user_id=? AND uc.creator_user_id=sc.creator_id)
               )
             GROUP BY ymd
@@ -3673,7 +4167,6 @@ def stats_month_counts(year: str, user: dict = Depends(get_user)):
             WHERE ym LIKE ?
               AND (
                 sm.creator_id = ?
-                OR EXISTS(SELECT 1 FROM user_settings us WHERE us.user_id=sm.creator_id AND us.share_works=1)
                 OR EXISTS(SELECT 1 FROM user_creators uc WHERE uc.user_id=? AND uc.creator_user_id=sm.creator_id)
               )
             GROUP BY ym
@@ -3689,7 +4182,6 @@ def stats_month_counts(year: str, user: dict = Depends(get_user)):
             WHERE year=?
               AND (
                 sy.creator_id = ?
-                OR EXISTS(SELECT 1 FROM user_settings us WHERE us.user_id=sy.creator_id AND us.share_works=1)
                 OR EXISTS(SELECT 1 FROM user_creators uc WHERE uc.user_id=? AND uc.creator_user_id=sy.creator_id)
               )
             """,
@@ -3734,7 +4226,6 @@ def stats_year_counts(user: dict = Depends(get_user)):
             FROM stat_creator_year_counts sy
             WHERE (
               sy.creator_id = ?
-              OR EXISTS(SELECT 1 FROM user_settings us WHERE us.user_id=sy.creator_id AND us.share_works=1)
               OR EXISTS(SELECT 1 FROM user_creators uc WHERE uc.user_id=? AND uc.creator_user_id=sy.creator_id)
             )
             GROUP BY year
@@ -5765,7 +6256,7 @@ def list_images(
 
         _apply_tag_filters(conn, where, params, tag_list, tag_not_list, image_alias="images")
 
-        _append_visibility_filter(where, params, viewer=user)
+        _append_visibility_filter(where, params, viewer=user, bm_list_id=None)
 
         if where:
             q += " WHERE " + " AND ".join(where)
@@ -5873,7 +6364,7 @@ def list_images_page(
             params=params,
             viewer=user,
             apply_tag_filters=lambda c, w, p, tag_list, tag_not_list, image_alias: _apply_tag_filters(c, w, p, tag_list, tag_not_list, image_alias=image_alias),
-            append_visibility_filter=lambda w, p, viewer: _append_visibility_filter(w, p, viewer=viewer),
+            append_visibility_filter=lambda w, p, viewer: _append_visibility_filter(w, p, viewer=viewer, bm_list_id=filters.bm_list_id),
         )
 
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""
@@ -5929,7 +6420,7 @@ def list_images_page(
                     "dedup_flag": r["dedup_flag"],
                     "favorite": int(r["favorite"] or 0),
                     "is_nsfw": int(r["is_nsfw"] or 0),
-                    "thumb": thumb_urls.get(int(r["id"]), _thumb_url(conn, int(r["id"]), kind="grid")),
+                    "thumb": _append_bm_list_id_to_url(thumb_urls.get(int(r["id"]), _thumb_url(conn, int(r["id"]), kind="grid")), filters.bm_list_id),
                 }
             )
 
@@ -5979,47 +6470,104 @@ def _make_scroll_cursor(sort_key: str, row: sqlite3.Row) -> str:
     return f"{mtime}|{iid}"
 
 
-def _append_visibility_filter(where: list[str], params: list, *, viewer: dict) -> None:
-    """Apply per-user visibility rule for images.
+def _normalize_bm_list_id_for_visibility(conn: sqlite3.Connection, *, viewer: dict, bm_list_id: int | None) -> int | None:
+    if bm_list_id is None:
+        return None
+    try:
+        lid = int(bm_list_id)
+    except Exception:
+        return None
+    if lid <= 0:
+        return None
+    if not _can_view_bookmark_list(conn, viewer=viewer, list_id=lid):
+        return None
+    return lid
 
-    Rule (user role):
-    - always include own images
-    - include other users' images when creator has share_works=ON
-    - include other users' images when creator is registered in viewer's author list (user_creators)
 
-    Admin/master: see all.
-    """
-    role = str(viewer.get("role") or "user")
-    if role in {"admin", "master"}:
-        return
+def _append_visibility_filter(where: list[str], params: list, *, viewer: dict, bm_list_id: int | None = None) -> None:
+    """Apply per-user visibility rule for images."""
     uid = int(viewer.get("id") or 0)
+    if bm_list_id is not None:
+        where.append(
+            "EXISTS(SELECT 1 FROM bookmarks b WHERE b.list_id = ? AND b.image_id = images.id)"
+        )
+        params.append(int(bm_list_id))
+        where.append(
+            "(images.uploader_user_id = ? "
+            "OR EXISTS("
+            "SELECT 1 FROM users u2 "
+            "LEFT JOIN user_settings us2 ON us2.user_id=u2.id "
+            "WHERE u2.id=images.uploader_user_id "
+            "AND u2.disabled=0 "
+            "AND COALESCE(us2.share_works,0)=1"
+            "))"
+        )
+        params.append(uid)
+        return
+
     where.append(
         "(images.uploader_user_id = ? "
-        "OR EXISTS(SELECT 1 FROM user_settings us WHERE us.user_id = images.uploader_user_id AND us.share_works = 1) "
-        "OR EXISTS(SELECT 1 FROM user_creators uc WHERE uc.user_id = ? AND uc.creator_user_id = images.uploader_user_id))"
+        "OR EXISTS("
+        "SELECT 1 FROM user_creators uc "
+        "JOIN users u2 ON u2.id=uc.creator_user_id "
+        "LEFT JOIN user_settings us2 ON us2.user_id=uc.creator_user_id "
+        "WHERE uc.user_id = ? "
+        "AND uc.creator_user_id = images.uploader_user_id "
+        "AND u2.disabled=0 "
+        "AND COALESCE(us2.share_works,0)=1"
+        "))"
     )
     params.extend([uid, uid])
 
 
-def _assert_image_visible(conn: sqlite3.Connection, *, image_id: int, viewer: dict) -> None:
-    """Raise 404 if viewer cannot see the image."""
-    role = str(viewer.get("role") or "user")
-    if role in {"admin", "master"}:
-        return
+def _assert_image_visible(conn: sqlite3.Connection, *, image_id: int, viewer: dict, bm_list_id: int | None = None) -> None:
+    """Raise 404 if viewer cannot see the image in the current context."""
     uid = int(viewer.get("id") or 0)
-    row = conn.execute("SELECT uploader_user_id FROM images WHERE id=?", (int(image_id),)).fetchone()
+    iid = int(image_id)
+    row = conn.execute("SELECT uploader_user_id FROM images WHERE id=?", (iid,)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="not found")
     creator_id = int(row["uploader_user_id"])
+
+    lid = _normalize_bm_list_id_for_visibility(conn, viewer=viewer, bm_list_id=bm_list_id)
+    if lid is not None:
+        listed = conn.execute(
+            "SELECT 1 FROM bookmarks WHERE list_id=? AND image_id=?",
+            (lid, iid),
+        ).fetchone()
+        if not listed:
+            raise HTTPException(status_code=404, detail="not found")
+        if creator_id == uid:
+            return
+        shared = conn.execute(
+            """
+            SELECT 1
+            FROM users u
+            LEFT JOIN user_settings us ON us.user_id=u.id
+            WHERE u.id=?
+              AND u.disabled=0
+              AND COALESCE(us.share_works,0)=1
+            """,
+            (creator_id,),
+        ).fetchone()
+        if not shared:
+            raise HTTPException(status_code=404, detail="not found")
+        return
+
     if creator_id == uid:
         return
     ok = conn.execute(
         """
         SELECT 1
-        WHERE EXISTS(SELECT 1 FROM user_settings us WHERE us.user_id=? AND us.share_works=1)
-           OR EXISTS(SELECT 1 FROM user_creators uc WHERE uc.user_id=? AND uc.creator_user_id=?)
+        FROM user_creators uc
+        JOIN users u ON u.id=uc.creator_user_id
+        LEFT JOIN user_settings us ON us.user_id=uc.creator_user_id
+        WHERE uc.user_id=?
+          AND uc.creator_user_id=?
+          AND u.disabled=0
+          AND COALESCE(us.share_works,0)=1
         """,
-        (creator_id, uid, creator_id),
+        (uid, creator_id),
     ).fetchone()
     if not ok:
         raise HTTPException(status_code=404, detail="not found")
@@ -6027,10 +6575,6 @@ def _assert_image_visible(conn: sqlite3.Connection, *, image_id: int, viewer: di
 
 def _can_view_bookmark_list(conn: sqlite3.Connection, *, viewer: dict, list_id: int) -> bool:
     """Whether viewer can filter by the given bookmark list id."""
-    role = str(viewer.get("role") or "user")
-    if role in {"admin", "master"}:
-        return True
-
     uid = int(viewer.get("id") or 0)
     lid = int(list_id)
 
@@ -6051,8 +6595,8 @@ def _can_view_bookmark_list(conn: sqlite3.Connection, *, viewer: dict, list_id: 
         LEFT JOIN user_settings us ON us.user_id=u.id
         JOIN user_bookmark_creators sub ON sub.user_id=? AND sub.creator_user_id=u.id
         WHERE u.id=?
+          AND u.disabled=0
           AND COALESCE(us.share_bookmarks,0)=1
-          AND COALESCE(us.share_works,0)=1
         LIMIT 1
         """,
         (uid, owner_id),
@@ -6130,7 +6674,7 @@ def list_images_scroll(
             params=params,
             viewer=user,
             apply_tag_filters=lambda c, w, p, tag_list, tag_not_list, image_alias: _apply_tag_filters(c, w, p, tag_list, tag_not_list, image_alias=image_alias),
-            append_visibility_filter=lambda w, p, viewer: _append_visibility_filter(w, p, viewer=viewer),
+            append_visibility_filter=lambda w, p, viewer: _append_visibility_filter(w, p, viewer=viewer, bm_list_id=filters.bm_list_id),
         )
 
         where_base = list(where)
@@ -6205,7 +6749,7 @@ def list_images_scroll(
                     "dedup_flag": r["dedup_flag"],
                     "favorite": int(r["favorite"] or 0),
                     "is_nsfw": int(r["is_nsfw"] or 0),
-                    "thumb": thumb_urls.get(int(r["id"]), _thumb_url(conn, int(r["id"]), kind="grid")),
+                    "thumb": _append_bm_list_id_to_url(thumb_urls.get(int(r["id"]), _thumb_url(conn, int(r["id"]), kind="grid")), filters.bm_list_id),
                 }
             )
 
@@ -6222,7 +6766,7 @@ def list_images_scroll(
         conn.close()
 
 @api_router.get("/images/{image_id}/thumb")
-def get_thumb(image_id: int, request: Request, kind: str = "grid", user: dict = Depends(get_user)):
+def get_thumb(image_id: int, request: Request, kind: str = "grid", bm_list_id: int | None = None, user: dict = Depends(get_user)):
     if kind not in {"grid", "overlay"}:
         raise HTTPException(status_code=400, detail="kind must be grid/overlay")
 
@@ -6233,7 +6777,7 @@ def get_thumb(image_id: int, request: Request, kind: str = "grid", user: dict = 
 
     conn = get_conn()
     try:
-        _assert_image_visible(conn, image_id=int(image_id), viewer=user)
+        _assert_image_visible(conn, image_id=int(image_id), viewer=user, bm_list_id=bm_list_id)
         chosen = None
         chosen_fmt = None
 
@@ -6293,6 +6837,7 @@ class ClientPerfLogReq(BaseModel):
 
 class ImageDetailsBatchReq(BaseModel):
     ids: list[int] = []
+    bm_list_id: int | None = None
 
 
 @api_router.post("/debug/perf")
@@ -6376,10 +6921,10 @@ def prefetch_derivatives(req: PrefetchDerivativesReq, bg: BackgroundTasks, reque
 
 @api_router.get("/images/{image_id}/file")
 
-def download_original(image_id: int, request: Request, user: dict = Depends(get_user)):
+def download_original(image_id: int, request: Request, bm_list_id: int | None = None, user: dict = Depends(get_user)):
     conn = get_conn()
     try:
-        _assert_image_visible(conn, image_id=int(image_id), viewer=user)
+        _assert_image_visible(conn, image_id=int(image_id), viewer=user, bm_list_id=bm_list_id)
         row = conn.execute(
             "SELECT images.original_filename AS fn, images.mime AS mime, images.sha256 AS sha, image_files.disk_path AS p, image_files.bytes AS bytes "
             "FROM images JOIN image_files ON image_files.image_id=images.id WHERE images.id=?",
@@ -6418,11 +6963,11 @@ def download_original(image_id: int, request: Request, user: dict = Depends(get_
 
 
 @api_router.get("/images/{image_id}/view")
-def view_original(image_id: int, user: dict = Depends(get_user)):
+def view_original(image_id: int, bm_list_id: int | None = None, user: dict = Depends(get_user)):
     """Inline view for full size image (useful for browser zoom)."""
     conn = get_conn()
     try:
-        _assert_image_visible(conn, image_id=int(image_id), viewer=user)
+        _assert_image_visible(conn, image_id=int(image_id), viewer=user, bm_list_id=bm_list_id)
         row = conn.execute(
             "SELECT images.original_filename AS fn, images.mime AS mime, image_files.disk_path AS p, image_files.bytes AS bytes "
             "FROM images JOIN image_files ON image_files.image_id=images.id WHERE images.id=?",
@@ -6450,10 +6995,10 @@ def view_original(image_id: int, user: dict = Depends(get_user)):
         conn.close()
 
 @api_router.get("/images/{image_id}/metadata_json")
-def download_metadata(image_id: int, user: dict = Depends(get_user)):
+def download_metadata(image_id: int, bm_list_id: int | None = None, user: dict = Depends(get_user)):
     conn = get_conn()
     try:
-        _assert_image_visible(conn, image_id=int(image_id), viewer=user)
+        _assert_image_visible(conn, image_id=int(image_id), viewer=user, bm_list_id=bm_list_id)
         row = conn.execute(
             "SELECT prompt_positive_raw, prompt_negative_raw, prompt_character_raw, character_entries_json, main_negative_combined_raw, params_json, software, model_name, metadata_raw, has_potion FROM images WHERE id=?",
             (image_id,),
@@ -6478,10 +7023,10 @@ def download_metadata(image_id: int, user: dict = Depends(get_user)):
         conn.close()
 
 @api_router.get("/images/{image_id}/potion")
-def download_potion(image_id: int, user: dict = Depends(get_user)):
+def download_potion(image_id: int, bm_list_id: int | None = None, user: dict = Depends(get_user)):
     conn = get_conn()
     try:
-        _assert_image_visible(conn, image_id=int(image_id), viewer=user)
+        _assert_image_visible(conn, image_id=int(image_id), viewer=user, bm_list_id=bm_list_id)
         row = conn.execute("SELECT potion_raw, has_potion FROM images WHERE id=?", (image_id,)).fetchone()
         if not row or int(row["has_potion"]) != 1:
             raise HTTPException(status_code=404, detail="no potion")
@@ -6539,34 +7084,44 @@ def _normalize_detail_ids(values, *, limit: int = 64) -> list[int]:
     return ids
 
 
-def _get_visible_image_rows(conn: sqlite3.Connection, ids: list[int], viewer: dict) -> dict[int, sqlite3.Row]:
+def _get_visible_image_rows(conn: sqlite3.Connection, ids: list[int], viewer: dict, *, bm_list_id: int | None = None) -> dict[int, sqlite3.Row]:
     if not ids:
         return {}
-    placeholders = ",".join("?" for _ in ids)
-    role = str(viewer.get("role") or "user")
-    if role in {"admin", "master"}:
-        sql = (
-            "SELECT images.*, users.username AS creator, COALESCE(image_files.size, LENGTH(image_files.bytes)) AS file_bytes "
-            "FROM images "
-            "JOIN users ON users.id=images.uploader_user_id "
-            "JOIN image_files ON image_files.image_id = images.id "
-            f"WHERE images.id IN ({placeholders})"
-        )
-        rows = conn.execute(sql, tuple(ids)).fetchall()
-        return {int(r["id"]): r for r in rows}
-
+    id_list = [int(x) for x in ids]
+    placeholders = ",".join("?" for _ in id_list)
     uid = int(viewer.get("id") or 0)
+    lid = _normalize_bm_list_id_for_visibility(conn, viewer=viewer, bm_list_id=bm_list_id)
+
     sql = (
         "SELECT images.*, users.username AS creator, COALESCE(image_files.size, LENGTH(image_files.bytes)) AS file_bytes "
         "FROM images "
         "JOIN users ON users.id=images.uploader_user_id "
         "JOIN image_files ON image_files.image_id = images.id "
         f"WHERE images.id IN ({placeholders}) "
-        "AND (images.uploader_user_id=? "
-        "OR EXISTS(SELECT 1 FROM user_settings us WHERE us.user_id=images.uploader_user_id AND us.share_works=1) "
-        "OR EXISTS(SELECT 1 FROM user_creators uc WHERE uc.user_id=? AND uc.creator_user_id=images.uploader_user_id))"
     )
-    rows = conn.execute(sql, tuple(ids) + (uid, uid)).fetchall()
+    params: list = list(id_list)
+    if lid is not None:
+        sql += (
+            "AND EXISTS(SELECT 1 FROM bookmarks b WHERE b.list_id=? AND b.image_id=images.id) "
+            "AND (images.uploader_user_id=? "
+            "OR (users.disabled=0 AND EXISTS(SELECT 1 FROM user_settings us WHERE us.user_id=users.id AND COALESCE(us.share_works,0)=1)))"
+        )
+        params.extend([int(lid), uid])
+    else:
+        sql += (
+            "AND (images.uploader_user_id=? "
+            "OR EXISTS("
+            "SELECT 1 FROM user_creators uc "
+            "JOIN users u2 ON u2.id=uc.creator_user_id "
+            "LEFT JOIN user_settings us2 ON us2.user_id=uc.creator_user_id "
+            "WHERE uc.user_id=? "
+            "AND uc.creator_user_id=images.uploader_user_id "
+            "AND u2.disabled=0 "
+            "AND COALESCE(us2.share_works,0)=1"
+            "))"
+        )
+        params.extend([uid, uid])
+    rows = conn.execute(sql, tuple(params)).fetchall()
     return {int(r["id"]): r for r in rows}
 
 
@@ -6606,14 +7161,14 @@ def _fetch_favorite_ids(conn: sqlite3.Connection, user_id: int | None, ids: list
     return {int(r["image_id"]) for r in rows}
 
 
-def _build_image_detail_payloads(conn: sqlite3.Connection, ids: list[int], *, viewer: dict) -> tuple[dict[int, dict], dict]:
+def _build_image_detail_payloads(conn: sqlite3.Connection, ids: list[int], *, viewer: dict, bm_list_id: int | None = None) -> tuple[dict[int, dict], dict]:
     started = time.perf_counter()
     id_list = _normalize_detail_ids(ids)
     if not id_list:
         return {}, {"count": 0, "total_ms": 0.0}
 
     t0 = time.perf_counter()
-    image_rows = _get_visible_image_rows(conn, id_list, viewer)
+    image_rows = _get_visible_image_rows(conn, id_list, viewer, bm_list_id=bm_list_id)
     visible_ms = round((time.perf_counter() - t0) * 1000.0, 3)
     missing = [iid for iid in id_list if iid not in image_rows]
     if missing:
@@ -6706,12 +7261,12 @@ def _build_image_detail_payloads(conn: sqlite3.Connection, ids: list[int], *, vi
             "has_potion": bool(img["has_potion"]),
             "tags": grouped,
             "uc_tags": uc_tags,
-            "thumb": _thumb_url(conn, iid, kind="grid"),
-            "overlay": _thumb_url(conn, iid, kind="overlay"),
-            "view_full": f"/api/images/{iid}/view",
-            "download_file": f"/api/images/{iid}/file",
-            "download_meta": f"/api/images/{iid}/metadata_json",
-            "download_potion": f"/api/images/{iid}/potion",
+            "thumb": _append_bm_list_id_to_url(_thumb_url(conn, iid, kind="grid"), bm_list_id),
+            "overlay": _append_bm_list_id_to_url(_thumb_url(conn, iid, kind="overlay"), bm_list_id),
+            "view_full": _append_bm_list_id_to_url(f"/api/images/{iid}/view", bm_list_id),
+            "download_file": _append_bm_list_id_to_url(f"/api/images/{iid}/file", bm_list_id),
+            "download_meta": _append_bm_list_id_to_url(f"/api/images/{iid}/metadata_json", bm_list_id),
+            "download_potion": _append_bm_list_id_to_url(f"/api/images/{iid}/potion", bm_list_id),
         }
 
     metrics = {
@@ -6733,11 +7288,11 @@ def _build_image_detail_payloads(conn: sqlite3.Connection, ids: list[int], *, vi
 
 
 @api_router.get("/images/{image_id}/detail")
-def image_detail(image_id: int, request: Request, user: dict = Depends(get_user)):
+def image_detail(image_id: int, request: Request, bm_list_id: int | None = None, user: dict = Depends(get_user)):
     trace_id = getattr(request.state, "trace_id", None)
     conn = get_conn()
     try:
-        payloads, metrics = _build_image_detail_payloads(conn, [int(image_id)], viewer=user)
+        payloads, metrics = _build_image_detail_payloads(conn, [int(image_id)], viewer=user, bm_list_id=bm_list_id)
         payload = payloads.get(int(image_id))
         if not payload:
             raise HTTPException(status_code=404, detail="not found")
@@ -6775,7 +7330,7 @@ async def images_detail_batch(request: Request, user: dict = Depends(get_user)):
     trace_id = getattr(request.state, "trace_id", None)
     conn = get_conn()
     try:
-        payloads, metrics = _build_image_detail_payloads(conn, ids, viewer=user)
+        payloads, metrics = _build_image_detail_payloads(conn, ids, viewer=user, bm_list_id=req.bm_list_id)
         log_perf(
             "image_details_batch_timing",
             trace_id=trace_id,
@@ -7064,13 +7619,13 @@ def delete_bookmark_list(list_id: int, user: dict = Depends(get_user)):
 
 
 @api_router.get("/bookmarks/images/{image_id}")
-def get_image_bookmarks(image_id: int, user: dict = Depends(get_user)):
+def get_image_bookmarks(image_id: int, bm_list_id: int | None = None, user: dict = Depends(get_user)):
     conn = get_conn()
     try:
         uid = int(user["id"])
         iid = int(image_id)
 
-        _assert_image_visible(conn, image_id=iid, viewer=user)
+        _assert_image_visible(conn, image_id=iid, viewer=user, bm_list_id=bm_list_id)
 
         if not conn.execute("SELECT 1 FROM images WHERE id=?", (iid,)).fetchone():
             raise HTTPException(status_code=404, detail="not found")
@@ -7116,13 +7671,13 @@ class BookmarkSetReq(BaseModel):
 
 
 @api_router.put("/bookmarks/images/{image_id}")
-def set_image_bookmarks(image_id: int, req: BookmarkSetReq, user: dict = Depends(get_user)):
+def set_image_bookmarks(image_id: int, req: BookmarkSetReq, bm_list_id: int | None = None, user: dict = Depends(get_user)):
     conn = get_conn()
     try:
         uid = int(user["id"])
         iid = int(image_id)
 
-        _assert_image_visible(conn, image_id=iid, viewer=user)
+        _assert_image_visible(conn, image_id=iid, viewer=user, bm_list_id=bm_list_id)
 
         if not conn.execute("SELECT 1 FROM images WHERE id=?", (iid,)).fetchone():
             raise HTTPException(status_code=404, detail="not found")
@@ -7162,12 +7717,12 @@ def set_image_bookmarks(image_id: int, req: BookmarkSetReq, user: dict = Depends
 
 
 @api_router.post("/bookmarks/images/{image_id}/default")
-def add_default_bookmark(image_id: int, user: dict = Depends(get_user)):
+def add_default_bookmark(image_id: int, bm_list_id: int | None = None, user: dict = Depends(get_user)):
     conn = get_conn()
     try:
         uid = int(user["id"])
         iid = int(image_id)
-        _assert_image_visible(conn, image_id=iid, viewer=user)
+        _assert_image_visible(conn, image_id=iid, viewer=user, bm_list_id=bm_list_id)
         if not conn.execute("SELECT 1 FROM images WHERE id=?", (iid,)).fetchone():
             raise HTTPException(status_code=404, detail="not found")
         default_id = _ensure_default_bookmark_list(conn, uid)
@@ -7179,12 +7734,12 @@ def add_default_bookmark(image_id: int, user: dict = Depends(get_user)):
 
 
 @api_router.post("/bookmarks/images/{image_id}/clear")
-def clear_bookmarks_for_image(image_id: int, user: dict = Depends(get_user)):
+def clear_bookmarks_for_image(image_id: int, bm_list_id: int | None = None, user: dict = Depends(get_user)):
     conn = get_conn()
     try:
         uid = int(user["id"])
         iid = int(image_id)
-        _assert_image_visible(conn, image_id=iid, viewer=user)
+        _assert_image_visible(conn, image_id=iid, viewer=user, bm_list_id=bm_list_id)
         if not conn.execute("SELECT 1 FROM images WHERE id=?", (iid,)).fetchone():
             raise HTTPException(status_code=404, detail="not found")
         conn.execute(
@@ -7276,6 +7831,19 @@ class BulkDeleteReq(BaseModel):
     exclude_ids: list[int] = Field(default_factory=list)
 
 
+class BulkBookmarkSelectionReq(BaseModel):
+    mode: str
+    ids: list[int] = Field(default_factory=list)
+    query: BulkDeleteQuery | None = None
+    exclude_ids: list[int] = Field(default_factory=list)
+    bm_list_id: int | None = None
+
+
+class BulkBookmarkApplyReq(BulkBookmarkSelectionReq):
+    add_list_ids: list[int] = Field(default_factory=list)
+    remove_list_ids: list[int] = Field(default_factory=list)
+
+
 def _safe_int_list(xs: list[int] | None, *, max_n: int = 200000) -> list[int]:
     out: list[int] = []
     if not xs:
@@ -7295,6 +7863,110 @@ def _safe_int_list(xs: list[int] | None, *, max_n: int = 200000) -> list[int]:
     return out
 
 
+def _prepare_bulk_bookmark_scope(
+    conn: sqlite3.Connection,
+    *,
+    viewer: dict,
+    mode: str,
+    ids: list[int] | None,
+    query: BulkDeleteQuery | None,
+    exclude_ids: list[int] | None,
+    bm_list_id: int | None,
+) -> int:
+    """Populate tmp_bulk_bm_sel with the selected visible image ids and return its count."""
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS tmp_bulk_bm_sel(id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS tmp_bulk_bm_excl(id INTEGER PRIMARY KEY)")
+    conn.execute("DELETE FROM tmp_bulk_bm_sel")
+    conn.execute("DELETE FROM tmp_bulk_bm_excl")
+
+    mode_key = str(mode or "").strip().lower()
+    if mode_key not in {"ids", "query"}:
+        raise HTTPException(status_code=400, detail="mode must be ids/query")
+
+    excluded = _safe_int_list(exclude_ids, max_n=300000)
+    if excluded:
+        for i in range(0, len(excluded), 500):
+            chunk = excluded[i:i+500]
+            conn.executemany("INSERT OR IGNORE INTO tmp_bulk_bm_excl(id) VALUES (?)", [(int(x),) for x in chunk])
+
+    if mode_key == "ids":
+        visible_ids: list[int] = []
+        excluded_set = set(excluded)
+        vis_lid = _normalize_bm_list_id_for_visibility(conn, viewer=viewer, bm_list_id=bm_list_id)
+        for iid in _safe_int_list(ids, max_n=300000):
+            if excluded_set and int(iid) in excluded_set:
+                continue
+            try:
+                _assert_image_visible(conn, image_id=int(iid), viewer=viewer, bm_list_id=vis_lid)
+            except HTTPException:
+                continue
+            visible_ids.append(int(iid))
+        if visible_ids:
+            for i in range(0, len(visible_ids), 500):
+                chunk = visible_ids[i:i+500]
+                conn.executemany("INSERT OR IGNORE INTO tmp_bulk_bm_sel(id) VALUES (?)", [(int(x),) for x in chunk])
+        return len(visible_ids)
+
+    q = query or BulkDeleteQuery()
+    filters = normalize_gallery_filters(
+        creator=q.creator,
+        software=q.software,
+        tags=",".join(q.tags or []),
+        tags_not=",".join(q.tags_not or []),
+        date_from=q.date_from,
+        date_to=q.date_to,
+        dedup_only=q.dedup_only,
+        bm_any=q.bm_any,
+        bm_list_id=q.bm_list_id,
+        fav_only=q.fav_only,
+        sort=getattr(q, "sort", "newest"),
+        normalize_tag=normalize_tag,
+    )
+    normalized_lid = normalize_bookmark_list_id(
+        conn,
+        viewer=viewer,
+        bm_list_id=(filters.bm_list_id if filters.bm_list_id is not None else bm_list_id),
+        can_view_bookmark_list=lambda c, viewer, lid: _can_view_bookmark_list(c, viewer=viewer, list_id=lid),
+    )
+    filters.bm_list_id = normalized_lid
+
+    creator_ok, creator_id = resolve_creator_id(conn, filters.creator)
+    if not creator_ok:
+        return 0
+
+    uid = int(viewer.get("id") or 0)
+    join_sql, join_params = build_user_bookmark_join(uid, filters.bm_list_id)
+    where: list[str] = []
+    params: list = []
+    apply_common_filters(
+        conn,
+        filters=filters,
+        creator_id=creator_id,
+        where=where,
+        params=params,
+        viewer=viewer,
+        apply_tag_filters=lambda c, w, p, tag_list, tag_not_list, image_alias: _apply_tag_filters(c, w, p, tag_list, tag_not_list, image_alias=image_alias),
+        append_visibility_filter=lambda w, p, viewer: _append_visibility_filter(w, p, viewer=viewer, bm_list_id=filters.bm_list_id),
+    )
+    if excluded:
+        where.append("images.id NOT IN (SELECT id FROM tmp_bulk_bm_excl)")
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    from_sql = (
+        " FROM images "
+        " JOIN users ON users.id = images.uploader_user_id "
+        + join_sql
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO tmp_bulk_bm_sel(id) "
+        "SELECT images.id "
+        + from_sql
+        + where_sql,
+        join_params + params,
+    )
+    row = conn.execute("SELECT COUNT(*) AS n FROM tmp_bulk_bm_sel").fetchone()
+    return int(row["n"] if row else 0)
+
+
 def _apply_bulk_dec(conn: sqlite3.Connection, table: str, key_col: str, key_val: str, dec: int) -> None:
     if not key_val or not dec:
         return
@@ -7306,6 +7978,130 @@ def _apply_bulk_dec(conn: sqlite3.Connection, table: str, key_col: str, key_val:
         f"DELETE FROM {table} WHERE {key_col} = ? AND image_count <= 0",
         (key_val,),
     )
+
+
+@api_router.post("/bookmarks/bulk/status")
+def bulk_bookmark_status(req: BulkBookmarkSelectionReq, user: dict = Depends(get_user)):
+    conn = get_conn()
+    try:
+        uid = int(user["id"])
+        selected_count = _prepare_bulk_bookmark_scope(
+            conn,
+            viewer=user,
+            mode=req.mode,
+            ids=req.ids,
+            query=req.query,
+            exclude_ids=req.exclude_ids,
+            bm_list_id=req.bm_list_id,
+        )
+        default_id = _ensure_default_bookmark_list(conn, uid)
+        lists, any_count = _list_bookmark_lists(conn, uid)
+        matched_rows = conn.execute(
+            """
+            SELECT bl.id, COUNT(b.image_id) AS matched_count
+            FROM bookmark_lists bl
+            LEFT JOIN bookmarks b
+              ON b.list_id = bl.id
+             AND b.image_id IN (SELECT id FROM tmp_bulk_bm_sel)
+            WHERE bl.user_id=?
+            GROUP BY bl.id
+            ORDER BY bl.sort_order ASC, bl.id ASC
+            """,
+            (uid,),
+        ).fetchall()
+        matched_map = {int(r["id"]): int(r["matched_count"] or 0) for r in matched_rows}
+        out_lists = []
+        for l in lists:
+            lid = int(l["id"])
+            matched = int(matched_map.get(lid, 0))
+            if selected_count > 0 and matched == selected_count:
+                state = "all"
+            elif matched > 0:
+                state = "some"
+            else:
+                state = "none"
+            out_lists.append(
+                {
+                    "id": lid,
+                    "name": str(l["name"] or ""),
+                    "is_default": int(l["is_default"] or 0),
+                    "state": state,
+                    "matched_count": matched,
+                }
+            )
+        return {
+            "ok": True,
+            "selected_count": int(selected_count),
+            "default_list_id": int(default_id),
+            "any_count": int(any_count),
+            "lists": out_lists,
+        }
+    finally:
+        conn.close()
+
+
+@api_router.post("/bookmarks/bulk/apply")
+def bulk_bookmark_apply(req: BulkBookmarkApplyReq, user: dict = Depends(get_user)):
+    conn = get_conn()
+    try:
+        uid = int(user["id"])
+        selected_count = _prepare_bulk_bookmark_scope(
+            conn,
+            viewer=user,
+            mode=req.mode,
+            ids=req.ids,
+            query=req.query,
+            exclude_ids=req.exclude_ids,
+            bm_list_id=req.bm_list_id,
+        )
+        if selected_count <= 0:
+            return {"ok": True, "selected_count": 0, "add_list_ids": [], "remove_list_ids": []}
+
+        add_list_ids = _safe_int_list(req.add_list_ids, max_n=5000)
+        remove_list_ids = _safe_int_list(req.remove_list_ids, max_n=5000)
+        if add_list_ids or remove_list_ids:
+            all_list_ids = list(dict.fromkeys(add_list_ids + remove_list_ids))
+            q = "SELECT id FROM bookmark_lists WHERE user_id=? AND id IN (" + ",".join(["?"] * len(all_list_ids)) + ")"
+            rows = conn.execute(q, [uid] + all_list_ids).fetchall()
+            allowed = {int(r["id"]) for r in rows}
+            add_list_ids = [x for x in add_list_ids if x in allowed]
+            remove_list_ids = [x for x in remove_list_ids if x in allowed]
+
+        if add_list_ids:
+            remove_set = set(remove_list_ids)
+            add_list_ids = [x for x in add_list_ids if x not in remove_set]
+
+        conn.execute("CREATE TEMP TABLE IF NOT EXISTS tmp_bulk_bm_add(id INTEGER PRIMARY KEY)")
+        conn.execute("CREATE TEMP TABLE IF NOT EXISTS tmp_bulk_bm_remove(id INTEGER PRIMARY KEY)")
+        conn.execute("DELETE FROM tmp_bulk_bm_add")
+        conn.execute("DELETE FROM tmp_bulk_bm_remove")
+
+        if remove_list_ids:
+            for i in range(0, len(remove_list_ids), 500):
+                chunk = remove_list_ids[i:i+500]
+                conn.executemany("INSERT OR IGNORE INTO tmp_bulk_bm_remove(id) VALUES (?)", [(int(x),) for x in chunk])
+            conn.execute(
+                "DELETE FROM bookmarks WHERE list_id IN (SELECT id FROM tmp_bulk_bm_remove) AND image_id IN (SELECT id FROM tmp_bulk_bm_sel)"
+            )
+
+        if add_list_ids:
+            for i in range(0, len(add_list_ids), 500):
+                chunk = add_list_ids[i:i+500]
+                conn.executemany("INSERT OR IGNORE INTO tmp_bulk_bm_add(id) VALUES (?)", [(int(x),) for x in chunk])
+            conn.execute(
+                "INSERT OR IGNORE INTO bookmarks(list_id, image_id) "
+                "SELECT tmp_bulk_bm_add.id, tmp_bulk_bm_sel.id FROM tmp_bulk_bm_add CROSS JOIN tmp_bulk_bm_sel"
+            )
+
+        conn.commit()
+        return {
+            "ok": True,
+            "selected_count": int(selected_count),
+            "add_list_ids": add_list_ids,
+            "remove_list_ids": remove_list_ids,
+        }
+    finally:
+        conn.close()
 
 
 @api_router.post("/images/bulk_delete")

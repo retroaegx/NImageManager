@@ -69,6 +69,12 @@ async function submit(token){
     }
     $("pwOk").style.display = "block";
     $("pwBtn").disabled = true;
+    const username = ($("pwUser")?.value || "").trim();
+    const next = new URL("/login.html", location.origin);
+    if(username) next.searchParams.set("username", username);
+    setTimeout(() => {
+      location.replace(next.pathname + next.search);
+    }, 400);
   }catch(_e){
     $("pwErr").textContent = "接続できません";
   }

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>NIM</title>
-  <link rel="stylesheet" href="/styles.css?v=58" />
+  <link rel="stylesheet" href="/styles.css?v=59" />
 </head>
 <body>
   <div class="bg" aria-hidden="true"></div>
@@ -148,6 +148,7 @@
 	                <button id="mobileFilterBtn" class="iconBtn mobileOnly" aria-label="フィルタ" title="フィルタ"><span class="icon">⚙</span><span class="label">フィルタ</span></button>
                 <button id="pageSelectBtn" class="iconBtn desktopOnly" aria-label="ページ一括☑" title="ページ一括☑"><span class="icon">☑</span><span class="label">ページ一括</span></button>
                 <button id="allSelectBtn" class="iconBtn" aria-label="全対象☑" title="全対象☑"><span class="icon">☑☑</span><span class="label">全対象</span></button>
+                <button id="bulkBookmarkBtn" class="iconBtn" aria-label="一括ブックマーク" title="一括ブックマーク" disabled><span class="icon">★</span><span class="label">一括BM</span></button>
                 <button id="bulkDeleteBtn" class="dangerBtn" disabled>削除</button>
                 <div id="bulkStatus" class="small bulkStatus"></div>
                 <div class="sortRow">
@@ -344,7 +345,7 @@
     </div>
   </div>
 
-  <script type="module" src="/app.js?v=53"></script>
+  <script type="module" src="/app.js?v=59"></script>
 
   <div id="filterOverlay" class="filterOverlay hidden" aria-hidden="true">
     <div id="filterOverlayBg" class="filterOverlayBg"></div>
@@ -374,6 +375,28 @@
             <button id="bmClearThisBtn" class="dangerBtn">この画像を全解除</button>
           </div>
           <div id="bmOverlayStatus" class="small"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="bulkBmOverlay" class="bmOverlay hidden" aria-hidden="true">
+    <div id="bulkBmOverlayBg" class="bmOverlayBg"></div>
+    <div class="bmOverlayPanel" role="dialog" aria-label="一括ブックマーク">
+      <div class="bmOverlayHead">
+        <div class="bmOverlayTitle">一括ブックマーク</div>
+        <button id="bulkBmOverlayClose" class="iconBtn" aria-label="閉じる"><span class="icon">✕</span></button>
+      </div>
+      <div class="bmOverlayBody">
+        <div class="bmOverlayHint small" id="bulkBmOverlayHint"></div>
+        <div id="bulkBmOverlayLists" class="bmOverlayLists"></div>
+        <div class="bmOverlayFoot">
+          <div class="bmOverlayBtns">
+            <button id="bulkBmCreateListBtn" class="ghostBtn">リスト作成</button>
+            <button id="bulkBmCancelBtn" class="ghostBtn">キャンセル</button>
+            <button id="bulkBmSaveBtn" class="primaryBtn" disabled>保存</button>
+          </div>
+          <div id="bulkBmOverlayStatus" class="small"></div>
         </div>
       </div>
     </div>

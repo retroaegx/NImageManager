@@ -991,6 +991,54 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
 .bmListBtns{ display:flex; gap: 6px; }
 .bmOverlayFoot{ display:flex; flex-direction:column; gap: 8px; padding-top: 4px; }
 .bmOverlayBtns{ display:flex; gap: 10px; align-items:center; justify-content:space-between; flex-wrap: wrap; }
+.bulkBmListRow{
+  cursor:pointer;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border:1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.04);
+  transition: border-color .16s ease, background .16s ease, transform .12s ease;
+}
+.bulkBmListRow:hover{ border-color: rgba(255,255,255,0.18); background: rgba(255,255,255,0.06); }
+.bulkBmListRow:active{ transform: scale(.995); }
+.bulkBmListRow.changed{ border-color: rgba(122,210,255,0.34); background: rgba(122,210,255,0.08); }
+.bulkBmListRow.mixed{ border-color: rgba(255,214,102,0.28); }
+.bulkBmMain{ min-width:0; flex:1 1 auto; display:flex; align-items:center; gap:12px; }
+.bulkBmText{ min-width:0; flex:1 1 auto; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.bulkBmText .bmListName{ white-space:normal; overflow:visible; text-overflow:clip; }
+.bulkBmListBtns{ flex:0 0 auto; }
+.bulkBmStateCtl{
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(255,255,255,0.06);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  font-size: 18px;
+  line-height: 1;
+  font-weight: 950;
+  color: rgba(255,255,255,0.92);
+}
+.bulkBmListRow[data-state="all"] .bulkBmStateCtl{
+  border-color: rgba(122,210,255,0.40);
+  background: rgba(122,210,255,0.16);
+  color: rgba(122,210,255,1);
+}
+.bulkBmListRow[data-state="some"] .bulkBmStateCtl{
+  border-color: rgba(255,214,102,0.40);
+  background: rgba(255,214,102,0.14);
+  color: rgba(255,214,102,1);
+}
+.bulkBmListRow[data-state="none"] .bulkBmStateCtl{
+  color: rgba(255,255,255,0.80);
+}
 
 /* ===== Filter overlay (mobile) ===== */
 .filterOverlay{ position:fixed; inset:0; z-index: 70; }
@@ -1128,10 +1176,10 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
   #galleryHint{ font-size: 11px; }
   .galleryActions{
     display:grid;
-    grid-template-columns: auto auto auto 1fr auto;
+    grid-template-columns: auto auto auto auto 1fr auto;
     grid-template-areas:
-      "filter allsel delete status status"
-      "sort   sort   sort   sort   view";
+      "filter allsel bulkbm delete status status"
+      "sort   sort   sort   sort   sort   view";
     gap: 6px;
     justify-content: stretch;
     align-items: center;
@@ -1146,6 +1194,7 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
   .galleryActions .iconBtn .label{ font-size: 11px; }
   #mobileFilterBtn{ grid-area: filter; }
   #allSelectBtn{ grid-area: allsel; }
+  #bulkBookmarkBtn{ grid-area: bulkbm; }
   #bulkDeleteBtn{
     grid-area: delete;
     white-space: nowrap;

@@ -85,25 +85,43 @@ async def _perf_request_middleware(request: Request, call_next):
             )
 
 
+def _startup_log(message: str) -> None:
+    print(f"[nim] startup: {message}", flush=True)
+
+
 @app.on_event("startup")
 def _startup() -> None:
+    _startup_log("configure performance logging")
     configure_perf_logging()
+
+    _startup_log("initialize database schema")
     init_db()
+
+    _startup_log("bootstrap application data")
     ensure_bootstrap()
+
+    _startup_log("publish existing public thumbnails")
     api_module.publish_existing_public_thumbs()
+
+    _startup_log("start background workers")
     api_module.start_background_workers()
+
+    _startup_log("start update checker")
     start_update_checker()
 
     if perf_logging_enabled():
-        print(f"[nim] perf log: {perf_log_path()}")
+        print(f"[nim] perf log: {perf_log_path()}", flush=True)
 
+    _startup_log("probe AVIF encoder")
     ok, err = probe_avif()
     if ok:
-        print("[nim] AVIF encoder: OK")
+        print("[nim] AVIF encoder: OK", flush=True)
     else:
         # Make the cause visible; otherwise users only see "why is it always webp".
         # Typical fix: install `pillow-avif-plugin` into the venv.
-        print(f"[nim] AVIF encoder: UNAVAILABLE ({err})")
+        print(f"[nim] AVIF encoder: UNAVAILABLE ({err})", flush=True)
+
+    _startup_log("ready")
 
 
 @app.on_event("shutdown")

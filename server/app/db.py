@@ -89,6 +89,22 @@ def migrate_db(conn: sqlite3.Connection) -> None:
         except Exception:
             return
 
+    def _ensure_drop_import_failures_table() -> None:
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS drop_import_failures (
+                  path TEXT PRIMARY KEY,
+                  size INTEGER NOT NULL,
+                  mtime_ns INTEGER NOT NULL,
+                  error TEXT,
+                  failed_at_utc TEXT NOT NULL
+                )
+                """
+            )
+        except Exception:
+            return
+
     def _ensure_index(name: str, table: str, cols: list[str]) -> None:
         try:
             if all(_has_col(table, c) for c in cols):
@@ -97,6 +113,8 @@ def migrate_db(conn: sqlite3.Connection) -> None:
                 )
         except Exception:
             return
+
+    _ensure_drop_import_failures_table()
 
     # ---- image_tags (older PK variant) ----
     try:

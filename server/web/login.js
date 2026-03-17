@@ -44,8 +44,13 @@ function init(){
     })
     .catch(_e => {});
 
+  const url = new URL(location.href);
+  const presetUser = (url.searchParams.get("username") || "").trim();
+  if(presetUser) $("loginUser").value = presetUser;
+
   $("loginBtn").addEventListener("click", doLogin);
   $("loginPass").addEventListener("keydown", (e)=>{ if(e.key==="Enter") doLogin(); });
-  $("loginUser").focus();
+  if(presetUser) $("loginPass").focus();
+  else $("loginUser").focus();
 }
 init();
