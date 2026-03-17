@@ -1,5 +1,21 @@
 # NovelAI Image Manager
 
+## Python のインストール
+
+先に Python 3 が入っているか確認してください。
+
+- Windows: `python --version`
+- macOS / Linux: `python3 --version`
+
+入っていなければ、下記で入れてください。
+
+- Windows: 公式サイトからインストール  
+  https://www.python.org/downloads/windows/
+- macOS (Homebrew): `brew install python`
+- Ubuntu / Debian: `sudo apt update && sudo apt install -y python3 python3-pip python3-venv`
+
+Windows はインストール時に `Add Python to PATH` を ON にしてください。
+
 ## 起動
 - Windows: `run.bat`
 - macOS/Linux: `sh run.sh`
