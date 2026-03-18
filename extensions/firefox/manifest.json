@@ -37,7 +37,13 @@
   },
   "browser_specific_settings": {
     "gecko": {
-      "id": "nim-novelai-transfer@example.local"
+      "id": "nim-novelai-transfer@example.local",
+      "data_collection_permissions": {
+        "required": [
+          "authenticationInfo",
+          "websiteContent"
+        ]
+      }
     }
   },
   "web_accessible_resources": [
