@@ -77,4 +77,5 @@ This Privacy Policy may be updated when the extension’s functionality or data 
 For questions about this Privacy Policy, contact:
 
 - Name: Retron
+- Email:bagaba123@gmail.com
 - Website: https://github.com/retroaegx/NImageManager
