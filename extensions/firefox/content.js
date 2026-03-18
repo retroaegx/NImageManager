@@ -249,13 +249,28 @@ async function extractCurrentImagePayload() {
   throw new Error('表示中の画像が見つかりません');
 }
 
-function transferIconSvg() {
-  return `
-    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="M22 2 11 13"></path>
-      <path d="M22 2 15 22 11 13 2 9 22 2z"></path>
-    </svg>
-  `;
+function createTransferIcon() {
+  const svgNs = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(svgNs, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('width', '16');
+  svg.setAttribute('height', '16');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '2');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  svg.setAttribute('aria-hidden', 'true');
+
+  const path1 = document.createElementNS(svgNs, 'path');
+  path1.setAttribute('d', 'M22 2 11 13');
+  svg.appendChild(path1);
+
+  const path2 = document.createElementNS(svgNs, 'path');
+  path2.setAttribute('d', 'M22 2 15 22 11 13 2 9 22 2z');
+  svg.appendChild(path2);
+
+  return svg;
 }
 
 function createTransferButton(referenceButton) {
@@ -266,7 +281,7 @@ function createTransferButton(referenceButton) {
   button.setAttribute('aria-label', 'Transfer to NIM');
   button.setAttribute('title', 'Transfer to NIM');
   button.classList.add('nim-transfer-button');
-  button.innerHTML = transferIconSvg();
+  button.appendChild(createTransferIcon());
   button.style.display = 'inline-flex';
   button.style.alignItems = 'center';
   button.style.justifyContent = 'center';
