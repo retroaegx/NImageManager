@@ -21,11 +21,11 @@ from typing import List, Optional
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, Request
-from fastapi.responses import Response, StreamingResponse, FileResponse
+from fastapi.responses import Response, StreamingResponse, FileResponse, JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from .db import get_conn, ORIGINALS_DIR, DERIVATIVES_DIR, PUBLIC_THUMBS_DIR, ASSETS_DIR
-from .deps import get_user, require_admin, require_master
+from .deps import get_user, get_user_optional, require_admin, require_master
 from .security import create_token, verify_password, hash_password
 from .services.metadata_extract import extract_novelai_metadata, extract_novelai_metadata_bytes
 from .services.tag_parser import parse_tag_list, normalize_tag, main_sig_hash
@@ -1436,6 +1436,33 @@ class LoginReq(BaseModel):
     password: str
 
 
+def _ext_auth_failed(request: Request | None = None) -> JSONResponse:
+    payload = {
+        "ok": False,
+        "code": "AUTH_REQUIRED",
+        "message": "再ログインが必要です",
+    }
+    if request is not None:
+        payload["login_url"] = _abs_url("/login.html", request)
+    return JSONResponse(status_code=401, content=payload)
+
+
+def _login_user_row(username: str, password: str) -> sqlite3.Row | None:
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT id, username, password_hash, role, disabled FROM users WHERE username_norm=?",
+            (_normalize_username(username),),
+        ).fetchone()
+        if not row or int(row["disabled"] or 0) == 1:
+            return None
+        if not verify_password(password, row["password_hash"]):
+            return None
+        return row
+    finally:
+        conn.close()
+
+
 @api_router.get("/auth/setup_status")
 def setup_status():
     """Return whether the instance has any users configured."""
@@ -1502,30 +1529,60 @@ def setup_master(request: Request, req: SetupMasterReq, response: Response):
 
 @api_router.post("/auth/login")
 def login(request: Request, req: LoginReq, response: Response):
-    conn = get_conn()
-    try:
-        row = conn.execute(
-            "SELECT id, username, password_hash, role, disabled FROM users WHERE username_norm=?",
-            (_normalize_username(req.username),),
-        ).fetchone()
-        if not row or int(row["disabled"]) == 1:
-            raise HTTPException(status_code=401, detail="Invalid credentials")
-        if not verify_password(req.password, row["password_hash"]):
-            raise HTTPException(status_code=401, detail="Invalid credentials")
-        token = create_token(user_id=int(row["id"]), username=row["username"], role=row["role"])
-        # Cookie-based auth is required for <img> tags and direct downloads.
-        response.set_cookie(
-            key="nai_token",
-            value=token,
-            httponly=True,
-            samesite="lax",
-            max_age=60 * 60 * 24 * 30,
-            path="/",
-            secure=_cookie_secure_flag(request),
+    row = _login_user_row(req.username, req.password)
+    if not row:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    token = create_token(user_id=int(row["id"]), username=row["username"], role=row["role"])
+    # Cookie-based auth is required for <img> tags and direct downloads.
+    response.set_cookie(
+        key="nai_token",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        max_age=60 * 60 * 24 * 30,
+        path="/",
+        secure=_cookie_secure_flag(request),
+    )
+    return {"token": token, "user": {"id": row["id"], "username": row["username"], "role": row["role"]}}
+
+
+@api_router.post("/ext/login")
+def ext_login(request: Request, req: LoginReq):
+    row = _login_user_row(req.username, req.password)
+    if not row:
+        return JSONResponse(
+            status_code=401,
+            content={
+                "ok": False,
+                "code": "INVALID_CREDENTIALS",
+                "message": "ログインに失敗しました",
+            },
         )
-        return {"token": token, "user": {"id": row["id"], "username": row["username"], "role": row["role"]}}
-    finally:
-        conn.close()
+    token = create_token(user_id=int(row["id"]), username=row["username"], role=row["role"])
+    return {
+        "ok": True,
+        "token": token,
+        "user": {"id": row["id"], "username": row["username"], "role": row["role"]},
+        "message": "ログインしました",
+        "login_url": _abs_url("/login.html", request),
+    }
+
+
+@api_router.get("/ext/session")
+def ext_session(request: Request, user: dict | None = Depends(get_user_optional)):
+    if not user:
+        return _ext_auth_failed(request)
+    return {
+        "ok": True,
+        "user": {
+            "id": int(user["id"]),
+            "username": str(user["username"]),
+            "role": str(user["role"]),
+            "share_works": int(user.get("share_works") or 0),
+            "share_bookmarks": int(user.get("share_bookmarks") or 0),
+        },
+        "login_url": _abs_url("/login.html", request),
+    }
 
 @api_router.get("/me")
 def me(user: dict = Depends(get_user)):
@@ -4459,6 +4516,179 @@ def _parse_last_modified_ms(val: str | None) -> str | None:
         return None
 
 
+def _write_ext_upload_to_temp(upload: UploadFile) -> tuple[str, str, int]:
+    safe_name = _safe_basename(upload.filename or "upload")
+    suffix = "." + safe_name.rsplit(".", 1)[-1] if "." in safe_name else ".bin"
+    fd, tmp_path = tempfile.mkstemp(prefix="nim_ext_", suffix=suffix)
+    os.close(fd)
+    total = 0
+    with open(tmp_path, "wb") as out:
+        while True:
+            chunk = upload.file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            out.write(chunk)
+    return tmp_path, safe_name, total
+
+
+def _poll_ext_upload_job(*, request: Request, job_id: int, user_id: int, timeout_sec: float = 90.0) -> JSONResponse | dict:
+    deadline = time.monotonic() + max(5.0, float(timeout_sec))
+    last_status = ""
+    last_error = None
+    while time.monotonic() < deadline:
+        conn = get_conn()
+        try:
+            row = conn.execute(
+                "SELECT id, user_id, status, error FROM upload_zip_jobs WHERE id=?",
+                (int(job_id),),
+            ).fetchone()
+            if not row:
+                return JSONResponse(status_code=404, content={"ok": False, "code": "JOB_NOT_FOUND", "message": "アップロードジョブが見つかりません"})
+            if int(row["user_id"] or 0) != int(user_id):
+                return JSONResponse(status_code=403, content={"ok": False, "code": "FORBIDDEN", "message": "forbidden"})
+            last_status = str(row["status"] or "")
+            last_error = row["error"]
+            item = conn.execute(
+                "SELECT seq, filename, state, image_id, message FROM upload_zip_items WHERE job_id=? ORDER BY seq ASC LIMIT 1",
+                (int(job_id),),
+            ).fetchone()
+            if last_status == "done" and item:
+                state_txt = str(item["state"] or "")
+                if state_txt in {"完了", "重複"}:
+                    image_id = int(item["image_id"] or 0)
+                    return {
+                        "ok": True,
+                        "image_id": image_id,
+                        "dedup": state_txt == "重複",
+                        "message": ("既存画像として登録済みです" if state_txt == "重複" else "登録しました"),
+                        "detail_url": _abs_url(f"/api/images/{image_id}/detail", request),
+                        "job_id": int(job_id),
+                    }
+                if state_txt == "失敗":
+                    return JSONResponse(
+                        status_code=500,
+                        content={
+                            "ok": False,
+                            "code": "UPLOAD_FAILED",
+                            "message": str(item["message"] or last_error or "アップロードに失敗しました"),
+                            "job_id": int(job_id),
+                        },
+                    )
+            if last_status in {"error", "cancelled"}:
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "ok": False,
+                        "code": "UPLOAD_FAILED",
+                        "message": str(last_error or "アップロードに失敗しました"),
+                        "job_id": int(job_id),
+                    },
+                )
+        finally:
+            conn.close()
+        time.sleep(0.2)
+    return JSONResponse(
+        status_code=504,
+        content={
+            "ok": False,
+            "code": "UPLOAD_TIMEOUT",
+            "message": "アップロード処理がタイムアウトしました",
+            "job_id": int(job_id),
+            "status": last_status or "processing",
+        },
+    )
+
+
+@api_router.post("/ext/upload")
+async def ext_upload_image(
+    request: Request,
+    file: UploadFile = File(...),
+    last_modified_ms: str | None = Form(default=None),
+    bookmark_enabled: str | None = Form(default=None),
+    bookmark_list_id: str | None = Form(default=None),
+    user: dict | None = Depends(get_user_optional),
+):
+    if not user:
+        return _ext_auth_failed(request)
+
+    tmp_path, safe_name, total = _write_ext_upload_to_temp(file)
+    staging_dir: Path | None = None
+    try:
+        if total <= 0:
+            return JSONResponse(status_code=400, content={"ok": False, "code": "EMPTY_FILE", "message": "画像データが空です"})
+        if not _allowed_image_ext(safe_name):
+            return JSONResponse(status_code=400, content={"ok": False, "code": "UNSUPPORTED_FILE_TYPE", "message": "unsupported file type"})
+
+        conn = get_conn()
+        try:
+            upload_bookmark_list_id = _normalize_upload_bookmark_list_id(
+                conn,
+                user_id=int(user["id"]),
+                bookmark_enabled=bookmark_enabled,
+                bookmark_list_id=bookmark_list_id,
+            )
+            cur = conn.execute(
+                "INSERT INTO upload_zip_jobs(user_id, filename, source_kind, staging_dir, bookmark_enabled, bookmark_list_id, total, status) VALUES (?,?,?,?,?,?,?,?)",
+                (int(user["id"]), safe_name, "direct", "", 1 if upload_bookmark_list_id else 0, upload_bookmark_list_id, 1, "collecting"),
+            )
+            job_id = int(cur.lastrowid)
+            staging_dir = _job_staging_dir(job_id)
+            staging_dir.mkdir(parents=True, exist_ok=True)
+            conn.execute(
+                "UPDATE upload_zip_jobs SET staging_dir=?, updated_at_utc=datetime('now') WHERE id=?",
+                (str(staging_dir), int(job_id)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        dst = staging_dir / f"{1:06d}_{safe_name}"
+        shutil.move(tmp_path, dst)
+        tmp_path = ""
+
+        mtime_iso = _parse_last_modified_ms(last_modified_ms) or _staged_direct_item_mtime_iso(dst)
+        try:
+            parsed_dt = datetime.fromisoformat(str(mtime_iso).replace('Z', '+00:00'))
+            ts = parsed_dt.timestamp()
+            os.utime(dst, (ts, ts))
+            mtime_iso = _staged_direct_item_mtime_iso(dst)
+        except Exception:
+            pass
+
+        conn = get_conn()
+        try:
+            item_id = _upsert_direct_upload_item_row(
+                conn,
+                job_id=int(job_id),
+                seq_i=1,
+                filename=str(safe_name),
+                staged_path=str(dst),
+                mtime_iso=str(mtime_iso),
+            )
+            conn.execute(
+                "UPDATE upload_zip_jobs SET total=1, updated_at_utc=datetime('now') WHERE id=?",
+                (int(job_id),),
+            )
+            status, _staging_dir, _source_kind = _refresh_upload_job_progress(conn, int(job_id), seal=True)
+            conn.execute(
+                "UPDATE upload_zip_jobs SET error=NULL, updated_at_utc=datetime('now') WHERE id=?",
+                (int(job_id),),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        _queue_upload_item_request(int(item_id), source="ext_upload", trace_id=getattr(request.state, "trace_id", None))
+        return _poll_ext_upload_job(request=request, job_id=int(job_id), user_id=int(user["id"]))
+    finally:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+
 @api_router.post("/upload")
 async def upload_image(
     bg: BackgroundTasks,
@@ -5093,10 +5323,8 @@ def _upload_image_from_path_core(
             transposed = ImageOps.exif_transpose(im)
             transposed.load()
             base_image = transposed.copy()
-    except Exception:
-        width = height = None
-        _fmt = ""
-        base_image = None
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid image file: {exc.__class__.__name__}")
 
     ext = (filename.rsplit(".", 1)[-1].lower() if "." in filename else "bin")
 

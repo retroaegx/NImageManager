@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "NIM NovelAI Transfer",
+  "version": "0.1.0",
+  "description": "NovelAI の現在画像を NIM に転送します。",
+  "permissions": [
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://novelai.net/*",
+        "https://*.novelai.net/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html",
+  "action": {
+    "default_title": "NIM Transfer"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "page-bridge.js"
+      ],
+      "matches": [
+        "https://novelai.net/*",
+        "https://*.novelai.net/*"
+      ]
+    }
+  ]
+}

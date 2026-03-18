@@ -21,6 +21,7 @@ ensure_dotenv(ROOT_DIR, log_prefix="[nim]")
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import FileResponse, RedirectResponse, ORJSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
 from . import api as api_module
@@ -40,6 +41,17 @@ app = FastAPI(
 
 # Compress JSON payloads (especially helpful over cloudflared tunnels).
 app.add_middleware(GZipMiddleware, minimum_size=900)
+
+# Allow WebExtensions (Chrome / Firefox desktop / Firefox Android) to call the API directly.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[],
+    allow_origin_regex=r"^(chrome-extension|moz-extension)://.*$",
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+)
 
 
 @app.middleware("http")

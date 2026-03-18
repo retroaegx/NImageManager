@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Settings - NIM</title>
-  <link rel="stylesheet" href="/styles.css?v=45" />
+  <link rel="stylesheet" href="/styles.css?v=44" />
 </head>
 <body class="pageSettings">
   <div class="bg"></div>
@@ -52,7 +52,7 @@
         <div class="card">
           <div class="panelTitleRow">
             <h2>個人設定</h2>
-            <div class="small">ブックマークリストを管理します。</div>
+            <div class="small">共有設定、ブックマークリスト、アカウント削除を管理します。</div>
           </div>
 
           <div class="row" style="margin-top:10px; gap:14px; flex-wrap:wrap">
@@ -78,6 +78,14 @@
           <div id="settingsStatus" class="small" style="margin-top:8px"></div>
 
           <div id="bmManageList" class="bmManageList"></div>
+
+          <div class="accountDangerBox">
+            <div class="accountDangerTitle">アカウント削除</div>
+            <div id="accountDeleteNote" class="small">作品、ブックマーク、関連データも削除します。</div>
+            <div class="row" style="margin-top:10px; justify-content:flex-end">
+              <button id="deleteMyAccountBtn" class="dangerBtn" type="button">自分のアカウントを削除</button>
+            </div>
+          </div>
         </div>
       </section>
     </main>

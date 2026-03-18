@@ -16,6 +16,12 @@ const API = {
 
 let ME = null;
 
+function confirmAccountDelete(username){
+  const name = String(username || "").trim();
+  if(!confirm(`アカウント「${name}」を削除します。\n作品、ブックマーク、作者登録、共有ブックマーク登録、関連データも削除します。元に戻せません。`)) return false;
+  return confirm("本当に削除しますか？");
+}
+
 async function loadMe(){
   const me = await loadCurrentUser({
     endpoint: API.me,

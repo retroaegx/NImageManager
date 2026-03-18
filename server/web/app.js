@@ -1344,13 +1344,16 @@ function renderCreatorList(creators){
       del.addEventListener("click", async (e) => {
         e.preventDefault();
         e.stopPropagation();
+        if(!confirm(`作者登録「${val}」を削除しますか？`)) return;
         try{
           await apiFetch(API.creatorListDel(id), { method: "DELETE" });
           if(getCreatorFilter() === val){
             setCreatorFilter("");
           }
           await refreshStatsAndPreviewAfterChange();
-        }catch(_e){}
+        }catch(_e){
+          alert("削除に失敗しました");
+        }
       });
       right.appendChild(del);
     }
@@ -1495,6 +1498,7 @@ function renderBookmarkList(){
     delBtn.addEventListener("click", async (e) => {
       e.preventDefault();
       e.stopPropagation();
+      if(!confirm(`共有ブックマーク登録「${cname}」を削除しますか？`)) return;
       try{
         await apiFetch(API.bookmarkSubDel(cid), { method: "DELETE" });
         // If current filter points to a removed creator's list, clear it.
@@ -1504,7 +1508,9 @@ function renderBookmarkList(){
         }
         await refreshBookmarkLists();
         await search();
-      }catch(_e){}
+      }catch(_e){
+        alert("削除に失敗しました");
+      }
     });
     head.appendChild(delBtn);
 

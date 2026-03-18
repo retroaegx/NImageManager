@@ -1317,35 +1317,9 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
   /* thumbnails: square on mobile */
   .tileImg::before{ padding-top: 100%; }
 
-  /* Utility pages: keep back/current navigation consistent and make the visible pill fully clickable */
-  body.pageAdmin .topbar .menu,
-  body.pageMaintenance .topbar .menu,
-  body.pageSettings .topbar .menu{
-    justify-content: stretch;
-  }
-  body.pageAdmin .topbar .menu .tab,
-  body.pageMaintenance .topbar .menu .tab,
-  body.pageSettings .topbar .menu .tab{
-    flex: 1 1 0;
-    min-width: 0;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    padding-inline: 14px;
-    background: rgba(255,255,255,0.04);
-    box-shadow: 0 0 0 1px rgba(255,255,255,0.08) inset;
-  }
-  body.pageAdmin .topbar .menu .tab:hover,
-  body.pageMaintenance .topbar .menu .tab:hover,
-  body.pageSettings .topbar .menu .tab:hover{
-    background: rgba(122,210,255,0.10);
-  }
-  body.pageAdmin .topbar .menu .tab.active,
-  body.pageMaintenance .topbar .menu .tab.active,
-  body.pageSettings .topbar .menu .tab.active{
-    background: rgba(255,255,255,0.08);
-    box-shadow: 0 0 0 1px rgba(122,210,255,0.18) inset;
-  }
+  /* Admin / Maintenance: hide active tab */
+  body.pageAdmin .topbar .menu .tab.active{ display:none; }
+  body.pageMaintenance .topbar .menu .tab.active{ display:none; }
 }
 
 /* ===== Scrollbar ===== */
@@ -1866,6 +1840,18 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
 .bmManageMeta{ color: rgba(255,255,255,0.62); font-variant-numeric: tabular-nums; }
 .bmManageLeft{ display:flex; flex-direction:column; gap: 2px; min-width:0; }
 .bmManageBtns{ display:flex; gap: 8px; align-items:center; }
+.accountDangerBox{
+  margin-top: 16px;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(255,78,109,0.26);
+  background: rgba(255,78,109,0.08);
+}
+.accountDangerTitle{
+  font-weight: 850;
+  color: rgba(255,255,255,0.92);
+  margin-bottom: 6px;
+}
 
 
 /* ===== Sidebar (bookmark clear button) ===== */

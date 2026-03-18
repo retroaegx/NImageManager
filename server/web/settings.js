@@ -1,13 +1,15 @@
 import { $ } from "./lib/dom.js?v=20260307_01";
-import { apiFetch, apiJson } from "./lib/http.js?v=20260307_01";
+import { apiFetch, apiJson, safeJson } from "./lib/http.js?v=20260307_01";
 import { bindUserMenu } from "./lib/userMenu.js?v=20260312_02";
 import { loadCurrentUser, logoutAndRedirect, isAdminRole } from "./lib/session.js?v=20260307_01";
 
 const SettingsPage = (window.NIMSettings && typeof window.NIMSettings === "object") ? window.NIMSettings : {};
+let ME = null;
 
 const API = {
   me: "/api/me",
   meSettings: "/api/me/settings",
+  deleteMe: "/api/me",
   logout: "/api/auth/logout",
   pwLink: "/api/auth/password_link",
   bookmarkLists: "/api/bookmarks/lists",
@@ -31,10 +33,12 @@ async function loadMe(){
   return await loadCurrentUser({
     endpoint: API.me,
     onLoaded: (me) => {
+      ME = me;
       const sw = !!Number(me?.share_works || 0);
       const sb = !!Number(me?.share_bookmarks || 0);
       setToggle($("toggleShareWorks"), sw);
       setToggle($("toggleShareBookmarks"), sb);
+      renderAccountDelete(me);
       bindUserMenu({
         logoutEndpoint: API.logout,
         passwordLinkEndpoint: API.pwLink,
@@ -52,6 +56,25 @@ function setToggle(btn, on){
   btn.classList.toggle("off", !on);
   btn.textContent = on ? "ON" : "OFF";
 }
+
+function renderAccountDelete(me){
+  const btn = $("deleteMyAccountBtn");
+  const note = $("accountDeleteNote");
+  if(!btn || !note) return;
+
+  const isMaster = String(me?.role || "") === "master";
+  btn.disabled = isMaster;
+  note.textContent = isMaster
+    ? "master アカウントは削除できません。"
+    : "作品、ブックマーク、作者登録、共有ブックマーク登録、関連データも削除します。";
+}
+
+function confirmMyAccountDelete(username){
+  const name = String(username || "").trim();
+  if(!confirm(`アカウント「${name}」を削除します。\n作品、ブックマーク、作者登録、共有ブックマーク登録、関連データも削除します。元に戻せません。`)) return false;
+  return confirm("本当に削除しますか？");
+}
+
 
 async function updateMySettings(patch){
   const body = JSON.stringify(patch || {});
@@ -214,6 +237,26 @@ async function refreshLists(){
   renderLists(j);
 }
 
+async function deleteMyAccount(){
+  const btn = $("deleteMyAccountBtn");
+  if(!btn || btn.disabled) return;
+  if(!confirmMyAccountDelete(ME?.username)) return;
+
+  btn.disabled = true;
+  try{
+    setStatus("削除中…", null);
+    const r = await apiFetch(API.deleteMe, { method: "DELETE" });
+    if(!r.ok){
+      const j = await safeJson(r);
+      throw new Error(j?.detail || "削除に失敗しました");
+    }
+    await logoutAndRedirect(API.logout);
+  }catch(e){
+    renderAccountDelete(ME);
+    setStatus(e?.message || "削除に失敗しました", "error");
+  }
+}
+
 function bindCreate(){
   const btn = $("createListBtn");
   btn?.addEventListener("click", async (e) => {
@@ -243,6 +286,7 @@ async function boot(){
   SettingsPage._booted = true;
   bindCreate();
   bindShareToggles();
+  $("deleteMyAccountBtn")?.addEventListener("click", deleteMyAccount);
   try{
     await loadMe();
   }catch(_e){
