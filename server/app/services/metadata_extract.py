@@ -20,6 +20,9 @@ class NaiMeta:
     character_prompt: Optional[str]
     params: Dict[str, Any]
     potion: Optional[Any]
+    uses_potion: bool
+    uses_precise_reference: bool
+    sampler: Optional[str]
     raw: Dict[str, Any]
     raw_json_str: Optional[str]
 
@@ -116,6 +119,167 @@ def _parse_json_str_maybe(val: Any) -> Optional[dict]:
     except Exception:
         return None
     return obj if isinstance(obj, dict) else None
+
+def _has_meaningful_value(val: Any) -> bool:
+    if val is None:
+        return False
+    if isinstance(val, str):
+        return val.strip() != ""
+    if isinstance(val, dict):
+        return any(_has_meaningful_value(v) for v in val.values())
+    if isinstance(val, (list, tuple)):
+        return any(_has_meaningful_value(item) for item in val)
+    return True
+
+
+def _iter_usage_scopes(payload: Any):
+    if not isinstance(payload, dict):
+        return
+
+    seen: set[int] = set()
+    queue: list[dict[str, Any]] = [payload]
+    nested_keys = (
+        "params",
+        "parameters",
+        "nai_parameters",
+        "naiParams",
+        "naiParameters",
+        "parameter",
+        "payload",
+        "data",
+    )
+
+    while queue:
+        scope = queue.pop(0)
+        sid = id(scope)
+        if sid in seen:
+            continue
+        seen.add(sid)
+        yield scope
+
+        for key in nested_keys:
+            nested = scope.get(key)
+            if isinstance(nested, str):
+                try:
+                    nested = json.loads(nested)
+                except Exception:
+                    continue
+            if isinstance(nested, dict):
+                queue.append(nested)
+
+
+def _detect_potion_usage(payload: Any) -> bool:
+    for scope in _iter_usage_scopes(payload):
+        if any(
+            _has_meaningful_value(scope.get(key))
+            for key in (
+                "reference_image_multiple",
+                "reference_information_extracted_multiple",
+                "reference_strength_multiple",
+            )
+        ):
+            return True
+    return False
+
+
+def _detect_precise_reference_usage(payload: Any) -> bool:
+    for scope in _iter_usage_scopes(payload):
+        if _has_meaningful_value(scope.get("director_reference_strengths")):
+            return True
+    return False
+
+
+def _extract_sampler(payload: Any) -> Optional[str]:
+    for scope in _iter_usage_scopes(payload):
+        sampler = scope.get("sampler")
+        if not isinstance(sampler, str):
+            continue
+        sampler = sampler.strip()
+        if sampler:
+            return sampler
+    return None
+
+
+def _parse_json_dict_maybe(val: Any) -> Optional[dict[str, Any]]:
+    if val is None:
+        return None
+    if isinstance(val, dict):
+        return val
+    if isinstance(val, (bytes, bytearray, memoryview)):
+        try:
+            val = bytes(val).decode("utf-8", errors="ignore")
+        except Exception:
+            return None
+    if not isinstance(val, str):
+        return None
+    got = _try_parse_json_anywhere(val)
+    if got is None:
+        return None
+    obj, _raw = got
+    return obj if isinstance(obj, dict) else None
+
+
+def _yield_usage_candidates(payload: Any):
+    obj = _parse_json_dict_maybe(payload)
+    if not isinstance(obj, dict):
+        return
+
+    seen: set[int] = set()
+    queue: list[dict[str, Any]] = [obj]
+    wrapper_keys = (
+        "json",
+        "Comment",
+        "comment",
+        "Description",
+        "description",
+        "parameters",
+        "Parameters",
+        "nai",
+        "nai_parameters",
+        "naiParams",
+        "naiParameters",
+        "UserComment",
+        "ImageDescription",
+        "XPComment",
+        "exif_37510",
+        "info",
+    )
+
+    while queue:
+        current = queue.pop(0)
+        cid = id(current)
+        if cid in seen:
+            continue
+        seen.add(cid)
+        yield current
+
+        for key in wrapper_keys:
+            nested = current.get(key)
+            nested_obj = _parse_json_dict_maybe(nested)
+            if isinstance(nested_obj, dict):
+                queue.append(nested_obj)
+
+
+def detect_generation_usage_from_storage(
+    params_json_or_obj: Any = None,
+    metadata_raw_or_obj: Any = None,
+) -> tuple[bool, bool, Optional[str]]:
+    uses_potion = False
+    uses_precise_reference = False
+    sampler: Optional[str] = None
+
+    for source in (params_json_or_obj, metadata_raw_or_obj):
+        for candidate in _yield_usage_candidates(source):
+            if not uses_potion and _detect_potion_usage(candidate):
+                uses_potion = True
+            if not uses_precise_reference and _detect_precise_reference_usage(candidate):
+                uses_precise_reference = True
+            if sampler is None:
+                sampler = _extract_sampler(candidate)
+            if uses_potion and uses_precise_reference and sampler is not None:
+                return uses_potion, uses_precise_reference, sampler
+
+    return uses_potion, uses_precise_reference, sampler
 
 
 def _source_name_without_hash(source_like: Optional[str]) -> tuple[Optional[str], Optional[str]]:
@@ -443,6 +607,9 @@ def _extract_novelai_metadata_from_source(source: Any) -> NaiMeta:
     negative = None
     params: Dict[str, Any] = {}
     potion = None
+    uses_potion = False
+    uses_precise_reference = False
+    sampler = None
 
     character_prompt: Optional[str] = None
 
@@ -664,6 +831,10 @@ def _extract_novelai_metadata_from_source(source: Any) -> NaiMeta:
             for k, v in json_primary.items()
             if k not in {"prompt", "Prompt", "uc", "negative_prompt", "Undesired Content"}
         }
+        uses_potion = _detect_potion_usage(json_primary)
+        uses_precise_reference = _detect_precise_reference_usage(json_primary)
+        sampler = _extract_sampler(json_primary)
+
         vibe_keys = [k for k in json_primary.keys() if "vibe" in k.lower() or "reference" in k.lower()]
         if vibe_keys:
             potion = {k: json_primary.get(k) for k in vibe_keys}
@@ -707,6 +878,9 @@ def _extract_novelai_metadata_from_source(source: Any) -> NaiMeta:
         character_prompt=str(character_prompt) if character_prompt is not None else None,
         params=params,
         potion=potion,
+        uses_potion=bool(uses_potion),
+        uses_precise_reference=bool(uses_precise_reference),
+        sampler=str(sampler) if sampler is not None else None,
         raw=raw,
         raw_json_str=raw_json_str,
     )

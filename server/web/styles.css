@@ -823,8 +823,11 @@ input:focus, select:focus{
   padding: 12px;
   overflow:auto;
 }
-.slideHead{ display:flex; justify-content:space-between; align-items:flex-start; gap: 12px; padding: 6px 4px 10px; border-bottom: 1px solid rgba(255,255,255,0.10); margin-bottom: 10px; }
-.dTitle{ font-weight: 950; letter-spacing: 0.25px; }
+.slideHead{ display:flex; justify-content:space-between; align-items:flex-start; gap: 12px; padding: 6px 4px 10px; border-bottom: 1px solid rgba(255,255,255,0.10); margin-bottom: 10px; min-width: 0; }
+.slideHeadMain{ min-width: 0; flex: 1 1 auto; }
+.slideHeadActions{ flex: 0 0 auto; align-self: flex-start; }
+.dTitle{ font-weight: 950; letter-spacing: 0.25px; min-width: 0; max-width: 100%; line-height: 1.24; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; text-overflow: ellipsis; cursor: pointer; }
+.dTitle.expanded{ display:block; overflow: visible; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
 .dSub{ font-size: 12px; color: rgba(255,255,255,0.72); margin-top: 4px; }
 .dMeta{ font-size: 12px; color: rgba(255,255,255,0.62); margin-top: 2px; }
 .dMiniLines{ display:flex; flex-wrap:wrap; gap: 8px 10px; margin-top: 8px; }
@@ -949,7 +952,8 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
   backdrop-filter: blur(12px);
   padding: 10px 12px;
 }
-.ioTitle{ font-weight: 950; letter-spacing: 0.2px; white-space: nowrap; overflow:hidden; text-overflow: ellipsis; }
+.ioTitle{ font-weight: 950; letter-spacing: 0.2px; min-width: 0; line-height: 1.24; overflow:hidden; display:-webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; text-overflow: ellipsis; }
+.imgOverlayInfo.expanded .ioTitle{ display:block; white-space: normal; overflow: visible; overflow-wrap: anywhere; word-break: break-word; }
 .ioSub{ font-size: 12px; color: rgba(255,255,255,0.72); margin-top: 4px; }
 .ioMeta{ font-size: 12px; color: rgba(255,255,255,0.62); margin-top: 2px; }
 
@@ -1317,9 +1321,35 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
   /* thumbnails: square on mobile */
   .tileImg::before{ padding-top: 100%; }
 
-  /* Admin / Maintenance: hide active tab */
-  body.pageAdmin .topbar .menu .tab.active{ display:none; }
-  body.pageMaintenance .topbar .menu .tab.active{ display:none; }
+  /* Utility pages: keep back/current navigation consistent and make the visible pill fully clickable */
+  body.pageAdmin .topbar .menu,
+  body.pageMaintenance .topbar .menu,
+  body.pageSettings .topbar .menu{
+    justify-content: stretch;
+  }
+  body.pageAdmin .topbar .menu .tab,
+  body.pageMaintenance .topbar .menu .tab,
+  body.pageSettings .topbar .menu .tab{
+    flex: 1 1 0;
+    min-width: 0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    padding-inline: 14px;
+    background: rgba(255,255,255,0.04);
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.08) inset;
+  }
+  body.pageAdmin .topbar .menu .tab:hover,
+  body.pageMaintenance .topbar .menu .tab:hover,
+  body.pageSettings .topbar .menu .tab:hover{
+    background: rgba(122,210,255,0.10);
+  }
+  body.pageAdmin .topbar .menu .tab.active,
+  body.pageMaintenance .topbar .menu .tab.active,
+  body.pageSettings .topbar .menu .tab.active{
+    background: rgba(255,255,255,0.08);
+    box-shadow: 0 0 0 1px rgba(122,210,255,0.18) inset;
+  }
 }
 
 /* ===== Scrollbar ===== */

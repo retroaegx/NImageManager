@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>NIM</title>
-  <link rel="stylesheet" href="/styles.css?v=59" />
+  <link rel="stylesheet" href="/styles.css?v=60" />
 </head>
 <body>
   <div class="bg" aria-hidden="true"></div>
@@ -257,16 +257,19 @@
 
         <aside class="slide" id="slide">
           <div class="slideHead">
-            <div>
+            <div class="slideHeadMain">
               <div id="dTitle" class="dTitle"></div>
               <div id="dSub" class="dSub"></div>
               <div id="dMeta" class="dMeta"></div>
               <div class="dMiniLines">
                 <div class="dMiniLine"><span class="k">ソフト</span><span id="dSoft" class="v"></span></div>
+                <div class="dMiniLine"><span class="k">ポーション</span><span id="dPotionUsage" class="v"></span></div>
+                <div class="dMiniLine"><span class="k">精密参照</span><span id="dPreciseReferenceUsage" class="v"></span></div>
+                <div class="dMiniLine"><span class="k">サンプラー</span><span id="dSampler" class="v"></span></div>
                 <div class="dMiniLine"><span class="k">制作者</span><span id="dCreator" class="v"></span><button id="addCreatorFromDetailBtn" class="miniIconBtn" type="button" title="作者一覧へ登録" aria-label="作者一覧へ登録"><svg class="icoPlus" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button></div>
               </div>
             </div>
-            <div class="row" style="gap:6px">
+            <div class="row slideHeadActions" style="gap:6px">
               <button id="favDetailBtn" class="iconBtn" aria-label="ブックマーク" title="ブックマーク"><span class="icon">☆</span></button>
               <button id="closeOverlay" class="iconBtn" aria-label="閉じる"><span class="icon">✕</span></button>
             </div>
@@ -275,8 +278,7 @@
           <div class="actions">
             <a id="viewFull" class="pill" href="#" target="_blank" rel="noopener">フル表示</a>
             <a id="dlFile" class="pill" href="#" download>元ファイル</a>
-            <a id="dlPotion" class="pill" href="#" download>ポーション</a>
-          </div>
+                      </div>
 
 
           <div class="section">
@@ -345,7 +347,7 @@
     </div>
   </div>
 
-  <script type="module" src="/app.js?v=59"></script>
+  <script type="module" src="/app.js?v=60"></script>
 
   <div id="filterOverlay" class="filterOverlay hidden" aria-hidden="true">
     <div id="filterOverlayBg" class="filterOverlayBg"></div>

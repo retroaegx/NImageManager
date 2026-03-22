@@ -27,7 +27,11 @@ from pydantic import BaseModel, Field, ValidationError
 from .db import get_conn, ORIGINALS_DIR, DERIVATIVES_DIR, PUBLIC_THUMBS_DIR, ASSETS_DIR
 from .deps import get_user, get_user_optional, require_admin, require_master
 from .security import create_token, verify_password, hash_password
-from .services.metadata_extract import extract_novelai_metadata, extract_novelai_metadata_bytes
+from .services.metadata_extract import (
+    extract_novelai_metadata,
+    extract_novelai_metadata_bytes,
+    detect_generation_usage_from_storage,
+)
 from .services.tag_parser import parse_tag_list, normalize_tag, main_sig_hash
 from .services.derivatives import (
     make_webp_derivative,
@@ -1653,6 +1657,53 @@ def update_me_settings(req: UpdateMeSettingsReq, user: dict = Depends(get_user))
         conn.close()
 
 
+@api_router.delete("/me")
+def delete_me(user: dict = Depends(get_user)):
+    uid = int(user.get("id") or 0)
+    if uid <= 0:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    if str(user.get("role") or "") == "master":
+        raise HTTPException(status_code=400, detail="cannot delete master")
+
+    conn = get_conn()
+    try:
+        result = _delete_user_account(conn, user_id=uid)
+        conn.commit()
+
+        for p in result.pop("disk_paths", []):
+            try:
+                if p and os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+        for public_id in result.pop("public_ids", []):
+            try:
+                _cleanup_public_thumb_versions(str(public_id))
+            except Exception:
+                pass
+        for p in result.pop("staging_dirs", []):
+            try:
+                if p and os.path.exists(p):
+                    shutil.rmtree(p, ignore_errors=True)
+            except Exception:
+                pass
+        return result
+    except HTTPException:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    except sqlite3.IntegrityError as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise HTTPException(status_code=409, detail=f"delete failed: {e}")
+    finally:
+        conn.close()
+
+
 @api_router.post("/auth/logout")
 def logout(response: Response):
     response.delete_cookie("nai_token", path="/")
@@ -1802,6 +1853,153 @@ def admin_update_user(user_id: int, req: UpdateUserReq, admin: dict = Depends(re
         conn.close()
 
 
+def _delete_user_owned_images(conn: sqlite3.Connection, *, user_id: int, username: str) -> dict:
+    deleted_images = int(
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM images WHERE uploader_user_id=?",
+            (int(user_id),),
+        ).fetchone()[0]
+        or 0
+    )
+    if deleted_images <= 0:
+        return {
+            "deleted_images": 0,
+            "disk_paths": [],
+            "public_ids": [],
+        }
+
+    disk_paths: list[str] = []
+    public_ids: list[str] = []
+
+    for r in conn.execute(
+        "SELECT disk_path FROM image_files WHERE image_id IN (SELECT id FROM images WHERE uploader_user_id=?)",
+        (int(user_id),),
+    ).fetchall():
+        p = r["disk_path"] if not isinstance(r, tuple) else r[0]
+        if p and str(p).strip():
+            disk_paths.append(str(p))
+
+    for r in conn.execute(
+        "SELECT disk_path FROM image_derivatives WHERE image_id IN (SELECT id FROM images WHERE uploader_user_id=?)",
+        (int(user_id),),
+    ).fetchall():
+        p = r["disk_path"] if not isinstance(r, tuple) else r[0]
+        if p and str(p).strip():
+            disk_paths.append(str(p))
+
+    for r in conn.execute(
+        "SELECT public_id FROM images WHERE uploader_user_id=? AND public_id IS NOT NULL AND TRIM(public_id) <> ''",
+        (int(user_id),),
+    ).fetchall():
+        public_id = r["public_id"] if not isinstance(r, tuple) else r[0]
+        if public_id and str(public_id).strip():
+            public_ids.append(str(public_id))
+
+    hashes = [
+        str((r["h"] if not isinstance(r, tuple) else r[0]) or "")
+        for r in conn.execute(
+            "SELECT DISTINCT main_sig_hash AS h FROM images WHERE uploader_user_id=? AND main_sig_hash IS NOT NULL AND TRIM(main_sig_hash) <> ''",
+            (int(user_id),),
+        ).fetchall()
+    ]
+    hashes = [h for h in hashes if h.strip()]
+
+    softwares = conn.execute(
+        "SELECT software AS k, COUNT(*) AS c FROM images WHERE uploader_user_id=? AND software IS NOT NULL AND TRIM(software) <> '' GROUP BY software",
+        (int(user_id),),
+    ).fetchall()
+    days = conn.execute(
+        "SELECT SUBSTR(file_mtime_utc,1,10) AS k, COUNT(*) AS c FROM images WHERE uploader_user_id=? AND file_mtime_utc IS NOT NULL AND LENGTH(file_mtime_utc) >= 10 GROUP BY SUBSTR(file_mtime_utc,1,10)",
+        (int(user_id),),
+    ).fetchall()
+    months = conn.execute(
+        "SELECT SUBSTR(file_mtime_utc,1,7) AS k, COUNT(*) AS c FROM images WHERE uploader_user_id=? AND file_mtime_utc IS NOT NULL AND LENGTH(file_mtime_utc) >= 7 GROUP BY SUBSTR(file_mtime_utc,1,7)",
+        (int(user_id),),
+    ).fetchall()
+    years = conn.execute(
+        "SELECT SUBSTR(file_mtime_utc,1,4) AS k, COUNT(*) AS c FROM images WHERE uploader_user_id=? AND file_mtime_utc IS NOT NULL AND LENGTH(file_mtime_utc) >= 4 GROUP BY SUBSTR(file_mtime_utc,1,4)",
+        (int(user_id),),
+    ).fetchall()
+    tags = conn.execute(
+        "SELECT it.tag_canonical AS k, COUNT(DISTINCT it.image_id) AS c FROM image_tags it JOIN images i ON i.id=it.image_id WHERE i.uploader_user_id=? GROUP BY it.tag_canonical",
+        (int(user_id),),
+    ).fetchall()
+
+    conn.execute("DELETE FROM images WHERE uploader_user_id=?", (int(user_id),))
+
+    if username:
+        _apply_bulk_dec(conn, "stat_creators", "creator", str(username), int(deleted_images))
+
+    for rows, table, key_col in (
+        (softwares, "stat_software", "software"),
+        (days, "stat_day_counts", "ymd"),
+        (months, "stat_month_counts", "ym"),
+        (years, "stat_year_counts", "year"),
+        (tags, "stat_tag_counts", "tag_canonical"),
+    ):
+        for r in rows:
+            key = str(r["k"] if not isinstance(r, tuple) else r[0])
+            count = int(r["c"] if not isinstance(r, tuple) else r[1])
+            _apply_bulk_dec(conn, table, key_col, key, count)
+
+    if hashes:
+        try:
+            stats_service.recompute_dedup_flags_for_hashes(conn, hashes)
+        except Exception:
+            pass
+
+    return {
+        "deleted_images": int(deleted_images),
+        "disk_paths": disk_paths,
+        "public_ids": list(dict.fromkeys(public_ids)),
+    }
+
+
+
+def _delete_user_account(conn: sqlite3.Connection, *, user_id: int) -> dict:
+    row = conn.execute(
+        "SELECT id, username, role FROM users WHERE id=?",
+        (int(user_id),),
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="not found")
+
+    username = str(row["username"] or "")
+    cleanup = _delete_user_owned_images(conn, user_id=int(user_id), username=username)
+
+    staging_dirs: list[str] = []
+    for r in conn.execute(
+        "SELECT staging_dir FROM upload_zip_jobs WHERE user_id=? AND staging_dir IS NOT NULL AND TRIM(staging_dir) <> ''",
+        (int(user_id),),
+    ).fetchall():
+        p = r["staging_dir"] if not isinstance(r, tuple) else r[0]
+        if p and str(p).strip():
+            staging_dirs.append(str(p))
+
+    deleted_upload_jobs = int(
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM upload_zip_jobs WHERE user_id=?",
+            (int(user_id),),
+        ).fetchone()[0]
+        or 0
+    )
+
+    conn.execute("UPDATE password_tokens SET created_by=NULL WHERE created_by=?", (int(user_id),))
+    conn.execute("DELETE FROM upload_zip_jobs WHERE user_id=?", (int(user_id),))
+    conn.execute("DELETE FROM users WHERE id=?", (int(user_id),))
+    if username:
+        conn.execute("DELETE FROM stat_creators WHERE creator=?", (username,))
+
+    return {
+        "ok": True,
+        "deleted_images": int(cleanup["deleted_images"]),
+        "deleted_upload_jobs": int(deleted_upload_jobs),
+        "disk_paths": cleanup["disk_paths"],
+        "public_ids": cleanup["public_ids"],
+        "staging_dirs": list(dict.fromkeys(staging_dirs)),
+    }
+
+
 @api_router.delete("/admin/users/{user_id}")
 def admin_delete_user(user_id: int, admin: dict = Depends(require_admin)):
     if int(user_id) == int(admin["id"]):
@@ -1817,9 +2015,39 @@ def admin_delete_user(user_id: int, admin: dict = Depends(require_admin)):
         if role == "admin" and admin.get("role") != "master":
             raise HTTPException(status_code=403, detail="master required to delete admin")
 
-        conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+        result = _delete_user_account(conn, user_id=int(user_id))
         conn.commit()
-        return {"ok": True}
+
+        for p in result.pop("disk_paths", []):
+            try:
+                if p and os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+        for public_id in result.pop("public_ids", []):
+            try:
+                _cleanup_public_thumb_versions(str(public_id))
+            except Exception:
+                pass
+        for p in result.pop("staging_dirs", []):
+            try:
+                if p and os.path.exists(p):
+                    shutil.rmtree(p, ignore_errors=True)
+            except Exception:
+                pass
+        return result
+    except HTTPException:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    except sqlite3.IntegrityError as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise HTTPException(status_code=409, detail=f"delete failed: {e}")
     finally:
         conn.close()
 
@@ -2293,7 +2521,10 @@ def _reparse_one(conn: sqlite3.Connection, image_id: int) -> dict:
         character_entries, main_negative_combined_raw = build_prompt_view_payload(conn, prompt_neg, prompt_char, meta.params if meta else None)
         character_entries_json = json.dumps(character_entries, ensure_ascii=False)
         potion_raw = json.dumps(meta.potion, ensure_ascii=False).encode("utf-8") if meta.potion else None
-        has_potion = 1 if potion_raw else 0
+        has_potion = 1 if (meta and meta.uses_potion) else 0
+        uses_potion = 1 if (meta and meta.uses_potion) else 0
+        uses_precise_reference = 1 if (meta and meta.uses_precise_reference) else 0
+        sampler = meta.sampler if meta else None
         metadata_raw = None
         try:
             metadata_raw = json.dumps({"info": meta.raw, "json": meta.raw_json_str}, ensure_ascii=False)[:65535]
@@ -2353,7 +2584,7 @@ def _reparse_one(conn: sqlite3.Connection, image_id: int) -> dict:
             UPDATE images
             SET software=?, model_name=?,
                 prompt_positive_raw=?, prompt_negative_raw=?, prompt_character_raw=?,
-                params_json=?, character_entries_json=?, main_negative_combined_raw=?, potion_raw=?, has_potion=?, metadata_raw=?,
+                params_json=?, character_entries_json=?, main_negative_combined_raw=?, potion_raw=?, has_potion=?, uses_potion=?, uses_precise_reference=?, sampler=?, metadata_raw=?,
                 main_sig_hash=?, dedup_flag=?, is_nsfw=?
             WHERE id=?
             """,
@@ -2368,6 +2599,9 @@ def _reparse_one(conn: sqlite3.Connection, image_id: int) -> dict:
                 main_negative_combined_raw,
                 potion_raw,
                 has_potion,
+                uses_potion,
+                uses_precise_reference,
+                sampler,
                 metadata_raw,
                 sig,
                 1,
@@ -4846,7 +5080,10 @@ def _upload_image_core(
     character_entries, main_negative_combined_raw = build_prompt_view_payload(conn, prompt_neg, prompt_char, meta.params if meta else None)
     character_entries_json = json.dumps(character_entries, ensure_ascii=False)
     potion_raw = json.dumps(meta.potion, ensure_ascii=False).encode("utf-8") if (meta and meta.potion) else None
-    has_potion = 1 if potion_raw else 0
+    has_potion = 1 if (meta and meta.uses_potion) else 0
+    uses_potion = 1 if (meta and meta.uses_potion) else 0
+    uses_precise_reference = 1 if (meta and meta.uses_precise_reference) else 0
+    sampler = meta.sampler if meta else None
     metadata_raw = None
     if meta:
         try:
@@ -4952,10 +5189,10 @@ def _upload_image_core(
           software, model_name, prompt_positive_raw, prompt_negative_raw, params_json,
           prompt_character_raw, character_entries_json, main_negative_combined_raw,
           seed,
-          potion_raw, has_potion, metadata_raw, main_sig_hash, dedup_flag
+          potion_raw, has_potion, uses_potion, uses_precise_reference, sampler, metadata_raw, main_sig_hash, dedup_flag
           , full_meta_hash
           , favorite, is_nsfw
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             _new_public_id(),
@@ -4978,6 +5215,9 @@ def _upload_image_core(
             seed,
             potion_raw,
             has_potion,
+            uses_potion,
+            uses_precise_reference,
+            sampler,
             metadata_raw,
             sig,
             dedup_flag,
@@ -5349,7 +5589,10 @@ def _upload_image_from_path_core(
     character_entries, main_negative_combined_raw = build_prompt_view_payload(conn, prompt_neg, prompt_char, meta.params if meta else None)
     character_entries_json = json.dumps(character_entries, ensure_ascii=False)
     potion_raw = json.dumps(meta.potion, ensure_ascii=False).encode("utf-8") if (meta and meta.potion) else None
-    has_potion = 1 if potion_raw else 0
+    has_potion = 1 if (meta and meta.uses_potion) else 0
+    uses_potion = 1 if (meta and meta.uses_potion) else 0
+    uses_precise_reference = 1 if (meta and meta.uses_precise_reference) else 0
+    sampler = meta.sampler if meta else None
     metadata_raw = None
     if meta:
         try:
@@ -5424,10 +5667,10 @@ def _upload_image_from_path_core(
           software, model_name, prompt_positive_raw, prompt_negative_raw, params_json,
           prompt_character_raw, character_entries_json, main_negative_combined_raw,
           seed,
-          potion_raw, has_potion, metadata_raw, main_sig_hash, dedup_flag
+          potion_raw, has_potion, uses_potion, uses_precise_reference, sampler, metadata_raw, main_sig_hash, dedup_flag
           , full_meta_hash
           , favorite, is_nsfw
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             _new_public_id(),
@@ -5450,6 +5693,9 @@ def _upload_image_from_path_core(
             seed,
             potion_raw,
             has_potion,
+            uses_potion,
+            uses_precise_reference,
+            sampler,
             metadata_raw,
             sig,
             dedup_flag,
@@ -7228,11 +7474,12 @@ def download_metadata(image_id: int, bm_list_id: int | None = None, user: dict =
     try:
         _assert_image_visible(conn, image_id=int(image_id), viewer=user, bm_list_id=bm_list_id)
         row = conn.execute(
-            "SELECT prompt_positive_raw, prompt_negative_raw, prompt_character_raw, character_entries_json, main_negative_combined_raw, params_json, software, model_name, metadata_raw, has_potion FROM images WHERE id=?",
+            "SELECT prompt_positive_raw, prompt_negative_raw, prompt_character_raw, character_entries_json, main_negative_combined_raw, params_json, software, model_name, metadata_raw, has_potion, uses_potion, uses_precise_reference, sampler FROM images WHERE id=?",
             (image_id,),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="not found")
+        uses_potion, uses_precise_reference, sampler = _resolve_generation_usage_fields(row)
         payload = {
             "software": row["software"],
             "model": row["model_name"],
@@ -7243,7 +7490,12 @@ def download_metadata(image_id: int, bm_list_id: int | None = None, user: dict =
             "main_negative_combined_raw": row["main_negative_combined_raw"],
             "params": json.loads(row["params_json"]) if row["params_json"] else None,
             "metadata_raw": row["metadata_raw"],
-            "has_potion": bool(row["has_potion"]),
+            "has_potion": bool(row["has_potion"] or uses_potion),
+            "generation_usage": {
+                "uses_potion": uses_potion,
+                "uses_precise_reference": uses_precise_reference,
+                "sampler": sampler,
+            },
         }
         data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         return Response(content=data, media_type="application/json", headers={"Content-Disposition": f'attachment; filename="image_{image_id}_metadata.json"'})
@@ -7255,11 +7507,7 @@ def download_potion(image_id: int, bm_list_id: int | None = None, user: dict = D
     conn = get_conn()
     try:
         _assert_image_visible(conn, image_id=int(image_id), viewer=user, bm_list_id=bm_list_id)
-        row = conn.execute("SELECT potion_raw, has_potion FROM images WHERE id=?", (image_id,)).fetchone()
-        if not row or int(row["has_potion"]) != 1:
-            raise HTTPException(status_code=404, detail="no potion")
-        data = row["potion_raw"] or b""
-        return Response(content=data, media_type="application/json", headers={"Content-Disposition": f'attachment; filename="image_{image_id}_potion.json"'})
+        raise HTTPException(status_code=404, detail="disabled")
     finally:
         conn.close()
 
@@ -7293,6 +7541,26 @@ def _build_prompt_view_payload(conn: sqlite3.Connection, prompt_negative_raw: st
 
 def _parse_prompt_multiline_to_tag_objs(conn, raw: str | None) -> list[dict]:
     return parse_prompt_multiline_to_tag_objs(conn, raw)
+
+
+def _resolve_generation_usage_fields(row: sqlite3.Row | dict) -> tuple[bool, bool, str | None]:
+    uses_potion = bool(row["uses_potion"] if row["uses_potion"] is not None else 0)
+    uses_precise_reference = bool(row["uses_precise_reference"] if row["uses_precise_reference"] is not None else 0)
+    sampler = row["sampler"] if row["sampler"] else None
+    if uses_potion and uses_precise_reference and sampler is not None:
+        return uses_potion, uses_precise_reference, sampler
+
+    detected_potion, detected_precise, detected_sampler = detect_generation_usage_from_storage(
+        row["params_json"],
+        row["metadata_raw"],
+    )
+    if not uses_potion:
+        uses_potion = bool(detected_potion)
+    if not uses_precise_reference:
+        uses_precise_reference = bool(detected_precise)
+    if sampler is None and detected_sampler:
+        sampler = detected_sampler
+    return uses_potion, uses_precise_reference, sampler
 
 
 def _normalize_detail_ids(values, *, limit: int = 64) -> list[int]:
@@ -7464,6 +7732,8 @@ def _build_image_detail_payloads(conn: sqlite3.Connection, ids: list[int], *, vi
         uc_tags = parse_prompt_multiline_to_tag_objs(conn, main_negative_combined_raw)
         uc_tags_ms += (time.perf_counter() - t1) * 1000.0
 
+        uses_potion, uses_precise_reference, sampler = _resolve_generation_usage_fields(img)
+
         payloads[iid] = {
             "id": img["id"],
             "public_id": img["public_id"],
@@ -7486,7 +7756,10 @@ def _build_image_detail_payloads(conn: sqlite3.Connection, ids: list[int], *, vi
             "character_entries": character_entries,
             "main_negative_combined_raw": main_negative_combined_raw,
             "params_json": img["params_json"],
-            "has_potion": bool(img["has_potion"]),
+            "has_potion": bool(img["has_potion"] or uses_potion),
+            "uses_potion": uses_potion,
+            "uses_precise_reference": uses_precise_reference,
+            "sampler": sampler,
             "tags": grouped,
             "uc_tags": uc_tags,
             "thumb": _append_bm_list_id_to_url(_thumb_url(conn, iid, kind="grid"), bm_list_id),

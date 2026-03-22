@@ -21,7 +21,7 @@ from types import ModuleType
 from urllib.parse import parse_qs, urlparse
 
 from fastapi.testclient import TestClient
-from PIL import Image
+from PIL import Image, PngImagePlugin
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -796,6 +796,162 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             admin_login = rt.json("POST", "/auth/login", payload={"username": "admin1", "password": "admin1_pw"})
             self.assertEqual(admin_login.status_code, 401)
 
+    def test_metadata_extract_usage_flags_from_nested_scopes(self):
+        with Runtime() as rt:
+            from server.app.services.metadata_extract import extract_novelai_metadata
+
+            payload = {
+                "params": {
+                    "reference_image_multiple": ["ref-image"],
+                    "director_reference_strengths": [1, 1],
+                    "sampler": "k_euler_ancestral",
+                }
+            }
+            image = Image.new("RGB", (64, 64), (40, 120, 200))
+            pnginfo = PngImagePlugin.PngInfo()
+            pnginfo.add_text("Comment", json.dumps(payload, ensure_ascii=False))
+
+            target = Path(rt.temp_root) / "nested_usage.png"
+            image.save(target, format="PNG", pnginfo=pnginfo)
+
+            meta = extract_novelai_metadata(target)
+            self.assertTrue(meta.uses_potion)
+            self.assertTrue(meta.uses_precise_reference)
+            self.assertEqual(meta.sampler, "k_euler_ancestral")
+
+    def test_reparse_updates_usage_flags_from_nested_scopes(self):
+        with Runtime() as rt:
+            rt.setup_master()
+            rt.create_user(actor="master", username="uploader", role="user")
+
+            payload = {
+                "params": {
+                    "reference_image_multiple": ["ref-image"],
+                    "director_reference_strengths": [1, 1],
+                    "sampler": "k_euler_ancestral",
+                }
+            }
+            image = Image.new("RGB", (64, 64), (70, 160, 220))
+            pnginfo = PngImagePlugin.PngInfo()
+            pnginfo.add_text("Comment", json.dumps(payload, ensure_ascii=False))
+            buf = io.BytesIO()
+            image.save(buf, format="PNG", pnginfo=pnginfo)
+
+            upload = rt.request(
+                "POST",
+                "/upload",
+                user="uploader",
+                data={"bookmark_enabled": "0"},
+                files={"file": ("nested_usage.png", buf.getvalue(), "image/png")},
+            )
+            expect_status(upload, 200)
+            image_id = int(upload.json()["image_id"])
+
+            conn = rt.db.get_conn()
+            try:
+                conn.execute(
+                    "UPDATE images SET uses_potion=0, uses_precise_reference=0, sampler=NULL WHERE id=?",
+                    (image_id,),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            reparsed = rt.json("POST", "/admin/reparse_one", user="master", payload={"image_id": image_id})
+            expect_status(reparsed, 200)
+            self.assertTrue(bool(reparsed.json()["ok"]))
+
+            conn = rt.db.get_conn()
+            try:
+                row = conn.execute(
+                    "SELECT uses_potion, uses_precise_reference, sampler FROM images WHERE id=?",
+                    (image_id,),
+                ).fetchone()
+                self.assertIsNotNone(row)
+                self.assertEqual(int(row["uses_potion"] or 0), 1)
+                self.assertEqual(int(row["uses_precise_reference"] or 0), 1)
+                self.assertEqual(row["sampler"], "k_euler_ancestral")
+            finally:
+                conn.close()
+
+    def test_usage_detection_falls_back_to_metadata_raw_wrapper(self):
+        from server.app.services.metadata_extract import detect_generation_usage_from_storage
+
+        metadata_raw = json.dumps(
+            {
+                "info": {
+                    "Comment": json.dumps(
+                        {
+                            "reference_image_multiple": ["ref-image"],
+                            "director_reference_strengths": [1, 1],
+                            "sampler": "k_euler_ancestral",
+                        },
+                        ensure_ascii=False,
+                    )
+                },
+                "json": None,
+            },
+            ensure_ascii=False,
+        )
+
+        uses_potion, uses_precise_reference, sampler = detect_generation_usage_from_storage(None, metadata_raw)
+        self.assertTrue(uses_potion)
+        self.assertTrue(uses_precise_reference)
+        self.assertEqual(sampler, "k_euler_ancestral")
+
+    def test_detail_usage_fields_fall_back_to_metadata_raw_when_db_is_stale(self):
+        with Runtime() as rt:
+            rt.setup_master()
+            rt.create_user(actor="master", username="uploader", role="user")
+
+            payload = {
+                "params": {
+                    "reference_image_multiple": ["ref-image"],
+                    "director_reference_strengths": [1, 1],
+                    "sampler": "k_euler_ancestral",
+                }
+            }
+            image = Image.new("RGB", (64, 64), (90, 150, 230))
+            pnginfo = PngImagePlugin.PngInfo()
+            pnginfo.add_text("Comment", json.dumps(payload, ensure_ascii=False))
+            buf = io.BytesIO()
+            image.save(buf, format="PNG", pnginfo=pnginfo)
+
+            upload = rt.request(
+                "POST",
+                "/upload",
+                user="uploader",
+                data={"bookmark_enabled": "0"},
+                files={"file": ("stale_usage.png", buf.getvalue(), "image/png")},
+            )
+            expect_status(upload, 200)
+            image_id = int(upload.json()["image_id"])
+
+            conn = rt.db.get_conn()
+            try:
+                conn.execute(
+                    "UPDATE images SET has_potion=0, uses_potion=0, uses_precise_reference=0, sampler=NULL, params_json=NULL WHERE id=?",
+                    (image_id,),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            detail = rt.json("GET", f"/images/{image_id}/detail", user="uploader")
+            expect_status(detail, 200)
+            payload = detail.json()
+            self.assertTrue(bool(payload["has_potion"]))
+            self.assertTrue(bool(payload["uses_potion"]))
+            self.assertTrue(bool(payload["uses_precise_reference"]))
+            self.assertEqual(payload["sampler"], "k_euler_ancestral")
+
+            meta_json = rt.request("GET", f"/images/{image_id}/metadata_json", user="uploader")
+            expect_status(meta_json, 200)
+            meta_payload = meta_json.json()
+            self.assertTrue(bool(meta_payload["generation_usage"]["uses_potion"]))
+            self.assertTrue(bool(meta_payload["generation_usage"]["uses_precise_reference"]))
+            self.assertEqual(meta_payload["generation_usage"]["sampler"], "k_euler_ancestral")
+
 
 TEST_DESCRIPTIONS = {
     "test_ui_regression_contracts": "UI文言・確認ダイアログ・タブ名の静的回帰確認",
@@ -805,6 +961,10 @@ TEST_DESCRIPTIONS = {
     "test_bookmark_crud_bulk_operations_and_gallery_queries": "ブックマークCRUD、favorite、bulk apply、一覧問い合わせの確認",
     "test_upload_routes_and_admin_status_smoke": "upload、upload_batch、管理ステータス反映の確認",
     "test_bulk_delete_permissions_and_account_delete_cascade": "bulk delete権限、自己削除、管理削除、削除連鎖の確認",
+    "test_metadata_extract_usage_flags_from_nested_scopes": "入れ子 params の参照利用フラグと sampler 抽出確認",
+    "test_reparse_updates_usage_flags_from_nested_scopes": "再解析で入れ子 params の参照利用フラグと sampler を更新できるか確認",
+    "test_usage_detection_falls_back_to_metadata_raw_wrapper": "metadata_raw 内の wrapper JSON から参照利用フラグと sampler を拾えるか確認",
+    "test_detail_usage_fields_fall_back_to_metadata_raw_when_db_is_stale": "DB列が古くても metadata_raw を使って詳細表示の参照利用フラグと sampler を返せるか確認",
 }
 
 

@@ -3691,6 +3691,12 @@ function renderDetailLoading(id){
 
   const dSoft = $("dSoft");
   if(dSoft) dSoft.textContent = it.software || "";
+  const dPotionUsage = $("dPotionUsage");
+  if(dPotionUsage) dPotionUsage.textContent = "-";
+  const dPreciseReferenceUsage = $("dPreciseReferenceUsage");
+  if(dPreciseReferenceUsage) dPreciseReferenceUsage.textContent = "-";
+  const dSampler = $("dSampler");
+  if(dSampler) dSampler.textContent = "-";
   const dCreator = $("dCreator");
   if(dCreator) dCreator.textContent = it.creator || "";
 
@@ -3739,8 +3745,6 @@ function renderDetailLoading(id){
   if(vf){ vf.href = "#"; vf.classList.add("hidden"); }
   const dlMeta = $("dlMeta");
   if(dlMeta) dlMeta.href = "#";
-  const dlPotion = $("dlPotion");
-  if(dlPotion){ dlPotion.href = "#"; dlPotion.classList.add("hidden"); }
 
   const secArtist = $("secArtist");
   const secQuality = $("secQuality");
@@ -3813,6 +3817,12 @@ function renderDetailFull(d){
 
   const dSoft = $("dSoft");
   if(dSoft) dSoft.textContent = d.software || "";
+  const dPotionUsage = $("dPotionUsage");
+  if(dPotionUsage) dPotionUsage.textContent = d.uses_potion ? "使用" : "未使用";
+  const dPreciseReferenceUsage = $("dPreciseReferenceUsage");
+  if(dPreciseReferenceUsage) dPreciseReferenceUsage.textContent = d.uses_precise_reference ? "使用" : "未使用";
+  const dSampler = $("dSampler");
+  if(dSampler) dSampler.textContent = d.sampler || "-";
   const dCreator = $("dCreator");
   if(dCreator) dCreator.textContent = d.creator || "";
 
@@ -3852,11 +3862,6 @@ function renderDetailFull(d){
   }
   const dlMeta = $("dlMeta");
   if(dlMeta) dlMeta.href = d.download_meta;
-  const dlPotion = $("dlPotion");
-  if(dlPotion){
-    dlPotion.href = d.has_potion ? d.download_potion : "#";
-    dlPotion.classList.toggle("hidden", !d.has_potion);
-  }
 
 
   const secArtist = $("secArtist");
@@ -3915,6 +3920,9 @@ function renderDetailFull(d){
   const meta = {
     software: d.software,
     model: d.model,
+    uses_potion: !!d.uses_potion,
+    uses_precise_reference: !!d.uses_precise_reference,
+    sampler: d.sampler || null,
     prompt_positive_raw: d.prompt_positive_raw,
     prompt_negative_raw: d.prompt_negative_raw,
     prompt_character_raw: d.prompt_character_raw,

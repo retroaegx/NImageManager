@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import sqlite3
 import gzip
@@ -433,6 +434,9 @@ def migrate_db(conn: sqlite3.Connection) -> None:
     _ensure_col("images", "params_json", "params_json TEXT")
     _ensure_col("images", "potion_raw", "potion_raw BLOB")
     _ensure_col("images", "has_potion", "has_potion INTEGER NOT NULL DEFAULT 0")
+    _ensure_col("images", "uses_potion", "uses_potion INTEGER NOT NULL DEFAULT 0")
+    _ensure_col("images", "uses_precise_reference", "uses_precise_reference INTEGER NOT NULL DEFAULT 0")
+    _ensure_col("images", "sampler", "sampler TEXT")
     _ensure_col("images", "metadata_raw", "metadata_raw TEXT")
     _ensure_col("images", "main_sig_hash", "main_sig_hash TEXT")
     _ensure_col("images", "full_meta_hash", "full_meta_hash TEXT")
@@ -440,6 +444,42 @@ def migrate_db(conn: sqlite3.Connection) -> None:
     _ensure_col("images", "favorite", "favorite INTEGER NOT NULL DEFAULT 0")
     _ensure_col("images", "is_nsfw", "is_nsfw INTEGER NOT NULL DEFAULT 0")
     _ensure_col("images", "reparse_skip", "reparse_skip INTEGER NOT NULL DEFAULT 0")
+
+    try:
+        from .services.metadata_extract import detect_generation_usage_from_storage
+
+        if (
+            _has_col("images", "uses_potion")
+            and _has_col("images", "uses_precise_reference")
+            and _has_col("images", "sampler")
+            and _has_col("images", "params_json")
+            and _has_col("images", "metadata_raw")
+            and _has_col("images", "has_potion")
+        ):
+            rows = conn.execute(
+                "SELECT id, params_json, metadata_raw, has_potion, uses_potion, uses_precise_reference, sampler FROM images"
+            ).fetchall()
+            for r in rows:
+                uses_potion_b, uses_precise_reference_b, sampler = detect_generation_usage_from_storage(
+                    r["params_json"],
+                    r["metadata_raw"],
+                )
+                uses_potion = 1 if uses_potion_b else 0
+                uses_precise_reference = 1 if uses_precise_reference_b else 0
+                has_potion = 1 if uses_potion_b else 0
+                if (
+                    int(r["has_potion"] or 0) == has_potion
+                    and int(r["uses_potion"] or 0) == uses_potion
+                    and int(r["uses_precise_reference"] or 0) == uses_precise_reference
+                    and (r["sampler"] or None) == sampler
+                ):
+                    continue
+                conn.execute(
+                    "UPDATE images SET has_potion=?, uses_potion=?, uses_precise_reference=?, sampler=? WHERE id=?",
+                    (has_potion, uses_potion, uses_precise_reference, sampler, int(r["id"])),
+                )
+    except Exception:
+        pass
 
     # ---- backfill seed/full_meta_hash (best-effort, small batch) ----
     # This enables full-meta dedup to work for existing DBs.
@@ -1049,6 +1089,9 @@ CREATE TABLE IF NOT EXISTS images (
   params_json           TEXT,
   potion_raw            BLOB,
   has_potion            INTEGER NOT NULL DEFAULT 0,
+  uses_potion           INTEGER NOT NULL DEFAULT 0,
+  uses_precise_reference INTEGER NOT NULL DEFAULT 0,
+  sampler               TEXT,
   metadata_raw          TEXT,
 
   main_sig_hash         TEXT,
