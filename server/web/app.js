@@ -2892,6 +2892,138 @@ function makeTagButton(tag, onClick){
   return b;
 }
 
+const DETAIL_TAG_VIEW_STORAGE_KEY = "nim.detail.tagViewMode";
+const DETAIL_EMPHASIS_COPY_STORAGE_KEY = "nim.detail.emphasisCopy";
+
+function getDetailTagViewMode(){
+  try{
+    const raw = String(localStorage.getItem(DETAIL_TAG_VIEW_STORAGE_KEY) || "B").toUpperCase();
+    return raw === "T" ? "T" : "B";
+  }catch(_e){
+    return "B";
+  }
+}
+
+function setDetailTagViewMode(mode){
+  const next = String(mode || "B").toUpperCase() === "T" ? "T" : "B";
+  try{ localStorage.setItem(DETAIL_TAG_VIEW_STORAGE_KEY, next); }catch(_e){}
+  return next;
+}
+
+function isDetailEmphasisCopyEnabled(){
+  try{
+    return localStorage.getItem(DETAIL_EMPHASIS_COPY_STORAGE_KEY) === "1";
+  }catch(_e){
+    return false;
+  }
+}
+
+function setDetailEmphasisCopyEnabled(enabled){
+  const next = !!enabled;
+  try{ localStorage.setItem(DETAIL_EMPHASIS_COPY_STORAGE_KEY, next ? "1" : "0"); }catch(_e){}
+  return next;
+}
+
+function getDisplayTextForTags(arr, keepEmphasis){
+  return keepEmphasis ? joinKeep(arr) : joinPlain(arr);
+}
+
+function getSingleTagCopyText(tagObj, keepEmphasis){
+  const base = keepEmphasis
+    ? (tagObj?.raw_one || tagObj?.canonical || tagObj?.text || "")
+    : (tagObj?.canonical || tagObj?.text || tagObj?.raw_one || "");
+  const text = String(base || "").trim();
+  return text ? `${text}, ` : "";
+}
+
+function syncDetailToggleUi(){
+  const mode = getDetailTagViewMode();
+  const keepEmphasis = isDetailEmphasisCopyEnabled();
+
+  const viewToggle = $("detailTagViewToggle");
+  const viewValue = $("detailTagViewToggleValue");
+  if(viewToggle){
+    const isText = mode === "T";
+    viewToggle.classList.toggle("is-on", isText);
+    viewToggle.setAttribute("aria-pressed", isText ? "true" : "false");
+  }
+  if(viewValue) viewValue.textContent = mode;
+
+  const emphasisToggle = $("detailEmphasisToggle");
+  const emphasisValue = $("detailEmphasisToggleValue");
+  if(emphasisToggle){
+    emphasisToggle.classList.toggle("is-on", keepEmphasis);
+    emphasisToggle.setAttribute("aria-pressed", keepEmphasis ? "true" : "false");
+  }
+  if(emphasisValue) emphasisValue.textContent = keepEmphasis ? "ON" : "OFF";
+}
+
+function makeTagTextBox(value){
+  const area = document.createElement("textarea");
+  area.className = "tagTextBox";
+  area.readOnly = true;
+  area.spellcheck = false;
+  area.value = String(value || "");
+  if(!area.value.trim()) area.placeholder = "(none)";
+  return area;
+}
+
+function renderDetailTagSections(d){
+  const secArtist = $("secArtist");
+  const secQuality = $("secQuality");
+  const secCharacter = $("secCharacter");
+  const secOther = $("secOther");
+  const secNegative = $("secNegative");
+  const sections = [secArtist, secQuality, secCharacter, secOther, secNegative].filter(Boolean);
+  sections.forEach((box) => { box.innerHTML = ""; });
+
+  const mode = getDetailTagViewMode();
+  const keepEmphasis = isDetailEmphasisCopyEnabled();
+  const renderBox = (box, arr) => {
+    if(!box) return;
+    if(mode === "T"){
+      box.appendChild(makeTagTextBox(getDisplayTextForTags(arr, keepEmphasis)));
+      return;
+    }
+    if(!arr.length){
+      const empty = document.createElement("span");
+      empty.className = "small";
+      empty.textContent = "(none)";
+      box.appendChild(empty);
+      return;
+    }
+    arr.forEach((t) => {
+      const label = t?.canonical || t?.text || t?.raw_one || "";
+      if(!label) return;
+      box.appendChild(makeTagButton(label, () => copyText(getSingleTagCopyText(t, keepEmphasis))));
+    });
+  };
+
+  renderBox(secArtist, d?.tags?.artist || []);
+  renderBox(secQuality, d?.tags?.quality || []);
+  renderBox(secCharacter, d?.tags?.character || []);
+  renderBox(secOther, d?.tags?.other || []);
+
+  ensureDetailPromptUI(d);
+  renderBox(secNegative, Array.isArray(d?._ui_uc_tags) ? d._ui_uc_tags : []);
+}
+
+function bindDetailToggleControls(){
+  $("detailTagViewToggle")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    setDetailTagViewMode(getDetailTagViewMode() === "T" ? "B" : "T");
+    syncDetailToggleUi();
+    if(currentDetail) renderDetailTagSections(currentDetail);
+  });
+
+  $("detailEmphasisToggle")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    setDetailEmphasisCopyEnabled(!isDetailEmphasisCopyEnabled());
+    syncDetailToggleUi();
+    if(currentDetail && getDetailTagViewMode() === "T") renderDetailTagSections(currentDetail);
+  });
+}
+
 function fmtBytes(n){
   const x = Number(n||0);
   if(!x) return "";
@@ -3840,6 +3972,12 @@ function renderDetailFull(d){
         const by = d.creator ? `by ${d.creator}` : "";
         m.textContent = (src && by) ? `${src}  ${by}` : (src || by);
       }
+      const u = $("ioUsage"); if(u){
+        const potion = d.uses_potion ? "使用" : "未使用";
+        const precise = d.uses_precise_reference ? "使用" : "未使用";
+        const sampler = d.sampler || "-";
+        u.textContent = `ポーション ${potion} / 精密参照 ${precise} / サンプラー ${sampler}`;
+      }
       imgOverlayInfo.classList.remove("hidden");
     }else{
       imgOverlayInfo.classList.add("hidden");
@@ -3864,50 +4002,8 @@ function renderDetailFull(d){
   if(dlMeta) dlMeta.href = d.download_meta;
 
 
-  const secArtist = $("secArtist");
-  const secQuality = $("secQuality");
-  const secCharacter = $("secCharacter");
-  const secOther = $("secOther");
-  const secNegative = $("secNegative");
-  if(secArtist) secArtist.innerHTML = "";
-  if(secQuality) secQuality.innerHTML = "";
-  if(secCharacter) secCharacter.innerHTML = "";
-  if(secOther) secOther.innerHTML = "";
-  if(secNegative) secNegative.innerHTML = "";
-
-  const fill = (box, arr) => {
-    if(!arr.length){
-      const s = document.createElement("span");
-      s.className = "small";
-      s.textContent = "(none)";
-      box.appendChild(s);
-      return;
-    }
-    arr.forEach(t => box.appendChild(makeTagButton(t.canonical, () => copyText(t.canonical + ","))));
-  };
-
-  if(secArtist) fill(secArtist, d.tags?.artist || []);
-  if(secQuality) fill(secQuality, d.tags?.quality || []);
-  if(secCharacter) fill(secCharacter, d.tags?.character || []);
-  if(secOther) fill(secOther, d.tags?.other || []);
-
-  // Negative prompt: render as tag buttons like other sections (combined main+character negatives).
-  if(secNegative){
-    ensureDetailPromptUI(d);
-    const arr = (d._ui_uc_tags && Array.isArray(d._ui_uc_tags)) ? d._ui_uc_tags : [];
-    if(!arr.length){
-      const s = document.createElement("span");
-      s.className = "small";
-      s.textContent = "(none)";
-      secNegative.appendChild(s);
-    }else{
-      arr.forEach(t => {
-        const canon = t?.canonical || t?.text || "";
-        if(!canon) return;
-        secNegative.appendChild(makeTagButton(canon, () => copyText(canon + ", ")));
-      });
-    }
-  }
+  syncDetailToggleUi();
+  renderDetailTagSections(d);
 
   // Copy-only prompt frames requested by UI spec
   renderPromptSections(d);
@@ -5159,6 +5255,8 @@ $("bmClearThisBtn")?.addEventListener("click", async (e) => {
   });
 
   bindCopyAll();
+  bindDetailToggleControls();
+  syncDetailToggleUi();
 }
 
 async function boot(){

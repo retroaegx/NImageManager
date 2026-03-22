@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>NIM</title>
-  <link rel="stylesheet" href="/styles.css?v=60" />
+  <link rel="stylesheet" href="/styles.css?v=62" />
 </head>
 <body>
   <div class="bg" aria-hidden="true"></div>
@@ -276,9 +276,27 @@
           </div>
 
           <div class="actions">
-            <a id="viewFull" class="pill" href="#" target="_blank" rel="noopener">フル表示</a>
-            <a id="dlFile" class="pill" href="#" download>元ファイル</a>
-                      </div>
+            <div class="actionPrimaryRow">
+              <a id="viewFull" class="pill" href="#" target="_blank" rel="noopener">フル表示</a>
+              <a id="dlFile" class="pill" href="#" download>元ファイル</a>
+            </div>
+            <div class="actionToggleRow">
+              <button id="detailTagViewToggle" class="compactTrackToggle" type="button" aria-label="表示形式切替" aria-pressed="false">
+                <span class="compactTrackToggleText">
+                  <span class="compactTrackToggleLabel">B&lt;&gt;T</span>
+                  <span id="detailTagViewToggleValue" class="compactTrackToggleValue">B</span>
+                </span>
+                <span class="compactTrack" aria-hidden="true"></span>
+              </button>
+              <button id="detailEmphasisToggle" class="compactTrackToggle" type="button" aria-label="強調コピー切替" aria-pressed="false">
+                <span class="compactTrackToggleText">
+                  <span class="compactTrackToggleLabel">強調コピー</span>
+                  <span id="detailEmphasisToggleValue" class="compactTrackToggleValue">OFF</span>
+                </span>
+                <span class="compactTrack" aria-hidden="true"></span>
+              </button>
+            </div>
+          </div>
 
 
           <div class="section">
@@ -347,7 +365,7 @@
     </div>
   </div>
 
-  <script type="module" src="/app.js?v=60"></script>
+  <script type="module" src="/app.js?v=61"></script>
 
   <div id="filterOverlay" class="filterOverlay hidden" aria-hidden="true">
     <div id="filterOverlayBg" class="filterOverlayBg"></div>
