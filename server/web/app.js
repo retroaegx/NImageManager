@@ -4406,6 +4406,22 @@ function hasCalendarSelection(){
   return !!(state.calendar.from || state.calendar.to);
 }
 
+function hasSingleDayCalendarSelection(){
+  const f = state.calendar.from || "";
+  const t = state.calendar.to || "";
+  return !!f && f === t;
+}
+
+function hasMultiDayCalendarSelection(){
+  const f = state.calendar.from || "";
+  const t = state.calendar.to || "";
+  return !!f && !!t && f !== t;
+}
+
+function shouldFilterCalendarYearOrMonth(){
+  return !hasCalendarSelection() || hasMultiDayCalendarSelection();
+}
+
 function hasPendingCalendarAnchor(){
   const a = state.calendar.click_anchor || "";
   return !!a && state.calendar.from === a && state.calendar.to === a;
@@ -4806,7 +4822,7 @@ function renderCalendar(){
     b.innerHTML = `<span class="t">${yy}</span><span class="n">${fmtCount(c)}</span>`;
     b.addEventListener('click', async (e) => {
       e.preventDefault();
-      if(hasCalendarSelection()){
+      if(!shouldFilterCalendarYearOrMonth()){
         await openCalendarYear(yy, md.getMonth());
         return;
       }
@@ -4845,7 +4861,7 @@ function renderCalendar(){
     b.innerHTML = `<span class="t">${mi}</span><span class="n">${fmtCount(c)}</span>`;
     b.addEventListener('click', async (e) => {
       e.preventDefault();
-      if(hasCalendarSelection()){
+      if(!shouldFilterCalendarYearOrMonth()){
         await openCalendarMonth(y, mi - 1);
         return;
       }
