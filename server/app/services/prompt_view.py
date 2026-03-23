@@ -75,19 +75,8 @@ def extract_character_negative_prompt_raw(params_json_or_obj: Any) -> str:
 
 
 def _lookup_alias(conn: sqlite3.Connection, normalized: str) -> str:
-    norm = str(normalized or "").strip()
-    if not norm:
-        return ""
-    row = conn.execute(
-        "SELECT canonical FROM tag_aliases WHERE alias=?",
-        (norm,),
-    ).fetchone()
-    if row:
-        try:
-            return str(row["canonical"] if not isinstance(row, tuple) else row[0])
-        except Exception:
-            pass
-    return norm
+    # Alias/canonical remapping is intentionally disabled.
+    return str(normalized or "").strip()
 
 
 def _get_tag_category(conn: sqlite3.Connection, canonical: str) -> int | None:
@@ -114,7 +103,6 @@ def canonical_character_name_from_text(conn: sqlite3.Connection, text: str | Non
     except Exception:
         parsed = []
 
-    fallback_generic = ""
     for t in parsed:
         try:
             tag_norm = normalize_tag(t.tag_text)
@@ -122,16 +110,14 @@ def canonical_character_name_from_text(conn: sqlite3.Connection, text: str | Non
             tag_norm = ""
         if not tag_norm:
             continue
-        canonical = _lookup_alias(conn, tag_norm)
+        canonical = tag_norm
         cat = _get_tag_category(conn, canonical)
         if cat != 4:
             continue
         if canonical in _GENERIC_CHARACTER_KEYS:
-            if not fallback_generic:
-                fallback_generic = canonical
             continue
         return canonical
-    return fallback_generic
+    return ""
 
 
 def parse_character_entries(conn: sqlite3.Connection, pos_raw: str | None, neg_raw: str | None) -> list[dict]:
@@ -301,12 +287,12 @@ def parse_prompt_multiline_to_tag_objs(conn: sqlite3.Connection, raw: str | None
                 tag_norm = ""
             if not tag_norm:
                 continue
-            canonical = _lookup_alias(conn, tag_norm)
+            canonical = tag_norm
             out.append(
                 {
                     "canonical": canonical,
-                    "text": t.tag_text or canonical,
-                    "raw_one": t.tag_raw_one or canonical,
+                    "text": t.tag_text or "",
+                    "raw_one": t.tag_raw_one or "",
                     "emphasis_type": t.emphasis_type,
                     "brace_level": int(t.brace_level or 0),
                     "numeric_weight": float(t.numeric_weight or 0),

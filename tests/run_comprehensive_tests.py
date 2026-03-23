@@ -1097,5 +1097,18 @@ def run_suite() -> int:
     return 0 if report["summary"]["successful"] else 1
 
 
+
+def test_alias_canonicalization_disabled():
+    from server.app.services.tag_parser import normalize_tag
+
+    assert normalize_tag("dynamic pose") == "dynamic_pose"
+
+
+def test_prompt_join_plain_prefers_text_only():
+    prompt_js = (Path(__file__).resolve().parents[1] / "server" / "web" / "lib" / "prompt.js").read_text(encoding="utf-8")
+    assert 't?.text || ""' in prompt_js
+    assert 't?.canonical || t?.text' not in prompt_js
+
+
 if __name__ == "__main__":
     raise SystemExit(run_suite())

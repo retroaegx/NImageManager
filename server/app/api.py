@@ -2544,7 +2544,7 @@ def _reparse_one(conn: sqlite3.Connection, image_id: int) -> dict:
             tag_norm = normalize_tag(t.tag_text)
             if not tag_norm:
                 return
-            canonical = _lookup_alias(conn, tag_norm)
+            canonical = tag_norm
             cat = _get_tag_category(conn, canonical)
             cat = _effective_tag_category(conn, canonical, cat)
             group = _category_group(conn, canonical, cat)
@@ -4554,15 +4554,9 @@ def tag_suggest(q: str = "", limit: int = 20, user: dict = Depends(get_user)):
         conn.close()
 
 def _lookup_alias(conn: sqlite3.Connection, tag_norm: str) -> str:
-    if not tag_norm:
-        return ""
-    v = _TAG_ALIAS_CACHE.get(tag_norm)
-    if v is not None:
-        return v
-    row = conn.execute("SELECT canonical FROM tag_aliases WHERE alias=?", (tag_norm,)).fetchone()
-    canonical = str(row["canonical"]) if row else tag_norm
-    _cache_put(_TAG_ALIAS_CACHE, _TAG_ALIAS_LOCK, tag_norm, canonical, _TAG_ALIAS_MAX)
-    return canonical
+    # Alias/canonical remapping is intentionally disabled.
+    # Persist and query tags as their normalized raw text only.
+    return str(tag_norm or "").strip()
 
 
 def _tag_candidates_for_filter(conn: sqlite3.Connection, token: str, *, limit: int = 80) -> list[str]:
@@ -5147,7 +5141,7 @@ def _upload_image_core(
         tag_norm = normalize_tag(t.tag_text)
         if not tag_norm:
             return
-        canonical = _lookup_alias(conn, tag_norm)
+        canonical = tag_norm
         cat = _get_tag_category(conn, canonical)
         cat = _effective_tag_category(conn, canonical, cat)
         group = _category_group(conn, canonical, cat)
@@ -5628,7 +5622,7 @@ def _upload_image_from_path_core(
         tag_norm = normalize_tag(t.tag_text)
         if not tag_norm:
             return
-        canonical = _lookup_alias(conn, tag_norm)
+        canonical = tag_norm
         cat = _get_tag_category(conn, canonical)
         cat = _effective_tag_category(conn, canonical, cat)
         group = _category_group(conn, canonical, cat)
@@ -7706,8 +7700,8 @@ def _build_image_detail_payloads(conn: sqlite3.Connection, ids: list[int], *, vi
             group = _category_group(conn, canonical, cat)
             grouped[group].append({
                 "canonical": canonical,
-                "text": t["tag_text"] or canonical,
-                "raw_one": t["tag_raw"] or canonical,
+                "text": t["tag_text"] or "",
+                "raw_one": t["tag_raw"] or "",
                 "emphasis_type": t["emphasis_type"],
                 "brace_level": t["brace_level"],
                 "numeric_weight": t["numeric_weight"],

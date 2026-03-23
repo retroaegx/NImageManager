@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>NIM</title>
-  <link rel="stylesheet" href="/styles.css?v=62" />
+  <link rel="stylesheet" href="/styles.css?v=63" />
 </head>
 <body>
   <div class="bg" aria-hidden="true"></div>
@@ -108,7 +108,18 @@
                 <div class="sideHeadTitle">ブックマーク</div>
                 <div class="sideHeadActions">
                   <button id="bookmarkCreatorAddBtn" class="sideAddBtn" type="button" title="ブックマーク作者を登録" aria-label="ブックマーク作者を追加">
-                    <svg class="icoPlus" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                    <svg class="sideActionIcon" viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M9.2 11.4a3.7 3.7 0 1 0 0-7.4 3.7 3.7 0 0 0 0 7.4Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                      <path d="M3.8 18.7c.7-2.8 3-4.6 5.4-4.6s4.7 1.8 5.4 4.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                      <path d="M18.2 8.4v6.4M15 11.6h6.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                    </svg>
+                  </button>
+                  <button id="bookmarkListAddBtn" class="sideAddBtn" type="button" title="ブックマークリストを作成" aria-label="ブックマークリストを作成">
+                    <svg class="sideActionIcon" viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M5.2 5.2h9.1c1.2 0 2.1.9 2.1 2.1v9.5H7.3a2.1 2.1 0 0 0-2.1 2.1V6.3c0-.6.5-1.1 1.1-1.1Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                      <path d="M7.4 16.8h10.1v2c0 .6-.5 1.1-1.1 1.1H7.3a2.1 2.1 0 0 1 0-4.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                      <path d="M18.4 7.1v5.6M15.6 9.9h5.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                    </svg>
                   </button>
                   <button id="bookmarkClearBtn" class="sideClearBtn" type="button" disabled title="ブックマーク絞り込みを解除">解除</button>
                 </div>
@@ -121,7 +132,11 @@
                 <div class="sideHeadTitle">作者</div>
                 <div class="sideHeadActions">
                   <button id="creatorAddBtn" class="sideAddBtn" type="button" title="作者を登録" aria-label="作者を追加">
-                    <svg class="icoPlus" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                    <svg class="sideActionIcon" viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M9.2 11.4a3.7 3.7 0 1 0 0-7.4 3.7 3.7 0 0 0 0 7.4Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                      <path d="M3.8 18.7c.7-2.8 3-4.6 5.4-4.6s4.7 1.8 5.4 4.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                      <path d="M18.2 8.4v6.4M15 11.6h6.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                    </svg>
                   </button>
                   <button id="creatorClearBtn" class="sideClearBtn" type="button" disabled title="作者絞り込みを解除">解除</button>
                 </div>
@@ -365,7 +380,7 @@
     </div>
   </div>
 
-  <script type="module" src="/app.js?v=62"></script>
+  <script type="module" src="/app.js?v=20260321_02"></script>
 
   <div id="filterOverlay" class="filterOverlay hidden" aria-hidden="true">
     <div id="filterOverlayBg" class="filterOverlayBg"></div>

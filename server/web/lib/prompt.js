@@ -11,12 +11,12 @@ function ensureTrailingComma(s){
 
 export function joinKeep(tags){
   if(!Array.isArray(tags) || !tags.length) return "";
-  return tags.map(t => t?.raw_one || t?.canonical || t?.text || "").filter(Boolean).join(", ") + ", ";
+  return tags.map(t => t?.raw_one || "").filter(Boolean).join(", ") + ", ";
 }
 
 export function joinPlain(tags){
   if(!Array.isArray(tags) || !tags.length) return "";
-  return tags.map(t => t?.canonical || t?.text || t?.raw_one || "").filter(Boolean).join(", ") + ", ";
+  return tags.map(t => t?.text || "").filter(Boolean).join(", ") + ", ";
 }
 
 export function stripEmphasisFromPrompt(s){

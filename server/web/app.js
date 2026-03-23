@@ -3,7 +3,7 @@ import { apiFetch, apiJson } from "./lib/http.js?v=20260307_01";
 import { bindUserMenu } from "./lib/userMenu.js?v=20260312_02";
 import { loadCurrentUser, logoutAndRedirect } from "./lib/session.js?v=20260307_01";
 import { buildPageQuery as buildPageQueryShared, buildPageQueryCore as buildPageQueryCoreShared, buildScrollQuery as buildScrollQueryShared } from "./lib/galleryQuery.js?v=20260307_01";
-import { joinKeep, joinPlain, promptTextForCopyKeep, promptTextForCopyPlain } from "./lib/prompt.js?v=20260307_01";
+import { joinKeep, joinPlain, promptTextForCopyKeep, promptTextForCopyPlain } from "./lib/prompt.js?v=20260321_02";
 
 const API = {
   login: "/api/auth/login",
@@ -2930,8 +2930,8 @@ function getDisplayTextForTags(arr, keepEmphasis){
 
 function getSingleTagCopyText(tagObj, keepEmphasis){
   const base = keepEmphasis
-    ? (tagObj?.raw_one || tagObj?.canonical || tagObj?.text || "")
-    : (tagObj?.canonical || tagObj?.text || tagObj?.raw_one || "");
+    ? (tagObj?.raw_one || "")
+    : (tagObj?.text || "");
   const text = String(base || "").trim();
   return text ? `${text}, ` : "";
 }
@@ -2993,7 +2993,7 @@ function renderDetailTagSections(d){
       return;
     }
     arr.forEach((t) => {
-      const label = t?.canonical || t?.text || t?.raw_one || "";
+      const label = t?.text || "";
       if(!label) return;
       box.appendChild(makeTagButton(label, () => copyText(getSingleTagCopyText(t, keepEmphasis))));
     });
@@ -5228,6 +5228,15 @@ $("bulkBmSaveBtn")?.addEventListener("click", async (e) => { e.preventDefault();
 bindUserPick();
 $("creatorAddBtn")?.addEventListener("click", (e) => { e.preventDefault(); openUserPick("creators"); });
 $("bookmarkCreatorAddBtn")?.addEventListener("click", (e) => { e.preventDefault(); openUserPick("bookmarks"); });
+$("bookmarkListAddBtn")?.addEventListener("click", async (e) => {
+  e.preventDefault();
+  try{
+    await _createBookmarkListInteractive();
+    await refreshBookmarkLists();
+  }catch(_e){
+    alert("作成に失敗しました");
+  }
+});
 $("addCreatorFromDetailBtn")?.addEventListener("click", (e) => { e.preventDefault(); addCreatorFromDetail(); });
 
 $("bmCreateListBtn")?.addEventListener("click", async (e) => {

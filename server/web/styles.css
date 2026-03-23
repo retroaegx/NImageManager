@@ -2034,11 +2034,13 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
 }
 
 /* ===== Sidebar (add button / delete button / groups) ===== */
-.sideHeadActions{ margin-left:auto; display:flex; align-items:center; gap: 8px; }
+.sideHeadActions{ margin-left:auto; display:flex; align-items:center; gap: 8px; flex-wrap: nowrap; }
 .sideAddBtn{
   display:inline-flex;
   align-items:center;
   justify-content:center;
+  min-width: 36px;
+  min-height: 36px;
   border: 1px solid rgba(255,255,255,0.14);
   background: rgba(255,255,255,0.05);
   color: rgba(255,255,255,0.78);
@@ -2055,7 +2057,7 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
   transform: translateY(-1px);
 }
 
-.icoPlus{ width: 14px; height: 14px; display:block; }
+.sideActionIcon{ width: 16px; height: 16px; display:block; flex: 0 0 auto; }
 
 .sideItem .delBtn,
 .sideGroupHead .delBtn{

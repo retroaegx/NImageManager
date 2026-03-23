@@ -4,8 +4,7 @@
   "version": "0.1.1",
   "description": "NovelAI の現在画像を NIM に転送します。",
   "permissions": [
-    "storage",
-    "tabs"
+    "storage"
   ],
   "host_permissions": [
     "<all_urls>"
