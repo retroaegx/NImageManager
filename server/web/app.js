@@ -2340,21 +2340,14 @@ function updateGalleryTitle(){
   if(state.preview.mode === "page"){
     const total = Number(state.preview.total_count || 0);
     if(t) t.textContent = `ギャラリー (${total.toLocaleString()})`;
-    if(hint){
-      const p = Number(state.preview.page || 1);
-      const tp = Number(state.preview.total_pages || 0);
-      hint.textContent = tp ? `${p} / ${tp}` : "";
-    }
+    if(hint) hint.textContent = "";
     return;
   }
 
   const total = Number(state.preview.total_count || 0);
   const loaded = state.preview.items.length || 0;
   if(t) t.textContent = `ギャラリー (${(total || loaded).toLocaleString()})`;
-  if(hint){
-    if(!total) hint.textContent = state.preview.done ? "" : "…";
-    else hint.textContent = state.preview.done ? "" : `${loaded.toLocaleString()} / ${total.toLocaleString()}`;
-  }
+  if(hint) hint.textContent = "";
 }
 
 function resetGrid(){
@@ -2683,6 +2676,15 @@ function appendTiles(items){
   items.forEach((it) => grid.appendChild(makeTile(it)));
 }
 
+
+function buildDetailCompactMeta(d){
+  const soft = String(d?.software || '-').trim() || '-';
+  const sampler = String(d?.sampler || '-').trim() || '-';
+  const potion = typeof d?.uses_potion === 'boolean' ? (d.uses_potion ? '〇' : '×') : '-';
+  const precise = typeof d?.uses_precise_reference === 'boolean' ? (d.uses_precise_reference ? '〇' : '×') : '-';
+  return `ソフト ${soft} / ポーション ${potion} / 精密参照 ${precise} / サンプラー ${sampler}`;
+}
+
 function renderPager(){
   const pager = $("pager");
   if(!pager) return;
@@ -2886,8 +2888,13 @@ function renderPromptSections(d){
 
 function makeTagButton(tag, onClick){
   const b = document.createElement("button");
-  b.className = "tagBtn";
-  b.textContent = tag;
+  const label = String(tag || "");
+  const len = label.length;
+  let cls = "tagBtn";
+  if(len >= 28) cls += " tagBtn-xlong";
+  else if(len >= 18) cls += " tagBtn-long";
+  b.className = cls;
+  b.textContent = label;
   b.addEventListener("click", onClick);
   return b;
 }
@@ -2963,8 +2970,14 @@ function makeTagTextBox(value){
   area.className = "tagTextBox";
   area.readOnly = true;
   area.spellcheck = false;
+  area.rows = 1;
   area.value = String(value || "");
-  if(!area.value.trim()) area.placeholder = "(none)";
+  const isEmpty = !area.value.trim();
+  area.classList.toggle("is-empty", isEmpty);
+  if(isEmpty){
+    area.placeholder = "(none)";
+    area.style.height = "36px";
+  }
   return area;
 }
 
@@ -3821,14 +3834,8 @@ function renderDetailLoading(id){
   const dMeta = $("dMeta");
   if(dMeta) dMeta.textContent = `dedup:${it.dedup_flag||0}  model:${it.software||""}`;
 
-  const dSoft = $("dSoft");
-  if(dSoft) dSoft.textContent = it.software || "";
-  const dPotionUsage = $("dPotionUsage");
-  if(dPotionUsage) dPotionUsage.textContent = "-";
-  const dPreciseReferenceUsage = $("dPreciseReferenceUsage");
-  if(dPreciseReferenceUsage) dPreciseReferenceUsage.textContent = "-";
-  const dSampler = $("dSampler");
-  if(dSampler) dSampler.textContent = "-";
+  const dCompactMeta = $("dCompactMeta");
+  if(dCompactMeta) dCompactMeta.textContent = buildDetailCompactMeta(it);
   const dCreator = $("dCreator");
   if(dCreator) dCreator.textContent = it.creator || "";
 
@@ -3864,17 +3871,21 @@ function renderDetailLoading(id){
     }
   }
 
+  const overlay = $("overlay");
+  overlay?.classList.toggle("mobileDetail", mobile);
+
   const fixedBtns = $("overlayFixedBtns");
-  if(fixedBtns){
-    if(mobile) fixedBtns.classList.remove("hidden");
-    else fixedBtns.classList.add("hidden");
-  }
+  if(fixedBtns) fixedBtns.classList.toggle("hidden", !mobile);
 
   // links disabled until detail arrives
   const dlFile = $("dlFile");
   if(dlFile) dlFile.href = "#";
+  const dlFileDesktop = $("dlFileDesktop");
+  if(dlFileDesktop) dlFileDesktop.href = "#";
   const vf = $("viewFull");
   if(vf){ vf.href = "#"; vf.classList.add("hidden"); }
+  const vfDesktop = $("viewFullDesktop");
+  if(vfDesktop){ vfDesktop.href = "#"; vfDesktop.classList.add("hidden"); }
   const dlMeta = $("dlMeta");
   if(dlMeta) dlMeta.href = "#";
 
@@ -3947,14 +3958,8 @@ function renderDetailFull(d){
   const dMeta = $("dMeta");
   if(dMeta) dMeta.textContent = `${fmtBytes(d.file_bytes)}  dedup:${d.dedup_flag}  model:${d.model||""}${nsfw}${fav}`;
 
-  const dSoft = $("dSoft");
-  if(dSoft) dSoft.textContent = d.software || "";
-  const dPotionUsage = $("dPotionUsage");
-  if(dPotionUsage) dPotionUsage.textContent = d.uses_potion ? "使用" : "未使用";
-  const dPreciseReferenceUsage = $("dPreciseReferenceUsage");
-  if(dPreciseReferenceUsage) dPreciseReferenceUsage.textContent = d.uses_precise_reference ? "使用" : "未使用";
-  const dSampler = $("dSampler");
-  if(dSampler) dSampler.textContent = d.sampler || "-";
+  const dCompactMeta = $("dCompactMeta");
+  if(dCompactMeta) dCompactMeta.textContent = buildDetailCompactMeta(d);
   const dCreator = $("dCreator");
   if(dCreator) dCreator.textContent = d.creator || "";
 
@@ -3973,8 +3978,8 @@ function renderDetailFull(d){
         m.textContent = (src && by) ? `${src}  ${by}` : (src || by);
       }
       const u = $("ioUsage"); if(u){
-        const potion = d.uses_potion ? "使用" : "未使用";
-        const precise = d.uses_precise_reference ? "使用" : "未使用";
+        const potion = typeof d.uses_potion === "boolean" ? (d.uses_potion ? "〇" : "×") : "-";
+        const precise = typeof d.uses_precise_reference === "boolean" ? (d.uses_precise_reference ? "〇" : "×") : "-";
         const sampler = d.sampler || "-";
         u.textContent = `ポーション ${potion} / 精密参照 ${precise} / サンプラー ${sampler}`;
       }
@@ -3985,18 +3990,26 @@ function renderDetailFull(d){
   }
 
   // Mobile: keep favorite/close buttons fixed on top-right
+  const overlay = $("overlay");
+  overlay?.classList.toggle("mobileDetail", mobile);
+
   const fixedBtns = $("overlayFixedBtns");
-  if(fixedBtns){
-    if(mobile) fixedBtns.classList.remove("hidden");
-    else fixedBtns.classList.add("hidden");
-  }
+  if(fixedBtns) fixedBtns.classList.toggle("hidden", !mobile);
 
   const dlFile = $("dlFile");
   if(dlFile) dlFile.href = d.download_file;
+  const dlFileDesktop = $("dlFileDesktop");
+  if(dlFileDesktop) dlFileDesktop.href = d.download_file;
+  const viewHref = d.view_full || d.download_file;
   const vf = $("viewFull");
   if(vf){
-    vf.href = d.view_full || d.download_file;
-    vf.classList.toggle("hidden", !(d.view_full || d.download_file));
+    vf.href = viewHref;
+    vf.classList.toggle("hidden", !viewHref);
+  }
+  const vfDesktop = $("viewFullDesktop");
+  if(vfDesktop){
+    vfDesktop.href = viewHref;
+    vfDesktop.classList.toggle("hidden", !viewHref);
   }
   const dlMeta = $("dlMeta");
   if(dlMeta) dlMeta.href = d.download_meta;
@@ -4038,6 +4051,7 @@ async function openDetail(id){
   if(overlay){
     overlay.classList.remove("hidden");
     overlay.classList.add("open");
+    overlay.classList.toggle("mobileDetail", isMobile());
     overlay.setAttribute("aria-hidden", "false");
   }
   lockBodyScroll();
@@ -4084,6 +4098,7 @@ function closeDetail(){
   if(overlayImg) overlayImg.src = "";
   resetOverlayImage();
   $("overlayFixedBtns")?.classList.add("hidden");
+  $("overlay")?.classList.remove("mobileDetail");
   $("imgOverlayInfo")?.classList.add("hidden");
   resetDetailOverlayUiState();
   currentDetail = null;

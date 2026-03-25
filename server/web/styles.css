@@ -518,7 +518,7 @@ input:focus, select:focus{
 .sideList .sideItem.active .name{ color: rgba(255,255,255,0.95); }
 .sideList .sideItem.active .cnt{ color: rgba(255,255,255,0.82); }
 
-.galleryArea{ min-width: 0; }
+.galleryArea{ min-width: 0; display:flex; flex-direction:column; min-height:0; }
 .galleryHeader{
   display:flex;
   align-items:flex-end;
@@ -543,7 +543,7 @@ input:focus, select:focus{
 .miniSelect{ width:auto; min-width: 120px; padding: 8px 10px; border-radius: 14px; }
 .viewBtns{ display:flex; gap: 6px; padding-left: 6px; border-left:1px solid rgba(255,255,255,0.12); }
 
-.gridWrap{ margin-top: 12px; }
+.gridWrap{ margin-top: 10px; min-height: 0; }
 
 .grid{
   display:grid;
@@ -613,7 +613,7 @@ input:focus, select:focus{
 .tileLegacy .badge.nsfw{ border-color: rgba(255,78,109,0.32); background: rgba(255,78,109,0.16); }
 
 /* pager */
-.pager{ display:flex; justify-content:center; gap: 8px; padding: 14px 0 24px; }
+.pager{ position: sticky; bottom: 0; z-index: 8; display:flex; justify-content:center; gap: 8px; padding: 12px 0 14px; margin-top: 12px; background: linear-gradient(180deg, rgba(7,11,22,0) 0%, rgba(7,11,22,0.74) 30%, rgba(7,11,22,0.92) 100%); backdrop-filter: blur(10px); }
 .pager button{
   border:1px solid rgba(255,255,255,0.14);
   background: rgba(255,255,255,0.05);
@@ -805,12 +805,35 @@ input:focus, select:focus{
 }
 .overlayFixedBtns{
   position:absolute;
-  right: calc(18px + env(safe-area-inset-right));
-  top: calc(18px + env(safe-area-inset-top));
-  display:flex;
-  gap: 8px;
+  right: 12px;
+  top: 12px;
   z-index: 65;
+  display:none;
+  align-items:center;
+  gap: 8px;
+  padding: 5px;
+  max-width: calc(100% - 24px);
+  border-radius: 18px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: linear-gradient(180deg, rgba(8,12,24,0.20), rgba(8,12,24,0.12));
+  backdrop-filter: blur(6px);
+  box-shadow: 0 10px 28px rgba(0,0,0,0.22);
 }
+.desktopDetailActions{
+  position:static;
+  flex: 0 0 auto;
+  display:flex;
+  align-items:center;
+  gap: 8px;
+  align-self: flex-start;
+  justify-self: end;
+}
+.overlayActionBtn{
+  text-decoration:none;
+}
+.overlayActionBtn.hidden{ display:none; }
+.overlay:not(.mobileDetail) .overlayFixedBtns{ display:none !important; }
+.overlay.mobileDetail .overlayFixedBtns:not(.hidden){ display:flex; }
 
 .slide{
   position:relative;
@@ -823,19 +846,47 @@ input:focus, select:focus{
   padding: 12px;
   overflow:auto;
 }
-.slideHead{ display:flex; justify-content:space-between; align-items:flex-start; gap: 12px; padding: 6px 4px 10px; border-bottom: 1px solid rgba(255,255,255,0.10); margin-bottom: 10px; min-width: 0; }
+.slideHead{
+  display:flex;
+  flex-direction:column;
+  gap: 8px;
+  padding: 4px 4px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.10);
+  margin-bottom: 8px;
+  min-width: 0;
+}
+.slideHeadTop{
+  display:grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items:start;
+  gap: 12px;
+  min-width: 0;
+}
+.slideHeadMeta{ min-width: 0; }
 .slideHeadMain{ min-width: 0; flex: 1 1 auto; }
-.slideHeadActions{ flex: 0 0 auto; align-self: flex-start; }
-.dTitle{ font-weight: 950; letter-spacing: 0.25px; min-width: 0; max-width: 100%; line-height: 1.24; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; text-overflow: ellipsis; cursor: pointer; }
+.dTitle{
+  font-weight: 950;
+  letter-spacing: 0.25px;
+  min-width: 0;
+  max-width: 100%;
+  line-height: 1.2;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
 .dTitle.expanded{ display:block; overflow: visible; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
 .dSub{ font-size: 12px; color: rgba(255,255,255,0.72); margin-top: 4px; }
 .dMeta{ font-size: 12px; color: rgba(255,255,255,0.62); margin-top: 2px; }
-.dMiniLines{ display:flex; flex-wrap:wrap; gap: 8px 10px; margin-top: 8px; }
-.dMiniLine{ font-size: 12px; color: rgba(255,255,255,0.78); padding: 6px 10px; border-radius: 999px; border:1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.04); }
-.dMiniLine .k{ color: rgba(255,255,255,0.60); margin-right: 6px; }
+.dMiniLines{ display:flex; flex-direction:column; gap: 4px; margin-top: 6px; min-width: 0; }
+.dMiniLinesCompact{ gap: 3px; }
+.dMiniLine{ display:flex; align-items:center; gap: 6px; min-width: 0; font-size: 13px; color: rgba(255,255,255,0.78); }
+.dMiniLine .k{ color: rgba(255,255,255,0.60); white-space: nowrap; }
+.dMiniLine .v{ min-width: 0; }
+.dMiniSummaryLine .v{ display:block; white-space:normal; overflow:visible; text-overflow:clip; overflow-wrap:anywhere; word-break:break-word; line-height: 1.32; }
+.dCreatorLine .v{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
-.actions{ display:flex; flex-direction:column; gap: 8px; padding: 8px 4px 12px; }
-.actionPrimaryRow{ display:flex; gap: 8px; flex-wrap:wrap; }
+.actions{ display:flex; flex-direction:column; gap: 8px; padding: 5px 4px 11px; }
 .actionToggleRow{ display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; align-items: stretch; }
 .compactTrackToggle{
   appearance:none;
@@ -855,8 +906,8 @@ input:focus, select:focus{
 }
 .compactTrackToggle:hover{ transform: translateY(-1px); border-color: rgba(122,210,255,0.30); background: rgba(122,210,255,0.10); }
 .compactTrackToggleText{ display:flex; align-items:baseline; gap: 8px; min-width:0; }
-.compactTrackToggleLabel{ font-size: 12px; color: rgba(255,255,255,0.68); white-space: nowrap; }
-.compactTrackToggleValue{ font-size: 12px; font-weight: 800; letter-spacing: 0.2px; white-space: nowrap; }
+.compactTrackToggleLabel{ font-size: 15px; color: rgba(255,255,255,0.72); white-space: nowrap; }
+.compactTrackToggleValue{ font-size: 15px; font-weight: 800; letter-spacing: 0.2px; white-space: nowrap; }
 .compactTrack{
   position:relative;
   flex: 0 0 auto;
@@ -884,7 +935,7 @@ input:focus, select:focus{
 .tagTextBox{
   width:100%;
   margin-top: 10px;
-  min-height: 78px;
+  min-height: 58px;
   resize: vertical;
   border-radius: 14px;
   border:1px solid rgba(255,255,255,0.12);
@@ -894,6 +945,11 @@ input:focus, select:focus{
   font: inherit;
   font-size: 12px;
   line-height: 1.5;
+}
+.tagTextBox.is-empty{
+  min-height: 36px;
+  height: 36px;
+  resize: none;
 }
 .tagTextBox::placeholder{ color: rgba(255,255,255,0.42); }
 .pill{
@@ -909,18 +965,39 @@ input:focus, select:focus{
 }
 .pill:hover{ transform: translateY(-1px); border-color: rgba(122,210,255,0.30); background: rgba(122,210,255,0.10); }
 
-.section{ padding: 10px 4px; border-top: 1px solid rgba(255,255,255,0.10); }
-.secHead{ display:flex; align-items:center; justify-content:space-between; gap: 10px; }
-.secHead h3{ margin:0; font-size: 14px; letter-spacing: 0.2px; }
-.secBtns{ display:flex; gap: 6px; }
+.section{ padding: 8px 4px; border-top: 1px solid rgba(255,255,255,0.10); }
+.secHead{ display:flex; align-items:center; justify-content:space-between; gap: 8px; }
+.secHead h3{ margin:0; font-size: 19px; letter-spacing: 0.2px; line-height: 1.18; }
+.secBtns{ display:flex; gap: 6px; flex-wrap: nowrap; }
+.copyOnly .secHead{
+  display:flex;
+  flex-direction:column;
+  align-items:flex-start;
+  gap: 8px;
+}
+.copyOnly .secHead h3{
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.copyOnly .secBtns{
+  width: 100%;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 .mini{
   border:1px solid rgba(255,255,255,0.14);
   background: rgba(255,255,255,0.05);
   color: rgba(255,255,255,0.86);
-  padding: 6px 10px;
+  padding: 9px 16px;
   border-radius: 999px;
   cursor:pointer;
-  font-size: 12px;
+  font-size: 14px;
+  line-height: 1.1;
+  white-space: nowrap;
 }
 .mini:hover{ border-color: rgba(122,210,255,0.28); background: rgba(122,210,255,0.10); }
 
@@ -946,20 +1023,25 @@ input:focus, select:focus{
   background: rgba(215,166,255,0.16);
 }
 
-.tagBox{ display:flex; flex-wrap:wrap; gap: 8px; margin-top: 10px; }
+.tagBox{ display:flex; flex-wrap:wrap; gap: 5px; margin-top: 8px; }
 .tag, .tagBtn{
   display:inline-flex;
   align-items:center;
-  gap: 8px;
-  padding: 7px 10px;
-  border-radius: 999px;
+  gap: 5px;
+  max-width: 100%;
+  padding: 6px 10px;
+  border-radius: 10px;
   border:1px solid rgba(255,255,255,0.14);
   background: rgba(0,0,0,0.22);
   color: rgba(255,255,255,0.90);
   font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
 }
+.tagBtn.tagBtn-long{ font-size: 11.5px; padding-inline: 9px; }
+.tagBtn.tagBtn-xlong{ font-size: 11.1px; padding-inline: 8px; }
 /* tagBtn reset */
-.tagBtn{ appearance:none; -webkit-appearance:none; font: inherit; line-height: 1.2; }
+.tagBtn{ appearance:none; -webkit-appearance:none; font: inherit; line-height: 1.2; white-space: nowrap; }
 .tag .w{ color: rgba(255,255,255,0.60); }
 .tag:hover, .tagBtn:hover{ border-color: rgba(122,210,255,0.30); background: rgba(122,210,255,0.10); }
 
@@ -1017,6 +1099,7 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
 .imgOverlayInfo.expanded .ioTitle{ display:block; white-space: normal; overflow: visible; overflow-wrap: anywhere; word-break: break-word; }
 .ioSub{ font-size: 12px; color: rgba(255,255,255,0.72); margin-top: 4px; }
 .ioMeta{ font-size: 12px; color: rgba(255,255,255,0.62); margin-top: 2px; }
+.ioUsage{ font-size: 11px; color: rgba(255,255,255,0.62); margin-top: 2px; line-height: 1.35; }
 
 
 /* ===== Bookmark overlay ===== */
@@ -1135,6 +1218,15 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
   - Mobile: <= 1024px (iPad Air portrait is mobile)
   目的: 段階的に混ざらない / どの幅でも「モバイル」か「PC」どちらかに寄せる
 */
+@media (max-width: 1380px){
+  .slideHead{
+    padding-right: 160px;
+  }
+  .desktopDetailActions{
+    gap: 6px;
+  }
+}
+
 @media (max-width: 1024px){
   .mobileOnly{ display:inline-flex; }
   .desktopOnly{ display:none; }
@@ -1321,7 +1413,7 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
   .overlay{ align-items:center; justify-content:center; padding: 10px; }
   .overlayPanel{
     width: min(980px, 96vw);
-    height: min(920px, 92vh);
+    height: min(920px, calc(var(--vvh, 1vh) * 100 - 20px));
     min-height: 0;
     padding: 0;
     display:flex;
@@ -1349,6 +1441,28 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
     overscroll-behavior: contain;
   }
   .slideHead{ display:none; }
+  .desktopDetailActions{ display:none; }
+
+  .overlayFixedBtns{
+    display:flex;
+    top: calc(8px + env(safe-area-inset-top));
+    right: calc(8px + env(safe-area-inset-right));
+    gap: 5px;
+    padding: 3px;
+    border-radius: 14px;
+    max-width: calc(100% - 16px);
+    background: linear-gradient(180deg, rgba(8,12,24,0.18), rgba(8,12,24,0.10));
+    border-color: rgba(255,255,255,0.06);
+    backdrop-filter: blur(4px);
+    box-shadow: 0 8px 20px rgba(0,0,0,0.18);
+  }
+  .overlayFixedBtns .iconBtn{
+    width: 38px;
+    height: 38px;
+    padding: 0;
+    border-radius: 12px;
+    font-size: 16px;
+  }
 
   /* Detail image overlay */
   .imgOverlayInfo{
@@ -1362,6 +1476,7 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
   }
   .ioSub{ font-size: 11px; margin-top: 3px; }
   .ioMeta{ font-size: 11px; margin-top: 1px; }
+  .ioUsage{ font-size: 10px; margin-top: 2px; }
 
   /* Thumbnails (mobile): compact badges/labels */
   .tileBadges{ top: 2px; left: 0; right: 0; gap: 2px; }
@@ -1671,7 +1786,7 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
 
 /* ===== Tile (actual DOM structure from app.js) ===== */
 .tileImg{ position:relative; }
-.tileImg::before{ content:""; display:block; padding-top: 75%; }
+.tileImg::before{ content:""; display:block; padding-top: 65%; }
 .tileImg img{ position:absolute; inset:0; width:100%; height:100%; object-fit: cover; display:block; filter: contrast(1.08) saturate(1.10); }
 
 .tileBadges{
@@ -1893,23 +2008,27 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
 
 
 @media (max-width: 640px){
+  .actions{
+    gap: 5px;
+    padding: 2px 2px 8px;
+  }
   .actionToggleRow{
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 6px;
   }
   .compactTrackToggle{
     min-width: 0;
-    padding: 7px 9px;
+    padding: 6px 9px;
     gap: 8px;
     border-radius: 14px;
   }
   .compactTrackToggleText{
-    gap: 5px;
+    gap: 4px;
     min-width: 0;
   }
   .compactTrackToggleLabel,
   .compactTrackToggleValue{
-    font-size: 11px;
+    font-size: 12px;
   }
   .compactTrack{
     width: 38px;
@@ -1923,33 +2042,76 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
     transform: translateX(16px);
   }
 
-  .secHead{
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    align-items: start;
+  .detailTagSection{
+    padding: 7px 2px;
+  }
+  .detailTagSection .secHead{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
     gap: 6px;
-  }
-  .secHead h3{
-    min-width: 0;
-    max-width: 100%;
-    line-height: 1.3;
-    overflow-wrap: anywhere;
-    word-break: break-word;
-  }
-  .secBtns{
-    display: flex;
     flex-wrap: nowrap;
-    gap: 5px;
-    width: 100%;
   }
-  .mini{
-    white-space: nowrap;
-  }
-  .secBtns .mini{
+  .detailTagSection .secHead h3{
+    min-width: 0;
     flex: 0 1 auto;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.1;
+    font-size: 15px;
+  }
+  .detailTagSection .secBtns{
+    display:flex;
+    flex: 0 0 auto;
+    width: auto;
+    gap: 4px;
+  }
+  .detailTagSection .secBtns .mini{
+    flex: 0 0 auto;
     min-width: 0;
     padding: 5px 9px;
-    font-size: 11px;
+    font-size: 11.5px;
+  }
+  .copyOnly .secHead{
+    gap: 6px;
+  }
+  .copyOnly .secBtns{
+    width: 100%;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+  .detailTagSection .tagBox{
+    gap: 4px 3px;
+    margin-top: 7px;
+  }
+  .detailTagSection .tagBtn{
+    padding: 5px 8px;
+    border-radius: 8px;
+    border-color: rgba(255,255,255,0.18);
+    background: rgba(255,255,255,0.06);
+    font-size: 13px;
+    line-height: 1.12;
+  }
+  .detailTagSection .tagBtn.tagBtn-long{
+    font-size: 12.1px;
+    padding-inline: 8px;
+  }
+  .detailTagSection .tagBtn.tagBtn-xlong{
+    font-size: 11.6px;
+    padding-inline: 7px;
+  }
+  .detailTagSection .tagBtn .w{
+    opacity: 0.76;
+  }
+  .tagTextBox{
+    margin-top: 7px;
+    min-height: 52px;
+    padding: 8px 10px;
+  }
+  .tagTextBox.is-empty{
+    min-height: 34px;
+    height: 34px;
   }
 }
 

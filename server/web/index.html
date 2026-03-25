@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>NIM</title>
-  <link rel="stylesheet" href="/styles.css?v=63" />
+  <link rel="stylesheet" href="/styles.css?v=64" />
 </head>
 <body>
   <div class="bg" aria-hidden="true"></div>
@@ -84,7 +84,7 @@
             </div>
 
             <div class="toolItem toolRight">
-              <label>メインプロンプト<br/>重複排除</label>
+              <label>重複排除</label>
               <div class="toggleRow">
                 <button id="dedupToggle" class="toggle off">OFF</button>
               </div>
@@ -251,12 +251,14 @@
 
     <div id="overlay" class="overlay" aria-hidden="true">
       <div class="overlayBg" id="overlayBg"></div>
-      <div id="overlayFixedBtns" class="overlayFixedBtns hidden" aria-hidden="true">
-        <button id="favDetailBtnFixed" class="iconBtn" aria-label="ブックマーク" title="ブックマーク"><span class="icon">☆</span></button>
-        <button id="closeOverlayFixed" class="iconBtn" aria-label="閉じる"><span class="icon">✕</span></button>
-      </div>
       <div class="overlayPanel">
         <div class="overlayImage" id="overlayImageBox">
+          <div id="overlayFixedBtns" class="overlayFixedBtns hidden" aria-hidden="true">
+            <a id="viewFull" class="iconBtn overlayActionBtn" href="#" target="_blank" rel="noopener" aria-label="全画面表示" title="全画面表示"><span class="icon">⛶</span></a>
+            <a id="dlFile" class="iconBtn overlayActionBtn" href="#" download aria-label="ダウンロード" title="ダウンロード"><span class="icon">↓</span></a>
+            <button id="favDetailBtnFixed" class="iconBtn" aria-label="ブックマーク" title="ブックマーク"><span class="icon">☆</span></button>
+            <button id="closeOverlayFixed" class="iconBtn" aria-label="閉じる" title="閉じる"><span class="icon">✕</span></button>
+          </div>
           <div id="overlayThumb" class="overlayThumb" aria-hidden="true"></div>
           <img id="overlayImg" />
           <div id="overlayImgLoading" class="overlayImgLoading hidden" aria-hidden="true">
@@ -267,34 +269,32 @@
             <div id="ioTitle" class="ioTitle"></div>
             <div id="ioSub" class="ioSub"></div>
             <div id="ioMeta" class="ioMeta"></div>
+            <div id="ioUsage" class="ioUsage"></div>
           </div>
         </div>
 
         <aside class="slide" id="slide">
           <div class="slideHead">
-            <div class="slideHeadMain">
+            <div class="slideHeadTop">
               <div id="dTitle" class="dTitle"></div>
-              <div id="dSub" class="dSub"></div>
-              <div id="dMeta" class="dMeta"></div>
-              <div class="dMiniLines">
-                <div class="dMiniLine"><span class="k">ソフト</span><span id="dSoft" class="v"></span></div>
-                <div class="dMiniLine"><span class="k">ポーション</span><span id="dPotionUsage" class="v"></span></div>
-                <div class="dMiniLine"><span class="k">精密参照</span><span id="dPreciseReferenceUsage" class="v"></span></div>
-                <div class="dMiniLine"><span class="k">サンプラー</span><span id="dSampler" class="v"></span></div>
-                <div class="dMiniLine"><span class="k">制作者</span><span id="dCreator" class="v"></span><button id="addCreatorFromDetailBtn" class="miniIconBtn" type="button" title="作者一覧へ登録" aria-label="作者一覧へ登録"><svg class="icoPlus" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button></div>
+              <div class="slideHeadActions desktopDetailActions" aria-label="詳細アクション">
+                <a id="viewFullDesktop" class="iconBtn overlayActionBtn" href="#" target="_blank" rel="noopener" aria-label="全画面表示" title="全画面表示"><span class="icon">⛶</span></a>
+                <a id="dlFileDesktop" class="iconBtn overlayActionBtn" href="#" download aria-label="ダウンロード" title="ダウンロード"><span class="icon">↓</span></a>
+                <button id="favDetailBtn" class="iconBtn" aria-label="ブックマーク" title="ブックマーク"><span class="icon">☆</span></button>
+                <button id="closeOverlay" class="iconBtn" aria-label="閉じる" title="閉じる"><span class="icon">✕</span></button>
               </div>
             </div>
-            <div class="row slideHeadActions" style="gap:6px">
-              <button id="favDetailBtn" class="iconBtn" aria-label="ブックマーク" title="ブックマーク"><span class="icon">☆</span></button>
-              <button id="closeOverlay" class="iconBtn" aria-label="閉じる"><span class="icon">✕</span></button>
+            <div class="slideHeadMeta">
+              <div id="dSub" class="dSub"></div>
+              <div id="dMeta" class="dMeta"></div>
+              <div class="dMiniLines dMiniLinesCompact">
+                <div class="dMiniLine dMiniSummaryLine"><span id="dCompactMeta" class="v"></span></div>
+                <div class="dMiniLine dCreatorLine"><span class="k">制作者</span><span id="dCreator" class="v"></span><button id="addCreatorFromDetailBtn" class="miniIconBtn" type="button" title="作者一覧へ登録" aria-label="作者一覧へ登録"><svg class="icoPlus" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button></div>
+              </div>
             </div>
           </div>
 
           <div class="actions">
-            <div class="actionPrimaryRow">
-              <a id="viewFull" class="pill" href="#" target="_blank" rel="noopener">フル表示</a>
-              <a id="dlFile" class="pill" href="#" download>元ファイル</a>
-            </div>
             <div class="actionToggleRow">
               <button id="detailTagViewToggle" class="compactTrackToggle" type="button" aria-label="表示形式切替" aria-pressed="false">
                 <span class="compactTrackToggleText">
@@ -314,56 +314,56 @@
           </div>
 
 
-          <div class="section">
+          <div class="section detailTagSection">
             <div class="secHead">
               <h3>アーティスト</h3>
               <div class="secBtns">
                 <button class="mini" title="括弧/数値強調を保持したままコピーします" data-copyall="artist_keep">全コピー</button>
-                <button class="mini" title="括弧/数値強調を外してコピーします" data-copyall="artist_plain">全コピー(強調解除)</button>
+                <button class="mini" title="括弧/数値強調を外してコピーします" data-copyall="artist_plain">全コピー(解除)</button>
               </div>
             </div>
             <div id="secArtist" class="tagBox"></div>
           </div>
 
-          <div class="section">
+          <div class="section detailTagSection">
             <div class="secHead">
               <h3>クオリティ</h3>
               <div class="secBtns">
                 <button class="mini" title="括弧/数値強調を保持したままコピーします" data-copyall="quality_keep">全コピー</button>
-                <button class="mini" title="括弧/数値強調を外してコピーします" data-copyall="quality_plain">全コピー(強調解除)</button>
+                <button class="mini" title="括弧/数値強調を外してコピーします" data-copyall="quality_plain">全コピー(解除)</button>
               </div>
             </div>
             <div id="secQuality" class="tagBox"></div>
           </div>
 
-          <div class="section">
+          <div class="section detailTagSection">
             <div class="secHead">
               <h3>キャラクター</h3>
               <div class="secBtns">
                 <button class="mini" title="括弧/数値強調を保持したままコピーします" data-copyall="character_keep">全コピー</button>
-                <button class="mini" title="括弧/数値強調を外してコピーします" data-copyall="character_plain">全コピー(強調解除)</button>
+                <button class="mini" title="括弧/数値強調を外してコピーします" data-copyall="character_plain">全コピー(解除)</button>
               </div>
             </div>
             <div id="secCharacter" class="tagBox"></div>
           </div>
 
-          <div class="section">
+          <div class="section detailTagSection">
             <div class="secHead">
               <h3>その他</h3>
               <div class="secBtns">
                 <button class="mini" title="括弧/数値強調を保持したままコピーします" data-copyall="other_keep">全コピー</button>
-                <button class="mini" title="括弧/数値強調を外してコピーします" data-copyall="other_plain">全コピー(強調解除)</button>
+                <button class="mini" title="括弧/数値強調を外してコピーします" data-copyall="other_plain">全コピー(解除)</button>
               </div>
             </div>
             <div id="secOther" class="tagBox"></div>
           </div>
 
-          <div class="section">
+          <div class="section detailTagSection">
             <div class="secHead">
               <h3>ネガティブ</h3>
               <div class="secBtns">
                 <button class="mini" title="括弧/数値強調を保持したままコピーします" data-copyall="negative_keep">全コピー</button>
-                <button class="mini" title="括弧/数値強調を外してコピーします" data-copyall="negative_plain">全コピー(強調解除)</button>
+                <button class="mini" title="括弧/数値強調を外してコピーします" data-copyall="negative_plain">全コピー(解除)</button>
               </div>
             </div>
             <div id="secNegative" class="tagBox"></div>
@@ -380,7 +380,7 @@
     </div>
   </div>
 
-  <script type="module" src="/app.js?v=20260321_02"></script>
+  <script type="module" src="/app.js?v=20260323_04"></script>
 
   <div id="filterOverlay" class="filterOverlay hidden" aria-hidden="true">
     <div id="filterOverlayBg" class="filterOverlayBg"></div>

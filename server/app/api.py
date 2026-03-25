@@ -46,8 +46,8 @@ from .services.derivatives import (
 )
 from .services import stats as stats_service
 from .services.prompt_view import (
+    build_grouped_tags_payload,
     build_prompt_view_payload,
-    ensure_prompt_view_cache,
     parse_prompt_multiline_to_tag_objs,
 )
 from .services.gallery_query import (
@@ -2570,6 +2570,9 @@ def _reparse_one(conn: sqlite3.Connection, image_id: int) -> dict:
             if ptxt and ("nsfw" in ptxt.lower()):
                 is_nsfw = 1
 
+        grouped_tags_json = json.dumps(build_grouped_tags_payload(tag_rows), ensure_ascii=False)
+        uc_tags_json = json.dumps(parse_prompt_multiline_to_tag_objs(conn, main_negative_combined_raw), ensure_ascii=False)
+
         # Per-image unique tag set for cache updates
         new_tag_cat: dict[str, int | None] = {}
         for (canonical, _tag_text, _tag_raw, cat, _etype, _brace, _numw, _group, _src_mask, _seq) in _iter_tag_rows(tag_rows):
@@ -2584,7 +2587,7 @@ def _reparse_one(conn: sqlite3.Connection, image_id: int) -> dict:
             UPDATE images
             SET software=?, model_name=?,
                 prompt_positive_raw=?, prompt_negative_raw=?, prompt_character_raw=?,
-                params_json=?, character_entries_json=?, main_negative_combined_raw=?, potion_raw=?, has_potion=?, uses_potion=?, uses_precise_reference=?, sampler=?, metadata_raw=?,
+                params_json=?, character_entries_json=?, main_negative_combined_raw=?, grouped_tags_json=?, uc_tags_json=?, potion_raw=?, has_potion=?, uses_potion=?, uses_precise_reference=?, sampler=?, metadata_raw=?,
                 main_sig_hash=?, dedup_flag=?, is_nsfw=?
             WHERE id=?
             """,
@@ -2597,6 +2600,8 @@ def _reparse_one(conn: sqlite3.Connection, image_id: int) -> dict:
                 params_json,
                 character_entries_json,
                 main_negative_combined_raw,
+                grouped_tags_json,
+                uc_tags_json,
                 potion_raw,
                 has_potion,
                 uses_potion,
@@ -5168,6 +5173,9 @@ def _upload_image_core(
         if ptxt and ("nsfw" in ptxt.lower()):
             is_nsfw = 1
 
+    grouped_tags_json = json.dumps(build_grouped_tags_payload(tag_rows), ensure_ascii=False)
+    uc_tags_json = json.dumps(parse_prompt_multiline_to_tag_objs(conn, main_negative_combined_raw), ensure_ascii=False)
+
     sig = None
     dedup_flag = 1
     if canonical_main:
@@ -5181,12 +5189,12 @@ def _upload_image_core(
         INSERT INTO images(
           public_id, sha256, original_filename, ext, mime, width, height, file_mtime_utc, uploader_user_id,
           software, model_name, prompt_positive_raw, prompt_negative_raw, params_json,
-          prompt_character_raw, character_entries_json, main_negative_combined_raw,
+          prompt_character_raw, character_entries_json, main_negative_combined_raw, grouped_tags_json, uc_tags_json,
           seed,
           potion_raw, has_potion, uses_potion, uses_precise_reference, sampler, metadata_raw, main_sig_hash, dedup_flag
           , full_meta_hash
           , favorite, is_nsfw
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             _new_public_id(),
@@ -5206,6 +5214,8 @@ def _upload_image_core(
             prompt_char,
             character_entries_json,
             main_negative_combined_raw,
+            grouped_tags_json,
+            uc_tags_json,
             seed,
             potion_raw,
             has_potion,
@@ -5646,6 +5656,9 @@ def _upload_image_from_path_core(
         if ptxt and ("nsfw" in ptxt.lower()):
             is_nsfw = 1
 
+    grouped_tags_json = json.dumps(build_grouped_tags_payload(tag_rows), ensure_ascii=False)
+    uc_tags_json = json.dumps(parse_prompt_multiline_to_tag_objs(conn, main_negative_combined_raw), ensure_ascii=False)
+
     sig = None
     dedup_flag = 1
     if canonical_main:
@@ -5659,12 +5672,12 @@ def _upload_image_from_path_core(
         INSERT INTO images(
           public_id, sha256, original_filename, ext, mime, width, height, file_mtime_utc, uploader_user_id,
           software, model_name, prompt_positive_raw, prompt_negative_raw, params_json,
-          prompt_character_raw, character_entries_json, main_negative_combined_raw,
+          prompt_character_raw, character_entries_json, main_negative_combined_raw, grouped_tags_json, uc_tags_json,
           seed,
           potion_raw, has_potion, uses_potion, uses_precise_reference, sampler, metadata_raw, main_sig_hash, dedup_flag
           , full_meta_hash
           , favorite, is_nsfw
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             _new_public_id(),
@@ -5684,6 +5697,8 @@ def _upload_image_from_path_core(
             prompt_char,
             character_entries_json,
             main_negative_combined_raw,
+            grouped_tags_json,
+            uc_tags_json,
             seed,
             potion_raw,
             has_potion,
@@ -7537,16 +7552,29 @@ def _parse_prompt_multiline_to_tag_objs(conn, raw: str | None) -> list[dict]:
     return parse_prompt_multiline_to_tag_objs(conn, raw)
 
 
+def _row_get_optional(row: sqlite3.Row | dict, key: str, default=None):
+    if isinstance(row, dict):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return default
+
+
+
 def _resolve_generation_usage_fields(row: sqlite3.Row | dict) -> tuple[bool, bool, str | None]:
-    uses_potion = bool(row["uses_potion"] if row["uses_potion"] is not None else 0)
-    uses_precise_reference = bool(row["uses_precise_reference"] if row["uses_precise_reference"] is not None else 0)
-    sampler = row["sampler"] if row["sampler"] else None
+    uses_potion_value = _row_get_optional(row, "uses_potion")
+    uses_precise_reference_value = _row_get_optional(row, "uses_precise_reference")
+    sampler_value = _row_get_optional(row, "sampler")
+    uses_potion = bool(uses_potion_value if uses_potion_value is not None else 0)
+    uses_precise_reference = bool(uses_precise_reference_value if uses_precise_reference_value is not None else 0)
+    sampler = sampler_value if sampler_value else None
     if uses_potion and uses_precise_reference and sampler is not None:
         return uses_potion, uses_precise_reference, sampler
 
     detected_potion, detected_precise, detected_sampler = detect_generation_usage_from_storage(
-        row["params_json"],
-        row["metadata_raw"],
+        _row_get_optional(row, "params_json"),
+        _row_get_optional(row, "metadata_raw"),
     )
     if not uses_potion:
         uses_potion = bool(detected_potion)
@@ -7583,7 +7611,13 @@ def _get_visible_image_rows(conn: sqlite3.Connection, ids: list[int], viewer: di
     lid = _normalize_bm_list_id_for_visibility(conn, viewer=viewer, bm_list_id=bm_list_id)
 
     sql = (
-        "SELECT images.*, users.username AS creator, COALESCE(image_files.size, LENGTH(image_files.bytes)) AS file_bytes "
+        "SELECT "
+        "images.id, images.public_id, images.original_filename, images.mime, images.width, images.height, "
+        "images.file_mtime_utc, images.uploaded_at_utc, images.software, images.model_name, images.dedup_flag, "
+        "images.is_nsfw, images.prompt_positive_raw, images.prompt_negative_raw, images.prompt_character_raw, "
+        "images.character_entries_json, images.main_negative_combined_raw, images.grouped_tags_json, images.uc_tags_json, "
+        "images.params_json, images.has_potion, images.uses_potion, images.uses_precise_reference, images.sampler, "
+        "users.username AS creator, COALESCE(image_files.size, LENGTH(image_files.bytes)) AS file_bytes "
         "FROM images "
         "JOIN users ON users.id=images.uploader_user_id "
         "JOIN image_files ON image_files.image_id = images.id "
@@ -7615,26 +7649,30 @@ def _get_visible_image_rows(conn: sqlite3.Connection, ids: list[int], viewer: di
     return {int(r["id"]): r for r in rows}
 
 
-def _fetch_tags_by_image_ids(conn: sqlite3.Connection, ids: list[int]) -> tuple[dict[int, list[sqlite3.Row]], bool]:
-    if not ids:
-        return {}, _table_has_col(conn, "image_tags", "seq")
-    has_seq = _table_has_col(conn, "image_tags", "seq")
-    cols = "image_id, tag_canonical, tag_text, tag_raw, category, emphasis_type, brace_level, numeric_weight"
-    if has_seq:
-        cols += ", seq"
-    order_sql = " ORDER BY image_id ASC, category ASC, tag_canonical ASC"
-    if has_seq:
-        order_sql = " ORDER BY image_id ASC, seq ASC, category ASC, tag_canonical ASC"
-    placeholders = ",".join("?" for _ in ids)
-    rows = conn.execute(
-        f"SELECT {cols} FROM image_tags WHERE image_id IN ({placeholders})" + order_sql,
-        tuple(ids),
-    ).fetchall()
-    grouped: dict[int, list[sqlite3.Row]] = {}
-    for row in rows:
-        iid = int(row["image_id"])
-        grouped.setdefault(iid, []).append(row)
-    return grouped, has_seq
+def _json_load_list(raw: str | None) -> list:
+    if raw is None:
+        return []
+    try:
+        loaded = json.loads(str(raw))
+    except Exception:
+        return []
+    return loaded if isinstance(loaded, list) else []
+
+
+def _json_load_grouped_tags(raw: str | None) -> dict[str, list]:
+    grouped = {"artist": [], "quality": [], "character": [], "other": []}
+    if raw is None:
+        return grouped
+    try:
+        loaded = json.loads(str(raw))
+    except Exception:
+        return grouped
+    if not isinstance(loaded, dict):
+        return grouped
+    for key in grouped.keys():
+        value = loaded.get(key)
+        grouped[key] = value if isinstance(value, list) else []
+    return grouped
 
 
 def _fetch_favorite_ids(conn: sqlite3.Connection, user_id: int | None, ids: list[int]) -> set[int]:
@@ -7665,66 +7703,20 @@ def _build_image_detail_payloads(conn: sqlite3.Connection, ids: list[int], *, vi
         raise HTTPException(status_code=404, detail="not found")
 
     t0 = time.perf_counter()
-    tags_by_id, has_seq = _fetch_tags_by_image_ids(conn, id_list)
-    tag_query_ms = round((time.perf_counter() - t0) * 1000.0, 3)
-
-    t0 = time.perf_counter()
     favorite_ids = _fetch_favorite_ids(conn, (int(viewer["id"]) if viewer and viewer.get("id") is not None else None), id_list)
     favorite_ms = round((time.perf_counter() - t0) * 1000.0, 3)
 
-    grouped_tags_ms = 0.0
-    prompt_cache_ms = 0.0
-    uc_tags_ms = 0.0
+    json_decode_ms = 0.0
     payloads: dict[int, dict] = {}
-    prompt_cache_meta_by_id: dict[int, dict] = {}
-    tag_total = 0
-    cached_character_entries_count = 0
-    cached_main_negative_count = 0
 
     for iid in id_list:
         img = image_rows[iid]
-        cached_character_entries = bool(str(img["character_entries_json"] or "").strip())
-        cached_main_negative = bool(str(img["main_negative_combined_raw"] or "").strip())
-        if cached_character_entries:
-            cached_character_entries_count += 1
-        if cached_main_negative:
-            cached_main_negative_count += 1
 
         t1 = time.perf_counter()
-        grouped = {"artist": [], "quality": [], "character": [], "other": []}
-        tags = tags_by_id.get(iid, [])
-        tag_total += len(tags)
-        for t in tags:
-            canonical = t["tag_canonical"]
-            cat = int(t["category"]) if t["category"] is not None else None
-            group = _category_group(conn, canonical, cat)
-            grouped[group].append({
-                "canonical": canonical,
-                "text": t["tag_text"] or "",
-                "raw_one": t["tag_raw"] or "",
-                "emphasis_type": t["emphasis_type"],
-                "brace_level": t["brace_level"],
-                "numeric_weight": t["numeric_weight"],
-            })
-        grouped_tags_ms += (time.perf_counter() - t1) * 1000.0
-
-        t1 = time.perf_counter()
-        character_entries, main_negative_combined_raw, prompt_cache_meta = ensure_prompt_view_cache(
-            conn,
-            image_id=int(iid),
-            character_entries_json=img["character_entries_json"],
-            main_negative_combined_raw=img["main_negative_combined_raw"],
-            prompt_negative_raw=img["prompt_negative_raw"],
-            prompt_character_raw=img["prompt_character_raw"],
-            params_json_or_obj=img["params_json"],
-            return_meta=True,
-        )
-        prompt_cache_ms += (time.perf_counter() - t1) * 1000.0
-        prompt_cache_meta_by_id[iid] = prompt_cache_meta
-
-        t1 = time.perf_counter()
-        uc_tags = parse_prompt_multiline_to_tag_objs(conn, main_negative_combined_raw)
-        uc_tags_ms += (time.perf_counter() - t1) * 1000.0
+        character_entries = _json_load_list(img["character_entries_json"])
+        grouped_tags = _json_load_grouped_tags(img["grouped_tags_json"])
+        uc_tags = _json_load_list(img["uc_tags_json"])
+        json_decode_ms += (time.perf_counter() - t1) * 1000.0
 
         uses_potion, uses_precise_reference, sampler = _resolve_generation_usage_fields(img)
 
@@ -7748,13 +7740,13 @@ def _build_image_detail_payloads(conn: sqlite3.Connection, ids: list[int], *, vi
             "prompt_negative_raw": img["prompt_negative_raw"],
             "prompt_character_raw": img["prompt_character_raw"],
             "character_entries": character_entries,
-            "main_negative_combined_raw": main_negative_combined_raw,
+            "main_negative_combined_raw": img["main_negative_combined_raw"],
             "params_json": img["params_json"],
             "has_potion": bool(img["has_potion"] or uses_potion),
             "uses_potion": uses_potion,
             "uses_precise_reference": uses_precise_reference,
             "sampler": sampler,
-            "tags": grouped,
+            "tags": grouped_tags,
             "uc_tags": uc_tags,
             "thumb": _append_bm_list_id_to_url(_thumb_url(conn, iid, kind="grid"), bm_list_id),
             "overlay": _append_bm_list_id_to_url(_thumb_url(conn, iid, kind="overlay"), bm_list_id),
@@ -7766,17 +7758,9 @@ def _build_image_detail_payloads(conn: sqlite3.Connection, ids: list[int], *, vi
 
     metrics = {
         "count": len(id_list),
-        "has_seq": has_seq,
         "visible_ms": visible_ms,
-        "tag_query_ms": tag_query_ms,
-        "group_tags_ms": round(grouped_tags_ms, 3),
-        "prompt_cache_ms": round(prompt_cache_ms, 3),
-        "uc_tags_ms": round(uc_tags_ms, 3),
+        "json_decode_ms": round(json_decode_ms, 3),
         "favorite_ms": favorite_ms,
-        "tag_count": tag_total,
-        "cached_character_entries_count": cached_character_entries_count,
-        "cached_main_negative_count": cached_main_negative_count,
-        "prompt_cache_meta_by_id": prompt_cache_meta_by_id,
         "total_ms": round((time.perf_counter() - started) * 1000.0, 3),
     }
     return payloads, metrics
@@ -7801,16 +7785,9 @@ def image_detail(image_id: int, request: Request, bm_list_id: int | None = None,
             detail_mode=request.headers.get("x-nim-detail-mode") or None,
             visible_ms=metrics.get("visible_ms"),
             image_row_ms=metrics.get("visible_ms"),
-            tag_query_ms=metrics.get("tag_query_ms"),
-            group_tags_ms=metrics.get("group_tags_ms"),
-            prompt_cache_ms=metrics.get("prompt_cache_ms"),
-            uc_tags_ms=metrics.get("uc_tags_ms"),
+            json_decode_ms=metrics.get("json_decode_ms"),
             favorite_ms=metrics.get("favorite_ms"),
             total_ms=metrics.get("total_ms"),
-            tag_count=metrics.get("tag_count"),
-            cached_character_entries=bool(metrics.get("cached_character_entries_count")),
-            cached_main_negative=bool(metrics.get("cached_main_negative_count")),
-            prompt_cache_meta=(metrics.get("prompt_cache_meta_by_id") or {}).get(int(image_id)),
         )
         return payload
     finally:
@@ -7835,15 +7812,9 @@ async def images_detail_batch(request: Request, user: dict = Depends(get_user)):
             detail_mode=request.headers.get("x-nim-detail-mode") or None,
             count=metrics.get("count"),
             visible_ms=metrics.get("visible_ms"),
-            tag_query_ms=metrics.get("tag_query_ms"),
-            group_tags_ms=metrics.get("group_tags_ms"),
-            prompt_cache_ms=metrics.get("prompt_cache_ms"),
-            uc_tags_ms=metrics.get("uc_tags_ms"),
+            json_decode_ms=metrics.get("json_decode_ms"),
             favorite_ms=metrics.get("favorite_ms"),
             total_ms=metrics.get("total_ms"),
-            tag_count=metrics.get("tag_count"),
-            cached_character_entries_count=metrics.get("cached_character_entries_count"),
-            cached_main_negative_count=metrics.get("cached_main_negative_count"),
         )
         ordered = {str(iid): payloads[iid] for iid in ids if iid in payloads}
         return {"items": ordered}

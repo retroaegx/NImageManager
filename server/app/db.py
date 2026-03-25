@@ -430,6 +430,8 @@ def migrate_db(conn: sqlite3.Connection) -> None:
     _ensure_col("images", "prompt_character_raw", "prompt_character_raw TEXT")
     _ensure_col("images", "character_entries_json", "character_entries_json TEXT")
     _ensure_col("images", "main_negative_combined_raw", "main_negative_combined_raw TEXT")
+    _ensure_col("images", "grouped_tags_json", "grouped_tags_json TEXT")
+    _ensure_col("images", "uc_tags_json", "uc_tags_json TEXT")
     _ensure_col("images", "seed", "seed INTEGER")
     _ensure_col("images", "params_json", "params_json TEXT")
     _ensure_col("images", "potion_raw", "potion_raw BLOB")
@@ -698,6 +700,50 @@ def migrate_db(conn: sqlite3.Connection) -> None:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_image_tags_image ON image_tags(image_id);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_image_tags_tag_image ON image_tags(tag_canonical, image_id);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_image_tags_image_seq ON image_tags(image_id, seq);")
+    except Exception:
+        pass
+
+    try:
+        if (
+            _has_col("images", "grouped_tags_json")
+            and _has_col("images", "uc_tags_json")
+            and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='image_tags'").fetchone()
+        ):
+            from .services.prompt_view import build_grouped_tags_payload, parse_prompt_multiline_to_tag_objs
+
+            pending_rows = conn.execute(
+                "SELECT id, main_negative_combined_raw, grouped_tags_json, uc_tags_json FROM images WHERE grouped_tags_json IS NULL OR uc_tags_json IS NULL"
+            ).fetchall()
+            if pending_rows:
+                has_seq = _has_col("image_tags", "seq")
+                ids = [int(r["id"]) for r in pending_rows]
+                for start in range(0, len(ids), 500):
+                    chunk_ids = ids[start : start + 500]
+                    placeholders = ",".join("?" for _ in chunk_ids)
+                    order_sql = " ORDER BY image_id ASC, category ASC, tag_canonical ASC"
+                    if has_seq:
+                        order_sql = " ORDER BY image_id ASC, seq ASC, category ASC, tag_canonical ASC"
+                    tag_rows = conn.execute(
+                        (f"SELECT image_id, tag_canonical, tag_text, tag_raw, category, emphasis_type, brace_level, numeric_weight" + (", seq" if has_seq else "") + f" FROM image_tags WHERE image_id IN ({placeholders})" + order_sql),
+                        tuple(chunk_ids),
+                    ).fetchall()
+                    tags_by_id: dict[int, list[sqlite3.Row]] = {}
+                    for row in tag_rows:
+                        iid = int(row["image_id"])
+                        tags_by_id.setdefault(iid, []).append(row)
+                    pending_by_id = {int(r["id"]): r for r in pending_rows[start : start + 500]}
+                    for iid in chunk_ids:
+                        row = pending_by_id[iid]
+                        grouped_json = row["grouped_tags_json"]
+                        if grouped_json is None:
+                            grouped_json = json.dumps(build_grouped_tags_payload(tags_by_id.get(iid, [])), ensure_ascii=False)
+                        uc_tags_json = row["uc_tags_json"]
+                        if uc_tags_json is None:
+                            uc_tags_json = json.dumps(parse_prompt_multiline_to_tag_objs(conn, row["main_negative_combined_raw"]), ensure_ascii=False)
+                        conn.execute(
+                            "UPDATE images SET grouped_tags_json=?, uc_tags_json=? WHERE id=?",
+                            (grouped_json, uc_tags_json, iid),
+                        )
     except Exception:
         pass
 
@@ -1085,6 +1131,8 @@ CREATE TABLE IF NOT EXISTS images (
   prompt_character_raw  TEXT,
   character_entries_json TEXT,
   main_negative_combined_raw TEXT,
+  grouped_tags_json    TEXT,
+  uc_tags_json         TEXT,
   seed                  INTEGER,
   params_json           TEXT,
   potion_raw            BLOB,

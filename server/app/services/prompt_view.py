@@ -74,11 +74,6 @@ def extract_character_negative_prompt_raw(params_json_or_obj: Any) -> str:
     return ""
 
 
-def _lookup_alias(conn: sqlite3.Connection, normalized: str) -> str:
-    # Alias/canonical remapping is intentionally disabled.
-    return str(normalized or "").strip()
-
-
 def _get_tag_category(conn: sqlite3.Connection, canonical: str) -> int | None:
     if not canonical:
         return None
@@ -302,84 +297,60 @@ def parse_prompt_multiline_to_tag_objs(conn: sqlite3.Connection, raw: str | None
     return out
 
 
-def ensure_prompt_view_cache(
-    conn: sqlite3.Connection,
-    *,
-    image_id: int,
-    character_entries_json: str | None,
-    main_negative_combined_raw: str | None,
-    prompt_negative_raw: str | None,
-    prompt_character_raw: str | None,
-    params_json_or_obj: Any,
-    return_meta: bool = False,
-) -> tuple[list[dict], str] | tuple[list[dict], str, dict]:
-    import time
+def _row_get(row: Any, key: str, index: int, default: Any = None) -> Any:
+    if row is None:
+        return default
+    try:
+        if hasattr(row, "keys") and key in row.keys():
+            value = row[key]
+            return default if value is None else value
+    except Exception:
+        pass
+    try:
+        value = row[index]
+        return default if value is None else value
+    except Exception:
+        return default
 
-    total_started = time.perf_counter()
-    meta = {
-        "cache_hit": False,
-        "loaded_json": False,
-        "main_negative_present": False,
-        "json_load_ms": 0.0,
-        "build_payload_ms": 0.0,
-        "update_ms": 0.0,
-        "commit_ok": None,
-        "total_ms": 0.0,
+
+def tag_group_for_category(category: Any) -> str:
+    try:
+        cat = int(category) if category is not None else None
+    except Exception:
+        cat = None
+    if cat == 1:
+        return "artist"
+    if cat == 4:
+        return "character"
+    if cat == 5:
+        return "quality"
+    return "other"
+
+
+def build_grouped_tags_payload(tag_rows: list[Any] | tuple[Any, ...]) -> dict[str, list[dict]]:
+    grouped: dict[str, list[dict]] = {
+        "artist": [],
+        "quality": [],
+        "character": [],
+        "other": [],
     }
-    character_entries: list[dict] = []
-    main_negative = str(main_negative_combined_raw or "").strip()
-    character_entries_cached = False
-    main_negative_cached = main_negative_combined_raw is not None
-    meta["main_negative_present"] = main_negative_cached
-
-    json_started = time.perf_counter()
-    try:
-        if character_entries_json is not None:
-            raw_json = str(character_entries_json).strip()
-            if raw_json:
-                loaded = json.loads(raw_json)
-                if isinstance(loaded, list):
-                    character_entries = loaded
-                    meta["loaded_json"] = True
-                    character_entries_cached = True
-            else:
-                character_entries = []
-                meta["loaded_json"] = True
-                character_entries_cached = True
-    except Exception:
-        character_entries = []
-        character_entries_cached = False
-    meta["json_load_ms"] = round((time.perf_counter() - json_started) * 1000.0, 3)
-
-    if character_entries_cached and main_negative_cached:
-        meta["cache_hit"] = True
-        meta["total_ms"] = round((time.perf_counter() - total_started) * 1000.0, 3)
-        if return_meta:
-            return character_entries, main_negative, meta
-        return character_entries, main_negative
-
-    build_started = time.perf_counter()
-    character_entries, main_negative = build_prompt_view_payload(
-        conn,
-        prompt_negative_raw,
-        prompt_character_raw,
-        params_json_or_obj,
-    )
-    meta["build_payload_ms"] = round((time.perf_counter() - build_started) * 1000.0, 3)
-
-    update_started = time.perf_counter()
-    try:
-        conn.execute(
-            "UPDATE images SET character_entries_json=?, main_negative_combined_raw=? WHERE id=?",
-            (json.dumps(character_entries, ensure_ascii=False), main_negative, int(image_id)),
+    for row in tag_rows or []:
+        canonical = str(_row_get(row, "tag_canonical", 0, "") or "").strip()
+        if not canonical:
+            continue
+        group = str(_row_get(row, "group", 7, "") or "").strip()
+        if not group:
+            group = tag_group_for_category(_row_get(row, "category", 3, None))
+        if group not in grouped:
+            group = "other"
+        grouped[group].append(
+            {
+                "canonical": canonical,
+                "text": str(_row_get(row, "tag_text", 1, "") or ""),
+                "raw_one": str(_row_get(row, "tag_raw", 2, "") or ""),
+                "emphasis_type": _row_get(row, "emphasis_type", 4, "none"),
+                "brace_level": int(_row_get(row, "brace_level", 5, 0) or 0),
+                "numeric_weight": float(_row_get(row, "numeric_weight", 6, 0) or 0),
+            }
         )
-        conn.commit()
-        meta["commit_ok"] = True
-    except Exception:
-        conn.rollback()
-        meta["commit_ok"] = False
-    meta["update_ms"] = round((time.perf_counter() - update_started) * 1000.0, 3)
-    meta["total_ms"] = round((time.perf_counter() - total_started) * 1000.0, 3)
-    if return_meta:
-        return character_entries, main_negative, meta
-    return character_entries, main_negative
+    return grouped
