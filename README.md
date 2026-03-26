@@ -9,7 +9,7 @@
 
 入っていなければ、下記で入れてください。
 
-- Windows: 公式サイトからインストール  
+- Windows: 公式サイトから3.12の最新版をインストール  
   https://www.python.org/downloads/windows/
 - macOS (Homebrew): `brew install python`
 - Ubuntu / Debian: `sudo apt update && sudo apt install -y python3 python3-pip python3-venv`
