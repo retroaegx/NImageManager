@@ -4,8 +4,8 @@
 
 先に Python 3 が入っているか確認してください。
 
-- Windows: `python --version`
-- macOS / Linux: `python3 --version`
+- Windows: コマンドプロンプトを開き、`python --version`を実行する。
+- macOS / Linux: ターミナルを開き、`python3 --version`を実行する。
 
 入っていなければ、下記で入れてください。
 
