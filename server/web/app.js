@@ -2825,8 +2825,57 @@ function setSelectedTile(id){
   if(tile) tile.classList.add("selected");
 }
 
-function copyText(t){
-  navigator.clipboard.writeText(t);
+const DETAIL_TAG_COPY_FEEDBACK_HOLD_MS = 1650;
+const UI_TOAST_VISIBLE_MS = 1800;
+
+function showUiToast(message, kind = "success"){
+  const viewport = $("toastViewport");
+  const text = String(message || "").trim();
+  if(!viewport || !text) return;
+
+  const toast = document.createElement("div");
+  toast.className = `uiToast ${kind ? `is-${kind}` : ""}`.trim();
+  toast.setAttribute("role", kind === "error" ? "alert" : "status");
+  toast.textContent = text;
+  viewport.appendChild(toast);
+  while(viewport.childElementCount > 3){
+    viewport.firstElementChild?.remove();
+  }
+
+  requestAnimationFrame(() => {
+    toast.classList.add("is-visible");
+  });
+
+  const removeToast = () => {
+    if(!toast.isConnected) return;
+    toast.classList.remove("is-visible");
+    toast.classList.add("is-leaving");
+    window.setTimeout(() => {
+      if(toast.isConnected) toast.remove();
+    }, 240);
+  };
+
+  window.setTimeout(removeToast, UI_TOAST_VISIBLE_MS);
+}
+
+async function copyText(t, opts = {}){
+  const text = String(t || "");
+  if(!text.trim()){
+    showUiToast("コピーする内容がありません", "warn");
+    return false;
+  }
+  try{
+    if(!navigator.clipboard || typeof navigator.clipboard.writeText !== "function"){
+      throw new Error("clipboard-unavailable");
+    }
+    await navigator.clipboard.writeText(text);
+    showUiToast(String(opts?.message || "クリップボードにコピーしました"), "success");
+    return true;
+  }catch(err){
+    console.error(err);
+    showUiToast("コピーに失敗しました", "error");
+    return false;
+  }
 }
 
 
@@ -2886,6 +2935,36 @@ function renderPromptSections(d){
   });
 }
 
+function spawnTagCopyRipple(btn, event){
+  if(!btn) return;
+  const rect = btn.getBoundingClientRect();
+  const pointer = event && typeof event.clientX === "number" && typeof event.clientY === "number";
+  const x = pointer ? (event.clientX - rect.left) : (rect.width / 2);
+  const y = pointer ? (event.clientY - rect.top) : (rect.height / 2);
+  const ripple = document.createElement("span");
+  ripple.className = "tagBtnRipple";
+  ripple.style.left = `${x}px`;
+  ripple.style.top = `${y}px`;
+  btn.appendChild(ripple);
+  ripple.addEventListener("animationend", () => ripple.remove(), { once: true });
+}
+
+function playTagCopyFeedback(btn, event){
+  if(!btn) return;
+  btn.classList.remove("is-copy-feedback", "is-copy-bounce");
+  void btn.offsetWidth;
+  btn.classList.add("is-copy-feedback", "is-copy-bounce");
+  spawnTagCopyRipple(btn, event);
+  btn.addEventListener("animationend", () => {
+    btn.classList.remove("is-copy-bounce");
+  }, { once: true });
+  if(btn._copyFeedbackTimer) window.clearTimeout(btn._copyFeedbackTimer);
+  btn._copyFeedbackTimer = window.setTimeout(() => {
+    btn.classList.remove("is-copy-feedback");
+    btn._copyFeedbackTimer = null;
+  }, DETAIL_TAG_COPY_FEEDBACK_HOLD_MS);
+}
+
 function makeTagButton(tag, onClick){
   const b = document.createElement("button");
   const label = String(tag || "");
@@ -2894,8 +2973,12 @@ function makeTagButton(tag, onClick){
   if(len >= 28) cls += " tagBtn-xlong";
   else if(len >= 18) cls += " tagBtn-long";
   b.className = cls;
-  b.textContent = label;
-  b.addEventListener("click", onClick);
+  b.type = "button";
+  b.innerHTML = `<span class="tagBtnLabel">${escapeHtml(label)}</span>`;
+  b.addEventListener("click", async (event) => {
+    playTagCopyFeedback(b, event);
+    if(typeof onClick === "function") await onClick(event);
+  });
   return b;
 }
 
@@ -3008,7 +3091,7 @@ function renderDetailTagSections(d){
     arr.forEach((t) => {
       const label = t?.text || "";
       if(!label) return;
-      box.appendChild(makeTagButton(label, () => copyText(getSingleTagCopyText(t, keepEmphasis))));
+      box.appendChild(makeTagButton(label, () => copyText(getSingleTagCopyText(t, keepEmphasis), { message: "タグをコピーしました" })));
     });
   };
 
@@ -4131,7 +4214,7 @@ function bindCopyAll(){
     if(["artist","quality","character","other"].includes(section)){
       const arr = currentDetail.tags?.[section] || [];
       const text = (mode === "keep") ? joinKeep(arr) : joinPlain(arr);
-      copyText(text);
+      copyText(text, { message: "クリップボードにコピーしました" });
       return;
     }
 
@@ -4139,7 +4222,7 @@ function bindCopyAll(){
       ensureDetailPromptUI(currentDetail);
       const arr = (currentDetail._ui_uc_tags && Array.isArray(currentDetail._ui_uc_tags)) ? currentDetail._ui_uc_tags : [];
       const text = (mode === "keep") ? joinKeep(arr) : joinPlain(arr);
-      copyText(text);
+      copyText(text, { message: "クリップボードにコピーしました" });
       return;
     }
 
@@ -4149,13 +4232,13 @@ function bindCopyAll(){
     if(section === "promptMain"){
       const src = currentDetail.prompt_positive_raw || "";
       const text = (mode === "keep") ? promptTextForCopyKeep(src) : promptTextForCopyPlain(src);
-      copyText(text);
+      copyText(text, { message: "クリップボードにコピーしました" });
       return;
     }
     if(section === "negMain"){
       const arr = (currentDetail._ui_uc_tags && Array.isArray(currentDetail._ui_uc_tags)) ? currentDetail._ui_uc_tags : [];
       const text = (mode === "keep") ? joinKeep(arr) : joinPlain(arr);
-      copyText(text);
+      copyText(text, { message: "クリップボードにコピーしました" });
       return;
     }
 
@@ -4167,7 +4250,7 @@ function bindCopyAll(){
       const entry = (currentDetail._ui_char_entries || [])[ci];
       const src = entry ? (isNeg ? (entry.neg || "") : (entry.pos || "")) : "";
       const text = (mode === "keep") ? promptTextForCopyKeep(src) : promptTextForCopyPlain(src);
-      copyText(text);
+      copyText(text, { message: "クリップボードにコピーしました" });
     }
   });
 }

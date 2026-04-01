@@ -254,8 +254,8 @@
       <div class="overlayPanel">
         <div class="overlayImage" id="overlayImageBox">
           <div id="overlayFixedBtns" class="overlayFixedBtns hidden" aria-hidden="true">
-            <a id="viewFull" class="iconBtn overlayActionBtn" href="#" target="_blank" rel="noopener" aria-label="全画面表示" title="全画面表示"><span class="icon">⛶</span></a>
-            <a id="dlFile" class="iconBtn overlayActionBtn" href="#" download aria-label="ダウンロード" title="ダウンロード"><span class="icon">↓</span></a>
+            <a id="viewFull" class="iconBtn overlayActionBtn" href="#" target="_blank" rel="noopener" aria-label="全画面表示" title="全画面表示"><span class="icon iconSvg" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span></a>
+            <a id="dlFile" class="iconBtn overlayActionBtn" href="#" download aria-label="ダウンロード" title="ダウンロード"><span class="icon iconSvg" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M12 4.5v8.25" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="m8.25 9.75 3.75 3.75 3.75-3.75" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 16.75h14v2.75H5z" fill="currentColor"/></svg></span></a>
             <button id="favDetailBtnFixed" class="iconBtn" aria-label="ブックマーク" title="ブックマーク"><span class="icon">☆</span></button>
             <button id="closeOverlayFixed" class="iconBtn" aria-label="閉じる" title="閉じる"><span class="icon">✕</span></button>
           </div>
@@ -278,8 +278,8 @@
             <div class="slideHeadTop">
               <div id="dTitle" class="dTitle"></div>
               <div class="slideHeadActions desktopDetailActions" aria-label="詳細アクション">
-                <a id="viewFullDesktop" class="iconBtn overlayActionBtn" href="#" target="_blank" rel="noopener" aria-label="全画面表示" title="全画面表示"><span class="icon">⛶</span></a>
-                <a id="dlFileDesktop" class="iconBtn overlayActionBtn" href="#" download aria-label="ダウンロード" title="ダウンロード"><span class="icon">↓</span></a>
+                <a id="viewFullDesktop" class="iconBtn overlayActionBtn" href="#" target="_blank" rel="noopener" aria-label="全画面表示" title="全画面表示"><span class="icon iconSvg" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span></a>
+                <a id="dlFileDesktop" class="iconBtn overlayActionBtn" href="#" download aria-label="ダウンロード" title="ダウンロード"><span class="icon iconSvg" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M12 4.5v8.25" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="m8.25 9.75 3.75 3.75 3.75-3.75" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 16.75h14v2.75H5z" fill="currentColor"/></svg></span></a>
                 <button id="favDetailBtn" class="iconBtn" aria-label="ブックマーク" title="ブックマーク"><span class="icon">☆</span></button>
                 <button id="closeOverlay" class="iconBtn" aria-label="閉じる" title="閉じる"><span class="icon">✕</span></button>
               </div>
@@ -458,6 +458,8 @@
       </div>
     </div>
   </div>
+
+  <div id="toastViewport" class="toastViewport" aria-live="polite" aria-atomic="true"></div>
 
 </body>
 </html>

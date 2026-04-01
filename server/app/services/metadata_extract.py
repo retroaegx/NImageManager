@@ -262,22 +262,20 @@ def _yield_usage_candidates(payload: Any):
 
 def detect_generation_usage_from_storage(
     params_json_or_obj: Any = None,
-    metadata_raw_or_obj: Any = None,
 ) -> tuple[bool, bool, Optional[str]]:
     uses_potion = False
     uses_precise_reference = False
     sampler: Optional[str] = None
 
-    for source in (params_json_or_obj, metadata_raw_or_obj):
-        for candidate in _yield_usage_candidates(source):
-            if not uses_potion and _detect_potion_usage(candidate):
-                uses_potion = True
-            if not uses_precise_reference and _detect_precise_reference_usage(candidate):
-                uses_precise_reference = True
-            if sampler is None:
-                sampler = _extract_sampler(candidate)
-            if uses_potion and uses_precise_reference and sampler is not None:
-                return uses_potion, uses_precise_reference, sampler
+    for candidate in _yield_usage_candidates(params_json_or_obj):
+        if not uses_potion and _detect_potion_usage(candidate):
+            uses_potion = True
+        if not uses_precise_reference and _detect_precise_reference_usage(candidate):
+            uses_precise_reference = True
+        if sampler is None:
+            sampler = _extract_sampler(candidate)
+        if uses_potion and uses_precise_reference and sampler is not None:
+            return uses_potion, uses_precise_reference, sampler
 
     return uses_potion, uses_precise_reference, sampler
 

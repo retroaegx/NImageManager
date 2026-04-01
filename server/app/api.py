@@ -7511,16 +7511,6 @@ def download_metadata(image_id: int, bm_list_id: int | None = None, user: dict =
     finally:
         conn.close()
 
-@api_router.get("/images/{image_id}/potion")
-def download_potion(image_id: int, bm_list_id: int | None = None, user: dict = Depends(get_user)):
-    conn = get_conn()
-    try:
-        _assert_image_visible(conn, image_id=int(image_id), viewer=user, bm_list_id=bm_list_id)
-        raise HTTPException(status_code=404, detail="disabled")
-    finally:
-        conn.close()
-
-
 _GENERIC_CHARACTER_KEYS = {"girl", "girls", "boy", "boys", "1girl", "2girls", "3girls", "1boy", "2boys", "3boys"}
 
 
@@ -7574,7 +7564,6 @@ def _resolve_generation_usage_fields(row: sqlite3.Row | dict) -> tuple[bool, boo
 
     detected_potion, detected_precise, detected_sampler = detect_generation_usage_from_storage(
         _row_get_optional(row, "params_json"),
-        _row_get_optional(row, "metadata_raw"),
     )
     if not uses_potion:
         uses_potion = bool(detected_potion)
@@ -7753,7 +7742,6 @@ def _build_image_detail_payloads(conn: sqlite3.Connection, ids: list[int], *, vi
             "view_full": _append_bm_list_id_to_url(f"/api/images/{iid}/view", bm_list_id),
             "download_file": _append_bm_list_id_to_url(f"/api/images/{iid}/file", bm_list_id),
             "download_meta": _append_bm_list_id_to_url(f"/api/images/{iid}/metadata_json", bm_list_id),
-            "download_potion": _append_bm_list_id_to_url(f"/api/images/{iid}/potion", bm_list_id),
         }
 
     metrics = {

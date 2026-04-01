@@ -455,16 +455,14 @@ def migrate_db(conn: sqlite3.Connection) -> None:
             and _has_col("images", "uses_precise_reference")
             and _has_col("images", "sampler")
             and _has_col("images", "params_json")
-            and _has_col("images", "metadata_raw")
             and _has_col("images", "has_potion")
         ):
             rows = conn.execute(
-                "SELECT id, params_json, metadata_raw, has_potion, uses_potion, uses_precise_reference, sampler FROM images"
+                "SELECT id, params_json, has_potion, uses_potion, uses_precise_reference, sampler FROM images"
             ).fetchall()
             for r in rows:
                 uses_potion_b, uses_precise_reference_b, sampler = detect_generation_usage_from_storage(
                     r["params_json"],
-                    r["metadata_raw"],
                 )
                 uses_potion = 1 if uses_potion_b else 0
                 uses_precise_reference = 1 if uses_precise_reference_b else 0

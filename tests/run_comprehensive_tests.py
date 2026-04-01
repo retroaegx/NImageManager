@@ -616,7 +616,6 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             self.assertIn(f"bm_list_id={owner_default}", payload["view_full"])
             self.assertIn(f"bm_list_id={owner_default}", payload["download_file"])
             self.assertIn(f"bm_list_id={owner_default}", payload["download_meta"])
-            self.assertIn(f"bm_list_id={owner_default}", payload["download_potion"])
 
             batch = rt.json("POST", "/images/details", user="viewer", payload={"ids": [shared_img], "bm_list_id": owner_default})
             expect_status(batch, 200)
@@ -628,7 +627,6 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
                 f"/images/{shared_img}/view?bm_list_id={owner_default}",
                 f"/images/{shared_img}/file?bm_list_id={owner_default}",
                 f"/images/{shared_img}/metadata_json?bm_list_id={owner_default}",
-                f"/images/{shared_img}/potion?bm_list_id={owner_default}",
             ):
                 resp = rt.request("GET", suffix, user="viewer")
                 expect_status(resp, 200)
@@ -641,7 +639,6 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
                 f"/images/{hidden_img}/view?bm_list_id={owner_default}",
                 f"/images/{hidden_img}/file?bm_list_id={owner_default}",
                 f"/images/{hidden_img}/metadata_json?bm_list_id={owner_default}",
-                f"/images/{hidden_img}/potion?bm_list_id={owner_default}",
             ):
                 resp = rt.request("GET", suffix, user="viewer")
                 self.assertEqual(resp.status_code, 404, suffix)
@@ -874,32 +871,24 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             finally:
                 conn.close()
 
-    def test_usage_detection_falls_back_to_metadata_raw_wrapper(self):
+    def test_usage_detection_falls_back_to_params_json(self):
         from server.app.services.metadata_extract import detect_generation_usage_from_storage
 
-        metadata_raw = json.dumps(
+        params_json = json.dumps(
             {
-                "info": {
-                    "Comment": json.dumps(
-                        {
-                            "reference_image_multiple": ["ref-image"],
-                            "director_reference_strengths": [1, 1],
-                            "sampler": "k_euler_ancestral",
-                        },
-                        ensure_ascii=False,
-                    )
-                },
-                "json": None,
+                "reference_image_multiple": ["ref-image"],
+                "director_reference_strengths": [1, 1],
+                "sampler": "k_euler_ancestral",
             },
             ensure_ascii=False,
         )
 
-        uses_potion, uses_precise_reference, sampler = detect_generation_usage_from_storage(None, metadata_raw)
+        uses_potion, uses_precise_reference, sampler = detect_generation_usage_from_storage(params_json)
         self.assertTrue(uses_potion)
         self.assertTrue(uses_precise_reference)
         self.assertEqual(sampler, "k_euler_ancestral")
 
-    def test_detail_usage_fields_fall_back_to_metadata_raw_when_db_is_stale(self):
+    def test_detail_usage_fields_fall_back_to_params_json_when_db_is_stale(self):
         with Runtime() as rt:
             rt.setup_master()
             rt.create_user(actor="master", username="uploader", role="user")
@@ -930,7 +919,7 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             conn = rt.db.get_conn()
             try:
                 conn.execute(
-                    "UPDATE images SET has_potion=0, uses_potion=0, uses_precise_reference=0, sampler=NULL, params_json=NULL WHERE id=?",
+                    "UPDATE images SET has_potion=0, uses_potion=0, uses_precise_reference=0, sampler=NULL WHERE id=?",
                     (image_id,),
                 )
                 conn.commit()
@@ -957,14 +946,14 @@ TEST_DESCRIPTIONS = {
     "test_ui_regression_contracts": "UI文言・確認ダイアログ・タブ名の静的回帰確認",
     "test_auth_and_account_lifecycle": "認証、権限、アカウント作成/削除、自己削除の統合確認",
     "test_visibility_matrix_gallery_sidebar_and_filters": "一覧、creatorフィルタ、共有ブックマーク経由、sidebar、候補一覧の可視性確認",
-    "test_visibility_for_detail_thumb_overlay_and_downloads": "detail、thumb(grid/overlay)、view/file/metadata/potion の可視性確認",
+    "test_visibility_for_detail_thumb_overlay_and_downloads": "detail、thumb(grid/overlay)、view/file/metadata の可視性確認",
     "test_bookmark_crud_bulk_operations_and_gallery_queries": "ブックマークCRUD、favorite、bulk apply、一覧問い合わせの確認",
     "test_upload_routes_and_admin_status_smoke": "upload、upload_batch、管理ステータス反映の確認",
     "test_bulk_delete_permissions_and_account_delete_cascade": "bulk delete権限、自己削除、管理削除、削除連鎖の確認",
     "test_metadata_extract_usage_flags_from_nested_scopes": "入れ子 params の参照利用フラグと sampler 抽出確認",
     "test_reparse_updates_usage_flags_from_nested_scopes": "再解析で入れ子 params の参照利用フラグと sampler を更新できるか確認",
-    "test_usage_detection_falls_back_to_metadata_raw_wrapper": "metadata_raw 内の wrapper JSON から参照利用フラグと sampler を拾えるか確認",
-    "test_detail_usage_fields_fall_back_to_metadata_raw_when_db_is_stale": "DB列が古くても metadata_raw を使って詳細表示の参照利用フラグと sampler を返せるか確認",
+    "test_usage_detection_falls_back_to_params_json": "params_json から参照利用フラグと sampler を拾えるか確認",
+    "test_detail_usage_fields_fall_back_to_params_json_when_db_is_stale": "DB列が古くても params_json を使って詳細表示の参照利用フラグと sampler を返せるか確認",
 }
 
 
