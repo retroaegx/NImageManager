@@ -2,7 +2,7 @@
 
 ## Python のインストール
 
-先に Python 3 が入っているか確認してください。
+先に Python 3.12 が入っているか確認してください。
 
 - Windows: コマンドプロンプトを開き、`python --version`を実行する。
 - macOS / Linux: ターミナルを開き、`python3 --version`を実行する。
