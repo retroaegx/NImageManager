@@ -2,20 +2,42 @@
 
 ## Python のインストール
 
-先に Python 3.12 が入っているか確認してください。
+このアプリは Python 3.12 または 3.13 を使用します。  
+新規導入は **Python 3.13.12** を推奨します。
 
-- Windows: コマンドプロンプトを開き、`python --version`を実行する。
-- macOS / Linux: ターミナルを開き、`python3 --version`を実行する。
+先に Python 3.13 が入っているか確認してください。
 
-入っていなければ、下記で入れてください。
+- Windows: コマンドプロンプトを開き、`py -3.13 --version` を実行する。
+- macOS / Linux: ターミナルを開き、`python3.13 --version` を実行する。
 
-- Windows: 公式サイトから3.12の最新版をインストール  
-  https://www.python.org/downloads/windows/
-- macOS (Homebrew): `brew install python`
-- Ubuntu / Debian: `sudo apt update && sudo apt install -y python3 python3-pip python3-venv`
+入っていなければ、下記で **Python 3.13.12** を入れてください。
 
+- Windows: 公式の Python 3.13.12 配布ページからインストーラーを入手してインストール  
+  https://www.python.org/downloads/release/python-31312/
+- macOS (Homebrew): `brew install python@3.13`
+- Ubuntu / Debian: 公式ソース配布物から Python 3.13.12 をインストール
+
+```bash
+sudo apt update
+sudo apt install -y build-essential wget libssl-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev libncursesw5-dev libffi-dev libgdbm-dev liblzma-dev tk-dev uuid-dev
+cd /tmp
+wget https://www.python.org/ftp/python/3.13.12/Python-3.13.12.tgz
+tar -xzf Python-3.13.12.tgz
+cd Python-3.13.12
+./configure --enable-optimizations
+make -j"$(nproc)"
+sudo make altinstall
+```
+
+インストール後は次で確認してください。
+
+- Windows: `py -3.13 --version`
+- macOS / Linux: `python3.13 --version`
+
+`Python 3.13.12` と表示されれば問題ありません。  
 Windows はインストール時に `Add Python to PATH` を ON にしてください。  
-原則として最新のPython(公式のCPython)でプリインストールされるpipとvenvを使用します。導入時エラーが発生する場合は個別で調べて導入してください。  
+このアプリは起動時に **Python 3.13 を優先し、なければ 3.12 を使用**して仮想環境を作成します。  
+**Python 3.12 / 3.13 がどちらも入っていない場合はエラーで起動を停止します。**
 
 
 ## 起動
