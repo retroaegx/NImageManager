@@ -12,7 +12,7 @@
 
 入っていなければ、下記で **Python 3.13.12** を入れてください。
 
-- Windows: 公式の Python 3.13.12 配布ページからインストーラーを入手してインストール  
+- Windows: 公式の Python 3.13.12 配布ページからインストーラーを入手してインストール  (Download Python install managerではなく、最下部のWindowsインストーラー（64ビット版）をダウンロード/インストールしてください)
   https://www.python.org/downloads/release/python-31312/
 - macOS (Homebrew): `brew install python@3.13`
 - Ubuntu / Debian: 公式ソース配布物から Python 3.13.12 をインストール
