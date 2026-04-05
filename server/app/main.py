@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import mimetypes
+from contextlib import asynccontextmanager
 import re
 import sys
 import time
@@ -32,11 +33,21 @@ from .services.derivatives import probe_avif
 from .services.update_checker import start_update_checker, stop_update_checker
 from .logging_utils import configure_perf_logging, log_perf, new_trace_id, perf_log_path, perf_logging_enabled
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    _run_startup()
+    try:
+        yield
+    finally:
+        _run_shutdown()
+
+
 app = FastAPI(
     title="NovelAI Image Manager",
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
     default_response_class=ORJSONResponse,
+    lifespan=lifespan,
 )
 
 # Compress JSON payloads (especially helpful over cloudflared tunnels).
@@ -101,8 +112,7 @@ def _startup_log(message: str) -> None:
     print(f"[nim] startup: {message}", flush=True)
 
 
-@app.on_event("startup")
-def _startup() -> None:
+def _run_startup() -> None:
     _startup_log("configure performance logging")
     configure_perf_logging()
 
@@ -136,8 +146,7 @@ def _startup() -> None:
     _startup_log("ready")
 
 
-@app.on_event("shutdown")
-def _shutdown() -> None:
+def _run_shutdown() -> None:
     stop_update_checker()
     api_module.stop_background_workers()
 
