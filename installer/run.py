@@ -253,11 +253,25 @@ def _ensure_venv(root: Path) -> Path | None:
 
 def _is_running_in_venv(root: Path) -> bool:
     venv_dir = root / ".venv"
-    py = _venv_python(venv_dir)
     try:
-        return Path(sys.executable).resolve() == py.resolve()
+        if sys.prefix == getattr(sys, "base_prefix", sys.prefix):
+            return False
+        return Path(sys.prefix).resolve() == venv_dir.resolve()
     except Exception:
         return False
+
+
+def _ensure_pip_available(py: Path, root: Path) -> bool:
+    probe_cmd = [str(py), "-m", "pip", "--version"]
+    if subprocess.call(probe_cmd, cwd=str(root)) == 0:
+        return True
+
+    _progress("dependencies", "pip is missing in the virtual environment; bootstrapping with ensurepip")
+    ensurepip_cmd = [str(py), "-m", "ensurepip", "--upgrade"]
+    if subprocess.call(ensurepip_cmd, cwd=str(root)) != 0:
+        return False
+
+    return subprocess.call(probe_cmd, cwd=str(root)) == 0
 
 
 def _rerun_in_venv(py: Path) -> int:
@@ -265,16 +279,20 @@ def _rerun_in_venv(py: Path) -> int:
     return subprocess.call(args, cwd=str(repo_root()))
 
 
-def _pip_install(root: Path) -> bool:
+def _pip_install(root: Path, py: Path) -> bool:
+    if not _ensure_pip_available(py, root):
+        print("[installer] FATAL: pip is not available in the project virtual environment", flush=True)
+        return False
+
     req = root / "requirements.txt"
-    cmd = [sys.executable, "-m", "pip", "install", "-r", str(req)]
+    cmd = [str(py), "-m", "pip", "install", "-r", str(req)]
     _progress("dependencies", "installing Python requirements ...")
     return subprocess.call(cmd, cwd=str(root)) == 0
 
 
-def _run_server(root: Path) -> subprocess.Popen:
+def _run_server(root: Path, py: Path) -> subprocess.Popen:
     cmd = [
-        sys.executable, "-m", "uvicorn",
+        str(py), "-m", "uvicorn",
         "server.app.main:app",
         "--host", "127.0.0.1",
         "--port", str(PORT),
@@ -338,7 +356,7 @@ def main() -> int:
         _progress("venv", "restarting inside project virtual environment")
         return _rerun_in_venv(py)
 
-    if not _pip_install(root):
+    if not _pip_install(root, py):
         print("[installer] FATAL: pip install failed", flush=True)
         return 2
 
@@ -352,7 +370,7 @@ def main() -> int:
     else:
         _progress("tunnel", "disabled by NAI_IM_TUNNEL")
 
-    server = _run_server(root)
+    server = _run_server(root, py)
     if not _wait_for_local_server_ready(PORT, server):
         try:
             rc = server.wait(timeout=3)
