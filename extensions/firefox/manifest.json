@@ -1,11 +1,13 @@
 {
   "manifest_version": 2,
   "name": "NIM NovelAI Transfer",
-  "version": "0.1.0",
-  "description": "NovelAI の現在画像を NIM に転送します。",
+  "version": "0.2.2",
+  "description": "NovelAI 上で NIM 転送とオーバーレイ表示を行います。",
   "permissions": [
     "storage",
     "tabs",
+    "webRequest",
+    "webRequestBlocking",
     "<all_urls>",
     "https://novelai.net/*",
     "https://*.novelai.net/*"

@@ -19,6 +19,7 @@ function apiBaseFrom(value) {
   return url.toString().replace(/\/$/, '');
 }
 
+
 function getStorage(keys) {
   return new Promise((resolve) => ext.storage.local.get(keys, resolve));
 }
@@ -27,13 +28,18 @@ function setStorage(values) {
   return new Promise((resolve) => ext.storage.local.set(values, resolve));
 }
 
-async function getConfig() {
-  const stored = await getStorage(Object.values(STORAGE_KEYS));
+function normalizeConfig(stored) {
+  const baseUrl = String(stored[STORAGE_KEYS.baseUrl] || '').trim();
   return {
-    baseUrl: String(stored[STORAGE_KEYS.baseUrl] || '').trim(),
+    baseUrl,
     token: String(stored[STORAGE_KEYS.token] || '').trim(),
     user: stored[STORAGE_KEYS.user] || null,
   };
+}
+
+async function getConfig() {
+  const stored = await getStorage(Object.values(STORAGE_KEYS));
+  return normalizeConfig(stored || {});
 }
 
 async function saveConfig(nextConfig) {
@@ -195,6 +201,17 @@ async function openLoginPage(loginUrl) {
   await openOptionsPage();
 }
 
+async function openTab(targetUrl) {
+  const url = String(targetUrl || '').trim();
+  if (!url) {
+    throw new Error('URL が未設定です');
+  }
+  if (!(ext.tabs && ext.tabs.create)) {
+    throw new Error('タブを開けません');
+  }
+  await ext.tabs.create({ url });
+}
+
 if (ext.runtime.onInstalled) {
   ext.runtime.onInstalled.addListener((details) => {
     if (details.reason === 'install') {
@@ -212,7 +229,16 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (type === 'nim-save-base-url') {
       const baseUrl = apiBaseFrom(message.baseUrl || '');
       await saveConfig({ baseUrl });
-      return { ok: true, baseUrl };
+      return { ok: true, baseUrl, config: await getConfig() };
+    }
+    if (type === 'nim-save-config') {
+      const currentConfig = await getConfig();
+      const rawBaseUrl = Object.prototype.hasOwnProperty.call(message, 'baseUrl')
+        ? String(message.baseUrl || '').trim()
+        : currentConfig.baseUrl;
+      const nextBaseUrl = rawBaseUrl ? apiBaseFrom(rawBaseUrl) : '';
+      await saveConfig({ baseUrl: nextBaseUrl });
+      return { ok: true, config: await getConfig() };
     }
     if (type === 'nim-login') {
       const data = await loginToServer(message);
@@ -234,6 +260,10 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     if (type === 'nim-open-login-page') {
       await openLoginPage(message.loginUrl || '');
+      return { ok: true };
+    }
+    if (type === 'nim-open-url') {
+      await openTab(message.url || '');
       return { ok: true };
     }
     return { ok: false, code: 'UNKNOWN_MESSAGE', message: 'unknown message' };

@@ -65,6 +65,50 @@ app.add_middleware(
 )
 
 
+def _append_vary_header(headers, value: str) -> None:
+    token = str(value or "").strip()
+    if not token:
+        return
+    current = str(headers.get("Vary") or "").strip()
+    items = [item.strip() for item in current.split(",") if item.strip()]
+    lowered = {item.lower() for item in items}
+    if token.lower() in lowered:
+        return
+    items.append(token)
+    headers["Vary"] = ", ".join(items)
+
+
+def _should_set_storage_access_headers(request: Request) -> bool:
+    if request.method not in {"GET", "HEAD"}:
+        return False
+    if request.url.path.startswith("/api/"):
+        return False
+    fetch_dest = (request.headers.get("sec-fetch-dest") or "").strip().lower()
+    if fetch_dest not in {"iframe", "document"}:
+        return False
+    return True
+
+
+def _apply_storage_access_headers(request: Request, response) -> None:
+    if not _should_set_storage_access_headers(request):
+        return
+
+    status = (request.headers.get("sec-fetch-storage-access") or "").strip().lower()
+    if status not in {"inactive", "active"}:
+        return
+
+    _append_vary_header(response.headers, "Sec-Fetch-Storage-Access")
+
+    if status == "active":
+        response.headers["Activate-Storage-Access"] = "load"
+        return
+
+    allowed_origin = (request.headers.get("origin") or "").strip()
+    if not allowed_origin:
+        return
+    response.headers["Activate-Storage-Access"] = f'retry; allowed-origin="{allowed_origin}"'
+
+
 @app.middleware("http")
 async def _perf_request_middleware(request: Request, call_next):
     trace_id = request.headers.get("x-nim-client-trace-id") or new_trace_id()
@@ -74,6 +118,7 @@ async def _perf_request_middleware(request: Request, call_next):
     exc_name = None
     try:
         response = await call_next(request)
+        _apply_storage_access_headers(request, response)
         return response
     except Exception as exc:
         exc_name = exc.__class__.__name__

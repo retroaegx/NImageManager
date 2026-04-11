@@ -9,10 +9,15 @@ const BRIDGE_REQUEST_TYPE = 'NIM_TRANSFER_FETCH_BLOB_REQUEST';
 const BRIDGE_RESPONSE_TYPE = 'NIM_TRANSFER_FETCH_BLOB_RESPONSE';
 const BRIDGE_READY_TYPE = 'NIM_TRANSFER_BRIDGE_READY';
 const BRIDGE_SCRIPT_ID = 'nim-transfer-page-bridge';
+const OVERLAY_HOST_ID = 'nim-overlay-extension-host';
+const CLOSE_MESSAGE_TYPES = new Set(['NIM_OVERLAY_CLOSE', 'nim-overlay-close']);
+const AUTH_REQUIRED_MESSAGE_TYPES = new Set(['NIM_EMBED_AUTH_REQUIRED']);
+const READY_MESSAGE_TYPES = new Set(['NIM_EMBED_READY']);
 
 function log(...args) {
   try { console.log(DEBUG_PREFIX, ...args); } catch (_) {}
 }
+
 function warn(...args) {
   try { console.warn(DEBUG_PREFIX, ...args); } catch (_) {}
 }
@@ -357,8 +362,450 @@ async function handleTransferClick(button) {
   }
 }
 
+function createOverlayState() {
+  return {
+    host: null,
+    shadowRoot: null,
+    launcherButton: null,
+    overlay: null,
+    overlayToolbar: null,
+    overlayMenuButton: null,
+    overlayMenu: null,
+    overlayTitle: null,
+    iframe: null,
+    loading: null,
+    currentUrl: '',
+    currentOrigin: '',
+    loginUrl: '',
+    autoLoginHintShown: false,
+    isMenuOpen: false,
+    isOpen: false,
+    isReady: false,
+  };
+}
+
+const overlayState = createOverlayState();
+
+function ensureOverlayHost() {
+  const existingHost = document.getElementById(OVERLAY_HOST_ID);
+  if (existingHost && overlayState.isReady) {
+    return overlayState;
+  }
+
+  const host = existingHost || document.createElement('div');
+  if (!existingHost) {
+    host.id = OVERLAY_HOST_ID;
+    document.documentElement.appendChild(host);
+  }
+
+  const shadowRoot = host.shadowRoot || host.attachShadow({ mode: 'open' });
+  if (!shadowRoot.childNodes.length) {
+    shadowRoot.innerHTML = `
+      <style>
+        :host {
+          all: initial;
+        }
+        .nim-ui {
+          position: fixed;
+          inset: 0;
+          z-index: 2147483646;
+          pointer-events: none;
+          font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          color: #e5eefb;
+        }
+        .launcher {
+          position: fixed;
+          top: 12px;
+          left: 12px;
+          pointer-events: auto;
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          min-height: 36px;
+          padding: 0 12px;
+          border: 1px solid rgba(255,255,255,0.18);
+          border-radius: 999px;
+          background: rgba(15, 23, 42, 0.72);
+          color: #f8fafc;
+          backdrop-filter: blur(10px);
+          -webkit-backdrop-filter: blur(10px);
+          box-shadow: 0 12px 28px rgba(15, 23, 42, 0.35);
+          cursor: pointer;
+          font-size: 12px;
+          font-weight: 700;
+          transition: transform 120ms ease, background 120ms ease, opacity 120ms ease;
+        }
+        .launcher:hover {
+          background: rgba(15, 23, 42, 0.82);
+          transform: translateY(-1px);
+        }
+        .launcher[hidden] {
+          display: none;
+        }
+        .overlay {
+          position: fixed;
+          inset: 0;
+          display: none;
+          pointer-events: auto;
+          background: rgba(2, 6, 23, 0.58);
+          backdrop-filter: blur(2px);
+          -webkit-backdrop-filter: blur(2px);
+        }
+        .overlay[data-open="1"] {
+          display: block;
+        }
+        .frame {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          border: 0;
+          background: #050b17;
+        }
+        .toolbar {
+          position: absolute;
+          top: 12px;
+          left: 12px;
+          z-index: 2;
+          display: flex;
+          align-items: flex-start;
+          gap: 8px;
+          pointer-events: auto;
+        }
+        .toolbarLeft {
+          position: relative;
+          display: flex;
+          align-items: flex-start;
+          gap: 8px;
+        }
+        .toolbarButton,
+        .toolbarLink {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 36px;
+          padding: 0 12px;
+          border-radius: 999px;
+          border: 1px solid rgba(255,255,255,0.18);
+          background: rgba(15, 23, 42, 0.76);
+          color: #f8fafc;
+          text-decoration: none;
+          cursor: pointer;
+          box-shadow: 0 10px 24px rgba(15, 23, 42, 0.25);
+          font-size: 12px;
+          font-weight: 700;
+          backdrop-filter: blur(10px);
+          -webkit-backdrop-filter: blur(10px);
+          white-space: nowrap;
+        }
+        .toolbarButton:hover,
+        .toolbarLink:hover {
+          background: rgba(15, 23, 42, 0.88);
+        }
+        .toolbarButton[data-action="close"] {
+          min-width: 72px;
+        }
+        .toolbarButton[data-action="reload"],
+        .toolbarButton[data-action="toggle-menu"] {
+          min-width: 36px;
+          width: 36px;
+          padding: 0;
+          font-size: 16px;
+          line-height: 1;
+        }
+        .toolbarMenu {
+          position: absolute;
+          top: 44px;
+          right: 0;
+          display: none;
+          flex-direction: column;
+          gap: 8px;
+          width: max-content;
+          min-width: 112px;
+          padding: 8px;
+          border: 1px solid rgba(255,255,255,0.14);
+          border-radius: 16px;
+          background: rgba(15, 23, 42, 0.86);
+          box-shadow: 0 18px 36px rgba(15, 23, 42, 0.34);
+          backdrop-filter: blur(12px);
+          -webkit-backdrop-filter: blur(12px);
+        }
+        .toolbarMenu[data-open="1"] {
+          display: flex;
+        }
+        .toolbarMenu .toolbarButton {
+          width: 100%;
+          justify-content: flex-start;
+        }
+        .toolbarTitle {
+          display: none;
+        }
+        .loading {
+          position: absolute;
+          inset: 0;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          z-index: 1;
+          background: linear-gradient(180deg, rgba(2,6,23,0.42), rgba(2,6,23,0.2));
+          color: #e2e8f0;
+          font-size: 14px;
+          letter-spacing: 0.01em;
+          pointer-events: none;
+        }
+        .loading[hidden] {
+          display: none;
+        }
+      </style>
+      <div class="nim-ui">
+        <button type="button" class="launcher" aria-label="NIM を開く">NIM</button>
+        <div class="overlay" data-open="0" aria-hidden="true">
+          <iframe class="frame" referrerpolicy="strict-origin-when-cross-origin" allow="storage-access"></iframe>
+          <div class="loading">NIM を読み込み中…</div>
+          <div class="toolbar">
+            <div class="toolbarLeft">
+              <button type="button" class="toolbarButton" data-action="close">閉じる</button>
+              <button type="button" class="toolbarButton" data-action="reload" aria-label="再読込" title="再読込">⟳</button>
+              <button type="button" class="toolbarButton" data-action="toggle-menu" aria-label="NIM メニュー" aria-expanded="false">⋯</button>
+              <div class="toolbarMenu" data-open="0">
+                <button type="button" class="toolbarButton" data-action="login">ログイン</button>
+                <button type="button" class="toolbarButton" data-action="settings">設定</button>
+                <button type="button" class="toolbarButton" data-action="newtab">別タブ</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  overlayState.host = host;
+  overlayState.shadowRoot = shadowRoot;
+  overlayState.launcherButton = shadowRoot.querySelector('.launcher');
+  overlayState.overlay = shadowRoot.querySelector('.overlay');
+  overlayState.overlayToolbar = shadowRoot.querySelector('.toolbar');
+  overlayState.overlayMenuButton = shadowRoot.querySelector('[data-action="toggle-menu"]');
+  overlayState.overlayMenu = shadowRoot.querySelector('.toolbarMenu');
+  overlayState.overlayTitle = shadowRoot.querySelector('.toolbarTitle');
+  overlayState.iframe = shadowRoot.querySelector('.frame');
+  overlayState.loading = shadowRoot.querySelector('.loading');
+
+  function setOverlayMenuOpen(isOpen) {
+    overlayState.isMenuOpen = Boolean(isOpen);
+    if (overlayState.overlayMenu) {
+      overlayState.overlayMenu.setAttribute('data-open', isOpen ? '1' : '0');
+    }
+    if (overlayState.overlayMenuButton) {
+      overlayState.overlayMenuButton.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+    }
+  }
+
+  if (!overlayState.launcherButton.dataset.bound) {
+    overlayState.launcherButton.dataset.bound = '1';
+    overlayState.launcherButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      openOverlay().catch((error) => {
+        warn('overlay open failed', error);
+        showToast(String(error?.message || error || 'NIM を開けませんでした'), 'error');
+      });
+    });
+  }
+
+  shadowRoot.querySelectorAll('.toolbarButton').forEach((button) => {
+    if (button.dataset.bound) return;
+    button.dataset.bound = '1';
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      const action = button.getAttribute('data-action');
+      if (action === 'close') {
+        closeOverlay();
+        return;
+      }
+      if (action === 'toggle-menu') {
+        setOverlayMenuOpen(!overlayState.isMenuOpen);
+        return;
+      }
+      if (action === 'login') {
+        const targetUrl = overlayState.loginUrl || overlayState.currentUrl;
+        if (!targetUrl) {
+          showToast('ログイン先 URL が未設定です', 'error');
+          return;
+        }
+        setOverlayMenuOpen(false);
+        messageRuntime({ type: 'nim-open-url', url: targetUrl }).catch(() => {
+          showToast('ログインページを開けませんでした', 'error');
+        });
+        return;
+      }
+      if (action === 'reload') {
+        if (!overlayState.currentUrl || !overlayState.iframe) {
+          showToast('再読込できませんでした', 'error');
+          return;
+        }
+        setOverlayMenuOpen(false);
+        if (overlayState.loading) overlayState.loading.hidden = false;
+        overlayState.iframe.src = overlayState.currentUrl;
+        return;
+      }
+      if (action === 'settings') {
+        setOverlayMenuOpen(false);
+        messageRuntime({ type: 'nim-open-options' }).catch(() => {});
+        return;
+      }
+      if (action === 'newtab') {
+        if (!overlayState.currentUrl) {
+          showToast('オーバーレイ URL が未設定です', 'error');
+          return;
+        }
+        setOverlayMenuOpen(false);
+        messageRuntime({ type: 'nim-open-url', url: overlayState.currentUrl }).catch(() => {
+          showToast('別タブを開けませんでした', 'error');
+        });
+      }
+    });
+  });
+
+  if (!overlayState.iframe.dataset.bound) {
+    overlayState.iframe.dataset.bound = '1';
+    overlayState.iframe.addEventListener('load', () => {
+      if (overlayState.loading) overlayState.loading.hidden = true;
+    });
+  }
+
+  if (!window.__nimOverlayClickBound) {
+    window.__nimOverlayClickBound = true;
+    window.addEventListener('pointerdown', (event) => {
+      if (!overlayState.isOpen || !overlayState.isMenuOpen) return;
+      const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+      if (path.includes(overlayState.overlayMenu) || path.includes(overlayState.overlayMenuButton)) return;
+      setOverlayMenuOpen(false);
+    }, true);
+  }
+
+  if (!window.__nimOverlayCloseListenerInstalled) {
+    window.__nimOverlayCloseListenerInstalled = true;
+    window.addEventListener('message', (event) => {
+      const iframeWindow = overlayState.iframe?.contentWindow;
+      if (!iframeWindow || event.source !== iframeWindow) return;
+      const type = String(event.data?.type || '');
+      if (overlayState.currentOrigin && event.origin && event.origin !== overlayState.currentOrigin) return;
+      if (CLOSE_MESSAGE_TYPES.has(type)) {
+        closeOverlay();
+        return;
+      }
+      if (AUTH_REQUIRED_MESSAGE_TYPES.has(type)) {
+        overlayState.loginUrl = String(event.data?.loginUrl || overlayState.currentUrl || '').trim();
+        if (!overlayState.autoLoginHintShown) {
+          overlayState.autoLoginHintShown = true;
+          showToast('NIM は別タブで先にログインしてください。ログイン後に「再読込」を押してください。', 'info');
+        }
+        return;
+      }
+      if (READY_MESSAGE_TYPES.has(type)) {
+        overlayState.loginUrl = '';
+        return;
+      }
+    });
+
+    window.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && overlayState.isOpen) {
+        closeOverlay();
+      }
+    });
+  }
+
+  overlayState.isReady = true;
+  return overlayState;
+}
+
+function setOverlayOpen(isOpen) {
+  ensureOverlayHost();
+  overlayState.isOpen = Boolean(isOpen);
+  if (!overlayState.isOpen) {
+    overlayState.isMenuOpen = false;
+  }
+  overlayState.overlay?.setAttribute('data-open', isOpen ? '1' : '0');
+  if (!isOpen) {
+    overlayState.overlayMenu?.setAttribute('data-open', '0');
+    overlayState.overlayMenuButton?.setAttribute('aria-expanded', 'false');
+  }
+  overlayState.overlay?.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
+  if (overlayState.launcherButton) {
+    overlayState.launcherButton.hidden = Boolean(isOpen);
+  }
+}
+
+function closeOverlay() {
+  if (!overlayState.isReady) return;
+  setOverlayOpen(false);
+}
+
+function resolveOverlayUrl(config) {
+  return String(config?.baseUrl || '').trim();
+}
+
+function updateOverlayTitle(url) {
+  if (!overlayState.overlayTitle) return;
+  if (!url) {
+    overlayState.overlayTitle.textContent = 'NIM Overlay';
+    return;
+  }
+  try {
+    const parsed = new URL(url);
+    const path = `${parsed.pathname || '/'}${parsed.search || ''}`;
+    overlayState.overlayTitle.textContent = `${parsed.host}${path}`;
+  } catch (_) {
+    overlayState.overlayTitle.textContent = url;
+  }
+}
+
+async function openOverlay() {
+  ensureOverlayHost();
+
+  const response = await messageRuntime({ type: 'nim-get-config' });
+  if (!response?.ok) {
+    throw new Error(response?.message || '拡張設定を取得できませんでした');
+  }
+
+  const config = response.config || {};
+  const overlayUrl = resolveOverlayUrl(config);
+  if (!overlayUrl) {
+    showToast('拡張設定で NIM の URL を保存してください', 'error');
+    await messageRuntime({ type: 'nim-open-options' });
+    return;
+  }
+
+  let nextOrigin = '';
+  try {
+    nextOrigin = new URL(overlayUrl).origin;
+  } catch (_) {
+    throw new Error('オーバーレイ URL が不正です');
+  }
+
+  const shouldReloadFrame = overlayState.currentUrl !== overlayUrl;
+  overlayState.loginUrl = `${overlayUrl.replace(/\/$/, '')}/login.html`;
+  overlayState.autoLoginHintShown = false;
+  if (overlayState.loading) {
+    overlayState.loading.hidden = !shouldReloadFrame;
+  }
+
+  if (shouldReloadFrame) {
+    overlayState.currentUrl = overlayUrl;
+    overlayState.currentOrigin = nextOrigin;
+    overlayState.iframe.src = overlayUrl;
+  }
+
+  updateOverlayTitle(overlayUrl);
+  setOverlayOpen(true);
+}
+
+function installOverlay() {
+  ensureOverlayHost();
+}
+
 function installObservers() {
   injectBridgeScript();
+  installOverlay();
 
   let retryCount = 0;
   const maxRetries = 60;
@@ -404,6 +851,7 @@ function installObservers() {
         retryTimer = 0;
       }
       retryCount = 0;
+      installOverlay();
       runAttach();
     }, 50);
   };

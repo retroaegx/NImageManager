@@ -64,16 +64,48 @@ from .services.update_checker import get_update_status
 api_router = APIRouter()
 
 
+def _cookie_request_scheme(request: Request) -> str:
+    forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    if forwarded_proto in {"https", "http"}:
+        return forwarded_proto
+
+    cf_visitor = (request.headers.get("cf-visitor") or "").strip()
+    if cf_visitor:
+        try:
+            data = json.loads(cf_visitor)
+            scheme = str(data.get("scheme") or "").strip().lower()
+            if scheme in {"https", "http"}:
+                return scheme
+        except Exception:
+            pass
+
+    public_base = (os.environ.get("NAI_IM_PUBLIC_BASE_URL") or "").strip()
+    if public_base:
+        try:
+            from urllib.parse import urlsplit
+            scheme = (urlsplit(public_base).scheme or "").strip().lower()
+            if scheme in {"https", "http"}:
+                return scheme
+        except Exception:
+            pass
+
+    return (request.url.scheme or "").lower()
+
+
 def _cookie_secure_flag(request: Request) -> bool:
     override = os.getenv("NAI_IM_COOKIE_SECURE", "").strip().lower()
     if override in {"1", "true", "yes", "on"}:
         return True
     if override in {"0", "false", "no", "off"}:
         return False
-    forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
-    if forwarded_proto == "https":
-        return True
-    return (request.url.scheme or "").lower() == "https"
+    return _cookie_request_scheme(request) == "https"
+
+
+def _cookie_samesite_value(request: Request) -> str:
+    override = os.getenv("NAI_IM_COOKIE_SAMESITE", "").strip().lower()
+    if override in {"none", "lax", "strict"}:
+        return override
+    return "none" if _cookie_secure_flag(request) else "lax"
 
 
 def _queue_derivative_request(
@@ -1522,7 +1554,7 @@ def setup_master(request: Request, req: SetupMasterReq, response: Response):
             key="nai_token",
             value=token,
             httponly=True,
-            samesite="lax",
+            samesite=_cookie_samesite_value(request),
             max_age=60 * 60 * 24 * 30,
             path="/",
             secure=_cookie_secure_flag(request),
@@ -1542,7 +1574,7 @@ def login(request: Request, req: LoginReq, response: Response):
         key="nai_token",
         value=token,
         httponly=True,
-        samesite="lax",
+        samesite=_cookie_samesite_value(request),
         max_age=60 * 60 * 24 * 30,
         path="/",
         secure=_cookie_secure_flag(request),
@@ -1706,7 +1738,7 @@ def delete_me(user: dict = Depends(get_user)):
 
 @api_router.post("/auth/logout")
 def logout(response: Response):
-    response.delete_cookie("nai_token", path="/")
+    response.delete_cookie("nai_token", path="/", secure=_cookie_secure_flag(request), samesite=_cookie_samesite_value(request))
     return {"ok": True}
 
 

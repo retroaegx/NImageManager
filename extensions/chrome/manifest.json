@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "NIM Transfer",
-  "version": "0.1.1",
-  "description": "NovelAI の現在画像を NIM に転送します。",
+  "version": "0.2.2",
+  "description": "NovelAI 上で NIM 転送とオーバーレイ表示を行います。",
   "permissions": [
     "storage"
   ],

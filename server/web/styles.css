@@ -2115,6 +2115,16 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
 .loginSub{ font-size: 12px; color: rgba(255,255,255,0.66); }
 .loginH{ margin: 12px 0 6px; }
 .loginHint{ font-size: 12px; color: rgba(255,255,255,0.68); margin-bottom: 10px; }
+.embedLoginBox{ display:flex; flex-direction:column; gap:12px; margin: 14px 0 8px; padding: 14px; border-radius: 18px; border:1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.04); }
+.embedLoginHead{ font-weight: 800; letter-spacing: 0.02em; }
+.embedLoginText{ font-size: 13px; line-height: 1.6; color: rgba(255,255,255,0.82); }
+.embedLoginText[data-kind="error"]{ color: #fecaca; }
+.embedLoginText[data-kind="success"]{ color: #bbf7d0; }
+.embedLoginActions{ justify-content:flex-start; flex-wrap:wrap; }
+.secondaryBtn{ background: rgba(255,255,255,0.08); color: var(--txt); border:1px solid rgba(255,255,255,0.12); border-radius: 12px; padding: 10px 14px; cursor:pointer; }
+.secondaryBtn:hover{ background: rgba(255,255,255,0.12); }
+.loginEmbedded .loginCard{ max-width: 640px; }
+.loginEmbedded #loginFormArea{ display:none !important; }
 
 
 .menu::-webkit-scrollbar{ display:none; }

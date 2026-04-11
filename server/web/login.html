@@ -24,8 +24,19 @@
       </div>
 
       <h2 class="loginH">ログイン</h2>
-      <div class="loginHint">ローカルで安全に画像を管理します。</div>
+      <div id="loginHint" class="loginHint">ローカルで安全に画像を管理します。</div>
 
+      <div id="embedLoginBox" class="embedLoginBox hidden">
+        <div class="embedLoginHead">オーバーレイ用ログイン</div>
+        <div id="embedLoginText" class="embedLoginText">別タブの NIM で先にログインしてください。</div>
+        <div class="row embedLoginActions">
+          <button id="embedOpenTopLogin" class="primaryBtn" type="button">別タブでログイン</button>
+          <button id="embedGrantAccess" class="secondaryBtn" type="button">アクセスを許可して再読込</button>
+          <button id="embedRetry" class="secondaryBtn" type="button">再確認</button>
+        </div>
+      </div>
+
+      <div id="loginFormArea">
       <div class="field">
         <label>ユーザー名</label>
         <input id="loginUser" autocomplete="username" placeholder="username" />
@@ -38,6 +49,7 @@
       <div class="row" style="align-items:center; justify-content:space-between; gap:10px">
         <button id="loginBtn" class="primaryBtn" style="min-width:140px">ログイン</button>
         <span id="loginErr" class="err"></span>
+      </div>
       </div>
     </div>
   </div>

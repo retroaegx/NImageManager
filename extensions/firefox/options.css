@@ -39,6 +39,10 @@ h1, h2 {
   margin-bottom: 12px;
 }
 
+.field small {
+  color: #94a3b8;
+}
+
 .field input {
   width: 100%;
   box-sizing: border-box;

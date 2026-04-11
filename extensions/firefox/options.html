@@ -3,24 +3,26 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>NIM Transfer Settings</title>
+  <title>NIM Extension Settings</title>
   <link rel="stylesheet" href="options.css">
 </head>
 <body>
   <main class="page">
     <section class="card">
-      <h1>NIM Transfer Settings</h1>
-      <p class="note">Enter the NIM domain only. Do not enter the full API path.</p>
+      <h1>NIM Extension Settings</h1>
+      <p class="note">NovelAI 上の拡張から、NIM 転送とオーバーレイ表示の両方で使う設定です。</p>
 
       <label class="field">
         <span>Domain</span>
         <input id="baseUrl" type="text" placeholder="https://nim.example.com">
+        <small>NIM のドメイン。API パスは不要です。</small>
       </label>
 
       <div class="row">
-        <button id="saveBaseUrl" type="button">Save domain</button>
-        <button id="checkSession" type="button" class="secondary">Check session</button>
-        <button id="openLoginPage" type="button" class="secondary">Open login page</button>
+        <button id="saveConfig" type="button">設定を保存</button>
+        <button id="checkSession" type="button" class="secondary">セッション確認</button>
+        <button id="openLoginPage" type="button" class="secondary">ログインページを開く</button>
+        <button id="openOverlayPage" type="button" class="secondary">NIM を開く</button>
       </div>
     </section>
 
@@ -46,6 +48,10 @@
         <div class="statusRow">
           <span>Settings</span>
           <strong id="saveState" class="statusPill idle">Not saved</strong>
+        </div>
+        <div class="statusRow">
+          <span>Overlay</span>
+          <strong id="overlayState" class="statusPill idle">Not configured</strong>
         </div>
         <div class="statusRow">
           <span>Login</span>

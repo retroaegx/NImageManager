@@ -1,7 +1,20 @@
 const ext = globalThis.browser ?? globalThis.chrome;
 
 function runtimeMessage(payload) {
-  return new Promise((resolve) => ext.runtime.sendMessage(payload, resolve));
+  return new Promise((resolve) => {
+    try {
+      ext.runtime.sendMessage(payload, (response) => {
+        const runtimeError = ext.runtime?.lastError;
+        if (runtimeError) {
+          resolve({ ok: false, message: runtimeError.message || 'Runtime error' });
+          return;
+        }
+        resolve(response);
+      });
+    } catch (error) {
+      resolve({ ok: false, message: String(error?.message || error || 'Runtime error') });
+    }
+  });
 }
 
 const $ = (id) => document.getElementById(id);
@@ -13,22 +26,31 @@ function setPill(id, text, kind) {
   node.className = `statusPill ${kind}`;
 }
 
-async function loadConfig() {
-  const response = await runtimeMessage({ type: 'nim-get-config' });
-  const config = response?.config || {};
+function applyConfig(config) {
   $('baseUrl').value = config.baseUrl || '';
   setPill('saveState', config.baseUrl ? 'Saved' : 'Not saved', config.baseUrl ? 'success' : 'idle');
+  setPill('overlayState', config.baseUrl ? 'Ready' : 'Not configured', config.baseUrl ? 'success' : 'idle');
   setPill('loginState', config.token ? 'Logged in' : 'Not logged in', config.token ? 'success' : 'idle');
 }
 
-async function saveBaseUrl() {
-  const response = await runtimeMessage({ type: 'nim-save-base-url', baseUrl: $('baseUrl').value });
+async function loadConfig() {
+  const response = await runtimeMessage({ type: 'nim-get-config' });
+  if (!response?.ok) {
+    throw new Error(response?.message || 'Load failed');
+  }
+  applyConfig(response.config || {});
+}
+
+async function saveConfig() {
+  const response = await runtimeMessage({
+    type: 'nim-save-config',
+    baseUrl: $('baseUrl').value,
+  });
   if (!response?.ok) {
     setPill('saveState', 'Save failed', 'error');
-    throw new Error(response?.message || 'Failed to save domain');
+    throw new Error(response?.message || 'Failed to save settings');
   }
-  $('baseUrl').value = response.baseUrl || $('baseUrl').value;
-  setPill('saveState', 'Saved', 'success');
+  applyConfig(response.config || {});
 }
 
 async function login() {
@@ -43,8 +65,8 @@ async function login() {
     throw new Error(response?.message || 'Login failed');
   }
   $('password').value = '';
-  setPill('loginState', 'Login OK', 'success');
   await loadConfig();
+  setPill('loginState', 'Login OK', 'success');
 }
 
 async function logout() {
@@ -53,8 +75,8 @@ async function logout() {
     setPill('loginState', 'Logout failed', 'error');
     throw new Error(response?.message || 'Logout failed');
   }
-  setPill('loginState', 'Logged out', 'idle');
   await loadConfig();
+  setPill('loginState', 'Logged out', 'idle');
 }
 
 async function checkSession() {
@@ -76,15 +98,32 @@ async function openLoginPage() {
   await runtimeMessage({ type: 'nim-open-login-page', loginUrl: `${normalized}/login.html` });
 }
 
-$('saveBaseUrl').addEventListener('click', () => saveBaseUrl().catch(() => {}));
+async function openOverlayPage() {
+  const response = await runtimeMessage({ type: 'nim-get-config' });
+  const config = response?.config || {};
+  const overlayUrl = String(config.baseUrl || '').trim();
+  if (!overlayUrl) {
+    setPill('overlayState', 'Domain required', 'error');
+    throw new Error('Domain required');
+  }
+  const openResponse = await runtimeMessage({ type: 'nim-open-url', url: overlayUrl });
+  if (!openResponse?.ok) {
+    setPill('overlayState', 'Open failed', 'error');
+    throw new Error(openResponse?.message || 'Open failed');
+  }
+}
+
+$('saveConfig').addEventListener('click', () => saveConfig().catch(() => {}));
 $('login').addEventListener('click', () => login().catch(() => {}));
 $('logout').addEventListener('click', () => logout().catch(() => {}));
 $('checkSession').addEventListener('click', () => checkSession().catch(() => setPill('loginState', 'Check failed', 'error')));
 $('openLoginPage').addEventListener('click', () => openLoginPage().catch(() => setPill('loginState', 'Open failed', 'error')));
+$('openOverlayPage').addEventListener('click', () => openOverlayPage().catch(() => setPill('overlayState', 'Open failed', 'error')));
 
 document.addEventListener('DOMContentLoaded', () => {
   loadConfig().catch(() => {
     setPill('saveState', 'Load failed', 'error');
+    setPill('overlayState', 'Load failed', 'error');
     setPill('loginState', 'Load failed', 'error');
   });
 });

@@ -6,6 +6,85 @@ const STORAGE_KEYS = {
   user: 'nim.user',
 };
 
+
+const AUTH_HEADER_NAME = 'Authorization';
+const AUTH_SCHEME = 'Bearer';
+const AUTH_EXCLUDED_PATHS = new Set([
+  '/api/ext/login',
+  '/api/auth/login',
+  '/api/auth/logout',
+]);
+
+function shouldInjectAuthHeader(requestUrl, config) {
+  const token = String(config?.token || '').trim();
+  const baseUrl = String(config?.baseUrl || '').trim();
+  if (!token || !baseUrl) {
+    return false;
+  }
+
+  let request;
+  let base;
+  try {
+    request = new URL(requestUrl);
+    base = new URL(baseUrl);
+  } catch (_) {
+    return false;
+  }
+
+  if (request.origin !== base.origin) {
+    return false;
+  }
+  if (AUTH_EXCLUDED_PATHS.has(request.pathname)) {
+    return false;
+  }
+  return true;
+}
+
+function upsertRequestHeader(headers, name, value) {
+  const normalized = String(name || '').toLowerCase();
+  if (!normalized) {
+    return headers;
+  }
+
+  let replaced = false;
+  const nextHeaders = Array.isArray(headers) ? headers.map((header) => {
+    if (String(header?.name || '').toLowerCase() !== normalized) {
+      return header;
+    }
+    replaced = true;
+    return { ...header, value };
+  }) : [];
+
+  if (!replaced) {
+    nextHeaders.push({ name, value });
+  }
+  return nextHeaders;
+}
+
+async function injectAuthHeader(details) {
+  if (!details?.url) {
+    return {};
+  }
+
+  const config = await getConfig();
+  if (!shouldInjectAuthHeader(details.url, config)) {
+    return {};
+  }
+
+  const token = String(config.token || '').trim();
+  if (!token) {
+    return {};
+  }
+
+  return {
+    requestHeaders: upsertRequestHeader(
+      details.requestHeaders,
+      AUTH_HEADER_NAME,
+      `${AUTH_SCHEME} ${token}`
+    ),
+  };
+}
+
 function apiBaseFrom(value) {
   const raw = String(value || '').trim();
   if (!raw) {
@@ -19,6 +98,7 @@ function apiBaseFrom(value) {
   return url.toString().replace(/\/$/, '');
 }
 
+
 function getStorage(keys) {
   return new Promise((resolve) => ext.storage.local.get(keys, resolve));
 }
@@ -27,13 +107,18 @@ function setStorage(values) {
   return new Promise((resolve) => ext.storage.local.set(values, resolve));
 }
 
-async function getConfig() {
-  const stored = await getStorage(Object.values(STORAGE_KEYS));
+function normalizeConfig(stored) {
+  const baseUrl = String(stored[STORAGE_KEYS.baseUrl] || '').trim();
   return {
-    baseUrl: String(stored[STORAGE_KEYS.baseUrl] || '').trim(),
+    baseUrl,
     token: String(stored[STORAGE_KEYS.token] || '').trim(),
     user: stored[STORAGE_KEYS.user] || null,
   };
+}
+
+async function getConfig() {
+  const stored = await getStorage(Object.values(STORAGE_KEYS));
+  return normalizeConfig(stored || {});
 }
 
 async function saveConfig(nextConfig) {
@@ -195,6 +280,25 @@ async function openLoginPage(loginUrl) {
   await openOptionsPage();
 }
 
+async function openTab(targetUrl) {
+  const url = String(targetUrl || '').trim();
+  if (!url) {
+    throw new Error('URL が未設定です');
+  }
+  if (!(ext.tabs && ext.tabs.create)) {
+    throw new Error('タブを開けません');
+  }
+  await ext.tabs.create({ url });
+}
+
+if (ext.webRequest?.onBeforeSendHeaders) {
+  ext.webRequest.onBeforeSendHeaders.addListener(
+    injectAuthHeader,
+    { urls: ['<all_urls>'] },
+    ['blocking', 'requestHeaders']
+  );
+}
+
 if (ext.runtime.onInstalled) {
   ext.runtime.onInstalled.addListener((details) => {
     if (details.reason === 'install') {
@@ -212,7 +316,16 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (type === 'nim-save-base-url') {
       const baseUrl = apiBaseFrom(message.baseUrl || '');
       await saveConfig({ baseUrl });
-      return { ok: true, baseUrl };
+      return { ok: true, baseUrl, config: await getConfig() };
+    }
+    if (type === 'nim-save-config') {
+      const currentConfig = await getConfig();
+      const rawBaseUrl = Object.prototype.hasOwnProperty.call(message, 'baseUrl')
+        ? String(message.baseUrl || '').trim()
+        : currentConfig.baseUrl;
+      const nextBaseUrl = rawBaseUrl ? apiBaseFrom(rawBaseUrl) : '';
+      await saveConfig({ baseUrl: nextBaseUrl });
+      return { ok: true, config: await getConfig() };
     }
     if (type === 'nim-login') {
       const data = await loginToServer(message);
@@ -234,6 +347,10 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     if (type === 'nim-open-login-page') {
       await openLoginPage(message.loginUrl || '');
+      return { ok: true };
+    }
+    if (type === 'nim-open-url') {
+      await openTab(message.url || '');
       return { ok: true };
     }
     return { ok: false, code: 'UNKNOWN_MESSAGE', message: 'unknown message' };
