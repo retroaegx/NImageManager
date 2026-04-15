@@ -4,12 +4,21 @@ const STORAGE_KEYS = {
   baseUrl: 'nim.base_url',
   token: 'nim.token',
   user: 'nim.user',
+  showNovelAiMenu: 'nim.show_novelai_menu',
+  autoTransfer: 'nim.auto_transfer',
 };
+
+function extError(code, extra = {}) {
+  const error = new Error(String(code || 'UNEXPECTED_ERROR'));
+  error.code = String(code || 'UNEXPECTED_ERROR');
+  Object.assign(error, extra);
+  return error;
+}
 
 function apiBaseFrom(value) {
   const raw = String(value || '').trim();
   if (!raw) {
-    throw new Error('ドメインを入力してください');
+    throw extError('DOMAIN_REQUIRED');
   }
   const withScheme = /^[a-z]+:\/\//i.test(raw) ? raw : `https://${raw}`;
   const url = new URL(withScheme);
@@ -34,6 +43,8 @@ function normalizeConfig(stored) {
     baseUrl,
     token: String(stored[STORAGE_KEYS.token] || '').trim(),
     user: stored[STORAGE_KEYS.user] || null,
+    showNovelAiMenu: stored[STORAGE_KEYS.showNovelAiMenu] !== false,
+    autoTransfer: stored[STORAGE_KEYS.autoTransfer] === true,
   };
 }
 
@@ -53,6 +64,12 @@ async function saveConfig(nextConfig) {
   if (Object.prototype.hasOwnProperty.call(nextConfig, 'user')) {
     payload[STORAGE_KEYS.user] = nextConfig.user || null;
   }
+  if (Object.prototype.hasOwnProperty.call(nextConfig, 'showNovelAiMenu')) {
+    payload[STORAGE_KEYS.showNovelAiMenu] = Boolean(nextConfig.showNovelAiMenu);
+  }
+  if (Object.prototype.hasOwnProperty.call(nextConfig, 'autoTransfer')) {
+    payload[STORAGE_KEYS.autoTransfer] = Boolean(nextConfig.autoTransfer);
+  }
   await setStorage(payload);
 }
 
@@ -69,7 +86,7 @@ async function loginToServer({ baseUrl, username, password }) {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok || !data.ok) {
-    throw new Error(data.message || data.detail?.message || 'ログインに失敗しました');
+    throw extError(data.code || 'LOGIN_FAILED');
   }
   await saveConfig({
     baseUrl: apiBase,
@@ -82,10 +99,10 @@ async function loginToServer({ baseUrl, username, password }) {
 async function fetchSession() {
   const config = await getConfig();
   if (!config.baseUrl) {
-    throw new Error('ドメインが未設定です');
+    throw extError('DOMAIN_REQUIRED');
   }
   if (!config.token) {
-    return { ok: false, code: 'AUTH_REQUIRED', message: 'Login required' };
+    return { ok: false, code: 'AUTH_REQUIRED' };
   }
   const response = await fetch(`${config.baseUrl}/api/ext/session`, {
     method: 'GET',
@@ -97,12 +114,12 @@ async function fetchSession() {
     return {
       ok: false,
       code: 'AUTH_REQUIRED',
-      message: data.message || 'Login required',
+      
       loginUrl: data.login_url || `${config.baseUrl}/login.html`,
     };
   }
   if (!response.ok || !data.ok) {
-    throw new Error(data.message || 'セッション確認に失敗しました');
+    throw extError(data.code || 'SESSION_CHECK_FAILED');
   }
   await saveConfig({ user: data.user || null });
   return {
@@ -130,10 +147,10 @@ function detectFilename(contentType, originalName) {
 async function uploadImage(payload) {
   const config = await getConfig();
   if (!config.baseUrl) {
-    return { ok: false, code: 'CONFIG_REQUIRED', message: 'Open extension settings and save the domain first.' };
+    return { ok: false, code: 'CONFIG_REQUIRED' };
   }
   if (!config.token) {
-    return { ok: false, code: 'AUTH_REQUIRED', message: 'Login required', loginUrl: `${config.baseUrl}/login.html` };
+    return { ok: false, code: 'AUTH_REQUIRED', loginUrl: `${config.baseUrl}/login.html` };
   }
 
   const filename = detectFilename(payload.mimeType, payload.filename);
@@ -157,7 +174,7 @@ async function uploadImage(payload) {
     return {
       ok: false,
       code: 'AUTH_REQUIRED',
-      message: data.message || 'Login required',
+      
       loginUrl: data.login_url || `${config.baseUrl}/login.html`,
     };
   }
@@ -165,14 +182,14 @@ async function uploadImage(payload) {
     return {
       ok: false,
       code: data.code || 'UPLOAD_FAILED',
-      message: data.detail || data.message || `Upload failed (${response.status})`,
+      status: response.status,
     };
   }
   return {
     ok: true,
     imageId: Number(data.image_id || 0),
     dedup: Boolean(data.dedup),
-    message: data.message || 'Uploaded',
+    
     detailUrl: data.detail_url || '',
   };
 }
@@ -204,10 +221,10 @@ async function openLoginPage(loginUrl) {
 async function openTab(targetUrl) {
   const url = String(targetUrl || '').trim();
   if (!url) {
-    throw new Error('URL が未設定です');
+    throw extError('URL_REQUIRED');
   }
   if (!(ext.tabs && ext.tabs.create)) {
-    throw new Error('タブを開けません');
+    throw extError('OPEN_TAB_FAILED');
   }
   await ext.tabs.create({ url });
 }
@@ -215,6 +232,7 @@ async function openTab(targetUrl) {
 if (ext.runtime.onInstalled) {
   ext.runtime.onInstalled.addListener((details) => {
     if (details.reason === 'install') {
+      saveConfig({ showNovelAiMenu: true, autoTransfer: false }).catch(() => {});
       openOptionsPage().catch(() => {});
     }
   });
@@ -237,7 +255,11 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
         ? String(message.baseUrl || '').trim()
         : currentConfig.baseUrl;
       const nextBaseUrl = rawBaseUrl ? apiBaseFrom(rawBaseUrl) : '';
-      await saveConfig({ baseUrl: nextBaseUrl });
+      await saveConfig({
+        baseUrl: nextBaseUrl,
+        showNovelAiMenu: Object.prototype.hasOwnProperty.call(message, 'showNovelAiMenu') ? Boolean(message.showNovelAiMenu) : currentConfig.showNovelAiMenu,
+        autoTransfer: Object.prototype.hasOwnProperty.call(message, 'autoTransfer') ? Boolean(message.autoTransfer) : currentConfig.autoTransfer,
+      });
       return { ok: true, config: await getConfig() };
     }
     if (type === 'nim-login') {
@@ -266,9 +288,9 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
       await openTab(message.url || '');
       return { ok: true };
     }
-    return { ok: false, code: 'UNKNOWN_MESSAGE', message: 'unknown message' };
+    return { ok: false, code: 'UNKNOWN_MESSAGE' };
   })().then(sendResponse).catch((error) => {
-    sendResponse({ ok: false, code: 'UNEXPECTED_ERROR', message: String(error?.message || error || 'unexpected error') });
+    sendResponse({ ok: false, code: String(error?.code || error?.message || 'UNEXPECTED_ERROR') });
   });
   return true;
 });

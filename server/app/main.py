@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import mimetypes
 from contextlib import asynccontextmanager
 import re
@@ -208,7 +209,7 @@ def _asset_version(name: str) -> str:
         return "0"
 
 
-def _html_with_asset_versions(name: str) -> HTMLResponse:
+def _html_with_asset_versions(name: str, bootstrap_user: dict | None = None) -> HTMLResponse:
     path = WEB_DIR / name
     html = path.read_text(encoding="utf-8")
     repls = {
@@ -227,33 +228,45 @@ def _html_with_asset_versions(name: str) -> HTMLResponse:
             rf'\1/\2?v={version}\3',
             html,
         )
+    if bootstrap_user is not None:
+        payload = {"user": bootstrap_user}
+        script = "<script>window.__NIM_BOOTSTRAP__=" + json.dumps(payload, ensure_ascii=False).replace("</", "<\/") + ";</script>"
+        html = html.replace("</body>", f"  {script}\n</body>")
     return HTMLResponse(content=html)
 
 
-def _file(name: str):
+def _file(name: str, bootstrap_user: dict | None = None):
     path = WEB_DIR / name
     if path.suffix.lower() == ".html":
-        return _html_with_asset_versions(name)
+        return _html_with_asset_versions(name, bootstrap_user=bootstrap_user)
     return FileResponse(str(path))
+
+def _bootstrap_user_payload(user: dict | None) -> dict | None:
+    if not user:
+        return None
+    data = dict(user)
+    data["perf_enabled"] = bool(perf_logging_enabled())
+    return data
+
 
 @app.get("/")
 def _root(user: dict | None = Depends(get_user_optional)):
     if not user:
         return RedirectResponse(url="/login.html", status_code=302)
-    return _file("index.html")
+    return _file("index.html", bootstrap_user=_bootstrap_user_payload(user))
 
 @app.get("/index.html")
 def _index(user: dict | None = Depends(get_user_optional)):
     if not user:
         return RedirectResponse(url="/login.html", status_code=302)
-    return _file("index.html")
+    return _file("index.html", bootstrap_user=_bootstrap_user_payload(user))
 
 
 @app.get("/settings.html")
 def _settings(user: dict | None = Depends(get_user_optional)):
     if not user:
         return RedirectResponse(url="/login.html", status_code=302)
-    return _file("settings.html")
+    return _file("settings.html", bootstrap_user=_bootstrap_user_payload(user))
 
 
 @app.get("/login.html")
@@ -289,7 +302,7 @@ def _setup(user: dict | None = Depends(get_user_optional)):
 def _set_password(user: dict | None = Depends(get_user_optional)):
     # Password tokens are verified by API; page is public.
     if user:
-        return _file("set-password.html")
+        return _file("set-password.html", bootstrap_user=_bootstrap_user_payload(user))
     return _file("set-password.html")
 
 
@@ -299,7 +312,7 @@ def _admin_page(user: dict | None = Depends(get_user_optional)):
         return RedirectResponse(url="/login.html", status_code=302)
     if user.get("role") not in {"admin", "master"}:
         return RedirectResponse(url="/", status_code=302)
-    return _file("admin.html")
+    return _file("admin.html", bootstrap_user=_bootstrap_user_payload(user))
 
 
 @app.get("/maintenance.html")
@@ -308,7 +321,7 @@ def _maintenance_page(user: dict | None = Depends(get_user_optional)):
         return RedirectResponse(url="/login.html", status_code=302)
     if user.get("role") not in {"admin", "master"}:
         return RedirectResponse(url="/", status_code=302)
-    return _file("maintenance.html")
+    return _file("maintenance.html", bootstrap_user=_bootstrap_user_payload(user))
 
 # Static UI assets
 PUBLIC_THUMBS_DIR.mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,251 @@
+{
+  "extName": {
+    "message": "NIM Transfer"
+  },
+  "extDescription": {
+    "message": "NovelAI 上で NIM 転送とオーバーレイ表示を行います。"
+  },
+  "extActionTitle": {
+    "message": "NIM Transfer"
+  },
+  "optionsPageTitle": {
+    "message": "NIM 拡張設定"
+  },
+  "optionsHeading": {
+    "message": "NIM 拡張設定"
+  },
+  "optionsNote": {
+    "message": "NovelAI 上の拡張から、NIM 転送とオーバーレイ表示の両方で使う設定です。"
+  },
+  "domainLabel": {
+    "message": "Domain"
+  },
+  "domainPlaceholder": {
+    "message": "https://nim.example.com"
+  },
+  "domainHelp": {
+    "message": "NIM のドメイン。API パスは不要です。"
+  },
+  "saveSettings": {
+    "message": "設定を保存"
+  },
+  "checkSession": {
+    "message": "セッション確認"
+  },
+  "openLoginPage": {
+    "message": "ログインページを開く"
+  },
+  "openNim": {
+    "message": "NIM を開く"
+  },
+  "loginSection": {
+    "message": "Login"
+  },
+  "usernameLabel": {
+    "message": "Username"
+  },
+  "passwordLabel": {
+    "message": "Password"
+  },
+  "loginButton": {
+    "message": "Login"
+  },
+  "logoutButton": {
+    "message": "Logout"
+  },
+  "statusSection": {
+    "message": "Status"
+  },
+  "settingsStatusLabel": {
+    "message": "Settings"
+  },
+  "overlayStatusLabel": {
+    "message": "Overlay"
+  },
+  "loginStatusLabel": {
+    "message": "Login"
+  },
+  "status_saved": {
+    "message": "保存済み"
+  },
+  "status_not_saved": {
+    "message": "未保存"
+  },
+  "status_ready": {
+    "message": "準備完了"
+  },
+  "status_not_configured": {
+    "message": "未設定"
+  },
+  "status_logged_in": {
+    "message": "ログイン済み"
+  },
+  "status_not_logged_in": {
+    "message": "未ログイン"
+  },
+  "status_login_ok": {
+    "message": "ログイン成功"
+  },
+  "status_logged_out": {
+    "message": "ログアウト済み"
+  },
+  "status_login_required": {
+    "message": "ログインが必要です"
+  },
+  "status_check_failed": {
+    "message": "確認失敗"
+  },
+  "status_load_failed": {
+    "message": "読込失敗"
+  },
+  "status_save_failed": {
+    "message": "保存失敗"
+  },
+  "status_logout_failed": {
+    "message": "ログアウト失敗"
+  },
+  "transferToNim": {
+    "message": "NIM へ転送"
+  },
+  "transferring": {
+    "message": "転送中..."
+  },
+  "transferSuccess": {
+    "message": "転送しました"
+  },
+  "overlayLoading": {
+    "message": "NIM を読み込み中..."
+  },
+  "overlayMenu": {
+    "message": "NIM メニュー"
+  },
+  "overlayTitle": {
+    "message": "NIM オーバーレイ"
+  },
+  "error_RUNTIME_ERROR": {
+    "message": "拡張機能の実行エラーです。"
+  },
+  "error_DOMAIN_REQUIRED": {
+    "message": "ドメインを入力してください。"
+  },
+  "error_CONFIG_REQUIRED": {
+    "message": "拡張設定を開いてドメインを保存してください。"
+  },
+  "error_AUTH_REQUIRED": {
+    "message": "ログインが必要です。"
+  },
+  "error_LOGIN_FAILED": {
+    "message": "ログインに失敗しました。"
+  },
+  "error_SESSION_CHECK_FAILED": {
+    "message": "セッション確認に失敗しました。"
+  },
+  "error_UPLOAD_FAILED": {
+    "message": "アップロードに失敗しました。"
+  },
+  "error_OPEN_FAILED": {
+    "message": "開けませんでした。"
+  },
+  "error_URL_REQUIRED": {
+    "message": "URL が未設定です。"
+  },
+  "error_OPEN_TAB_FAILED": {
+    "message": "タブを開けませんでした。"
+  },
+  "error_CANVAS_TO_BLOB_FAILED": {
+    "message": "canvas から画像化できませんでした。"
+  },
+  "error_PAGE_RESPONSE_TIMEOUT": {
+    "message": "NovelAI ページ応答がタイムアウトしました。"
+  },
+  "error_PAGE_IMAGE_DATA_UNAVAILABLE": {
+    "message": "ページから画像データを取得できませんでした。"
+  },
+  "error_IMAGE_URL_NOT_FOUND": {
+    "message": "画像 URL が見つかりません。"
+  },
+  "error_VISIBLE_IMAGE_NOT_FOUND": {
+    "message": "表示中の画像が見つかりません。"
+  },
+  "error_NIM_OPEN_FAILED": {
+    "message": "NIM を開けませんでした。"
+  },
+  "error_LOGIN_URL_NOT_CONFIGURED": {
+    "message": "ログイン先 URL が未設定です。"
+  },
+  "error_LOGIN_PAGE_OPEN_FAILED": {
+    "message": "ログインページを開けませんでした。"
+  },
+  "error_RELOAD_FAILED": {
+    "message": "再読込できませんでした。"
+  },
+  "error_OVERLAY_URL_NOT_CONFIGURED": {
+    "message": "オーバーレイ URL が未設定です。"
+  },
+  "error_OPEN_NEW_TAB_FAILED": {
+    "message": "別タブを開けませんでした。"
+  },
+  "error_GET_CONFIG_FAILED": {
+    "message": "拡張設定を取得できませんでした。"
+  },
+  "error_INVALID_OVERLAY_URL": {
+    "message": "オーバーレイ URL が不正です。"
+  },
+  "toast_login_in_other_tab": {
+    "message": "NIM は別タブで先にログインしてください。ログイン後に「再読込」を押してください。"
+  },
+  "toast_save_domain_first": {
+    "message": "拡張設定で NIM の URL を保存してください。"
+  },
+  "overlayClose": {
+    "message": "閉じる"
+  },
+  "overlayReload": {
+    "message": "再読込"
+  },
+  "overlayLogin": {
+    "message": "ログイン"
+  },
+  "overlaySettings": {
+    "message": "設定"
+  },
+  "overlayNewTab": {
+    "message": "別タブ"
+  },
+  "firefoxOverlayLoginRequired": {
+    "message": "Firefox ではオーバーレイ利用前に拡張機能設定でログインしてください。"
+  },
+  "error_UNKNOWN": {
+    "message": "予期しないエラーが発生しました。"
+  },
+  "error_UNKNOWN_MESSAGE": {
+    "message": "不明なメッセージです。"
+  },
+  "error_UNEXPECTED_ERROR": {
+    "message": "予期しないエラーが発生しました。"
+  },
+  "behaviorSection": {
+    "message": "動作設定"
+  },
+  "showNovelAiMenuLabel": {
+    "message": "NovelAI に NIM メニューを表示する"
+  },
+  "showNovelAiMenuHelp": {
+    "message": "有効時のみ、NovelAI の左上に NIM 起動ボタンを表示します。"
+  },
+  "autoTransferLabel": {
+    "message": "自動転送"
+  },
+  "autoTransferHelp": {
+    "message": "有効時は、生成画像をボタンを押さずに自動で NIM へ転送します。"
+  },
+  "behaviorAutoSaveNote": {
+    "message": "このセクションの変更は切り替え時にすぐ保存されます。"
+  },
+  "status_saving": {
+    "message": "保存中…"
+  },
+  "status_ready_to_save": {
+    "message": "準備完了"
+  }
+}

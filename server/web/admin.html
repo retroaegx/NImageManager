@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Admin - NIM</title>
+  <title data-i18n="page.admin.title">Admin - NIM</title>
   <link rel="stylesheet" href="/styles.css?v=45" />
 </head>
 <body class="pageAdmin">
@@ -23,8 +23,8 @@
       </div>
 
       <nav class="menu" aria-label="main">
-        <button class="tab" onclick="location.assign('/')"><span>戻る</span><i class="tabGlow"></i></button>
-        <button class="tab active"><span>アカウント管理</span><i class="tabGlow"></i></button>
+        <button class="tab" onclick="location.assign('/')"><span data-i18n="common.back">戻る</span><i class="tabGlow"></i></button>
+        <button class="tab active"><span data-i18n="menu.admin">アカウント管理</span><i class="tabGlow"></i></button>
       </nav>
 
       <div class="right">
@@ -32,16 +32,16 @@
           <span id="meLabel" class="me"></span>
         </div>
 
-        <button id="hamburger" class="iconBtn" title="メニュー" aria-label="メニュー">
+        <button id="hamburger" class="iconBtn" data-i18n-title="menu.title" data-i18n-aria-label="menu.title">
           <span class="icon">☰</span>
         </button>
 
-        <div id="userMenu" class="menuPopup hidden" role="menu" aria-label="ユーザーメニュー">
-          <button id="menuAdmin" class="menuItem hidden" role="menuitem">アカウント管理</button>
-          <button id="menuMaintenance" class="menuItem hidden" role="menuitem">メンテナンス</button>
-          <button id="menuSettings" class="menuItem" role="menuitem">個人設定</button>
-          <button id="menuPwLink" class="menuItem" role="menuitem">パスワード変更</button>
-          <button id="menuLogout" class="menuItem" role="menuitem">ログアウト</button>
+        <div id="userMenu" class="menuPopup hidden" role="menu" data-i18n-aria-label="menu.user">
+          <button id="menuAdmin" class="menuItem hidden" role="menuitem" data-i18n="menu.admin">アカウント管理</button>
+          <button id="menuMaintenance" class="menuItem hidden" role="menuitem" data-i18n="menu.maintenance">メンテナンス</button>
+          <button id="menuSettings" class="menuItem" role="menuitem" data-i18n="menu.settings">個人設定</button>
+          <button id="menuPwLink" class="menuItem" role="menuitem" data-i18n="menu.password">パスワード変更</button>
+          <button id="menuLogout" class="menuItem" role="menuitem" data-i18n="menu.logout">ログアウト</button>
         </div>
       </div>
       </div>
@@ -51,49 +51,49 @@
       <section class="panel">
         <div class="card">
           <div class="panelTitleRow">
-            <h2>ユーザー</h2>
+            <h2 data-i18n="admin.users.title">ユーザー</h2>
             <div class="small"></div>
           </div>
 
           <div class="adminGrid">
             <div class="adminCard">
-              <h3>作成（URL発行）</h3>
+              <h3 data-i18n="admin.create.title">作成（URL発行）</h3>
               <div class="field">
-                <label>ユーザー名</label>
+                <label data-i18n="common.username">ユーザー名</label>
                 <input id="newUserName" autocomplete="off" />
               </div>
               <div class="field">
-                <label>権限</label>
+                <label data-i18n="admin.role">権限</label>
                 <select id="newUserRole">
-                  <option value="user">user</option>
-                  <option value="admin">admin</option>
+                  <option value="user" data-i18n="role.user">user</option>
+                  <option value="admin" data-i18n="role.admin">admin</option>
                 </select>
               </div>
               <div class="row" style="justify-content:space-between; gap:10px">
-                <button id="createUserBtn" class="primaryBtn" style="min-width:180px">作成してURL発行</button>
+                <button id="createUserBtn" class="primaryBtn" style="min-width:180px" data-i18n="admin.create.action">作成してURL発行</button>
                 <span id="createErr" class="err"></span>
               </div>
 
               <div id="issuedBox" class="field" style="margin-top:12px; display:none">
-                <label>発行URL</label>
+                <label data-i18n="admin.issued_url">発行URL</label>
                 <div class="row" style="gap:10px">
                   <input id="issuedUrl" readonly />
-                  <button id="copyIssuedBtn" class="ghostBtn" style="min-width:120px">コピー</button>
+                  <button id="copyIssuedBtn" class="ghostBtn" style="min-width:120px" data-i18n="common.copy">コピー</button>
                 </div>
               </div>
             </div>
 
             <div class="adminCard adminGrow">
-              <h3>一覧</h3>
+              <h3 data-i18n="admin.list.title">一覧</h3>
               <div class="adminTableWrap">
                 <table class="adminTable">
                   <thead>
                     <tr>
-                      <th>ユーザー名</th>
-                      <th>権限</th>
-                      <th>状態</th>
-                      <th>無効</th>
-                      <th>作成日</th>
+                      <th data-i18n="common.username">ユーザー名</th>
+                      <th data-i18n="admin.role">権限</th>
+                      <th data-i18n="common.status">状態</th>
+                      <th data-i18n="admin.disabled">無効</th>
+                      <th data-i18n="common.created_at">作成日</th>
                       <th></th>
                     </tr>
                   </thead>
@@ -107,6 +107,7 @@
     </main>
   </div>
 
-  <script type="module" src="/admin.js?v=42"></script>
+  <script type="module" src="/lib/page-i18n.js"></script>
+  <script type="module" src="/admin.js"></script>
 </body>
 </html>

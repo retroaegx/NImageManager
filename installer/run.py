@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import locale
 import os
 from pathlib import Path
 import shutil
@@ -29,6 +30,100 @@ _LOCAL_URL_COLOR = "\033[38;5;114m"
 _PUBLIC_URL_COLOR = "\033[38;5;221m"
 _RESET_COLOR = "\033[0m"
 _ANSI_ENABLED: bool | None = None
+
+
+_MESSAGES = {
+    "ja": {
+        "fatal_missing_python_1": "Python 3.12 または 3.13 が見つかりません。現在の起動 Python は {version} です。",
+        "fatal_missing_python_2": "このアプリは Python 3.12 / 3.13 を使って仮想環境を作成し、その後もそのバージョンで起動します。",
+        "fatal_missing_python_3": "Python 3.13 または 3.12 をインストールしてから、再度起動してください。",
+        "fatal_unsupported_venv_1": "現在の .venv は未対応の Python {version} で起動されています。",
+        "fatal_unsupported_venv_2": "プロジェクト直下の run.bat / run.sh から起動し直してください。必要なら .venv を削除して再実行してください。",
+        "progress_create_venv": "Python {version} ({source}) で仮想環境を作成しています",
+        "fatal_create_venv_failed": "virtual environment の作成に失敗しました",
+        "fatal_created_venv_unsupported": "作成された virtual environment が未対応の Python {version} を使用しています",
+        "progress_use_existing_venv": "既存の virtual environment を使用します (Python {version})",
+        "progress_recreate_venv": "既存の virtual environment が未対応の Python {version} なので再作成します",
+        "fatal_remove_venv_failed": "既存の virtual environment の削除に失敗しました: {error}",
+        "progress_bootstrap_pip": "virtual environment に pip がないため ensurepip で初期化します",
+        "fatal_missing_pip": "プロジェクトの virtual environment で pip が使用できません",
+        "progress_install_requirements": "Python 依存関係をインストールしています ...",
+        "progress_launch_server": "uvicorn を http://localhost:{port} で起動しています",
+        "progress_server_exited": "ready 前にプロセスが終了しました (code={code})",
+        "progress_server_ready": "アプリケーションが {elapsed:.1f}s で起動しました",
+        "progress_server_waiting": "アプリケーションの起動待ち ... {elapsed:.1f}s ({error})",
+        "progress_server_timeout": "起動タイムアウト {timeout:.0f}s ({error})",
+        "progress_startup_init": "ランチャーを初期化しています",
+        "progress_restart_in_venv": "プロジェクト virtual environment 内で再起動します",
+        "fatal_pip_install_failed": "pip install に失敗しました",
+        "progress_prepare_tunnel": "Cloudflare トンネルの準備をしています",
+        "progress_tunnel_disabled": "NAI_IM_TUNNEL により無効です",
+        "progress_check_tunnel": "named tunnel / quick tunnel を確認しています",
+        "progress_named_tunnel_detected": "named tunnel を検出しました",
+        "progress_start_quick_tunnel": "quick tunnel を開始しています",
+        "progress_cloudflared_unavailable": "cloudflared が利用できないため公開 URL は無効です",
+        "startup_complete": "startup complete",
+        "urls": "URLs",
+        "public_failed": "  public: (failed)  ※ server/data/cloudflared_quick_tunnel.log を確認してください",
+        "stopping": "stopping...",
+    },
+    "en": {
+        "fatal_missing_python_1": "Python 3.12 or 3.13 was not found. The current interpreter is {version}.",
+        "fatal_missing_python_2": "This app creates its virtual environment with Python 3.12 or 3.13 and keeps using that version afterward.",
+        "fatal_missing_python_3": "Install Python 3.13 or 3.12 and start the app again.",
+        "fatal_unsupported_venv_1": "The current .venv is running on unsupported Python {version}.",
+        "fatal_unsupported_venv_2": "Start the app again from run.bat or run.sh at the project root. Delete .venv first if needed.",
+        "progress_create_venv": "creating virtual environment with Python {version} ({source})",
+        "fatal_create_venv_failed": "virtual environment creation failed",
+        "fatal_created_venv_unsupported": "created virtual environment uses unsupported Python {version}",
+        "progress_use_existing_venv": "using existing virtual environment (Python {version})",
+        "progress_recreate_venv": "existing virtual environment uses unsupported Python {version}; recreating",
+        "fatal_remove_venv_failed": "failed to remove existing virtual environment: {error}",
+        "progress_bootstrap_pip": "pip is missing in the virtual environment; bootstrapping with ensurepip",
+        "fatal_missing_pip": "pip is not available in the project virtual environment",
+        "progress_install_requirements": "installing Python requirements ...",
+        "progress_launch_server": "launching uvicorn on http://localhost:{port}",
+        "progress_server_exited": "process exited before ready (code={code})",
+        "progress_server_ready": "application ready after {elapsed:.1f}s",
+        "progress_server_waiting": "waiting for application startup ... {elapsed:.1f}s ({error})",
+        "progress_server_timeout": "startup timeout after {timeout:.0f}s ({error})",
+        "progress_startup_init": "initializing launcher",
+        "progress_restart_in_venv": "restarting inside project virtual environment",
+        "fatal_pip_install_failed": "pip install failed",
+        "progress_prepare_tunnel": "preparing Cloudflare tunnel support",
+        "progress_tunnel_disabled": "disabled by NAI_IM_TUNNEL",
+        "progress_check_tunnel": "checking named tunnel / quick tunnel",
+        "progress_named_tunnel_detected": "named tunnel detected",
+        "progress_start_quick_tunnel": "starting quick tunnel",
+        "progress_cloudflared_unavailable": "cloudflared unavailable; public URL disabled",
+        "startup_complete": "startup complete",
+        "urls": "URLs",
+        "public_failed": "  public: (failed)  See server/data/cloudflared_quick_tunnel.log",
+        "stopping": "stopping...",
+    },
+}
+
+
+def _lang() -> str:
+    raw = (os.environ.get("NAI_IM_LANG") or "").strip().lower()
+    if raw.startswith("ja"):
+        return "ja"
+    if raw.startswith("en"):
+        return "en"
+    loc = (locale.getdefaultlocale()[0] or "") if hasattr(locale, "getdefaultlocale") else ""
+    return "ja" if str(loc).lower().startswith("ja") else "en"
+
+
+def _t(key: str, **kwargs) -> str:
+    lang = _lang()
+    table = _MESSAGES.get(lang) or _MESSAGES["en"]
+    fallback = _MESSAGES["en"]
+    template = table.get(key) or fallback.get(key) or key
+    return template.format(**kwargs)
+
+
+def _fatal(message: str) -> None:
+    print(f"[installer] FATAL: {message}", flush=True)
 
 
 def _enable_windows_ansi() -> bool:
@@ -171,49 +266,28 @@ def _select_supported_python_command() -> tuple[list[str], tuple[int, int], str]
 
 def _print_missing_supported_python_error() -> None:
     current_version = (sys.version_info.major, sys.version_info.minor)
-    print(
-        f"[installer] FATAL: Python 3.12 または 3.13 が見つかりません。現在の起動 Python は {_version_text(current_version)} です。",
-        flush=True,
-    )
-    print(
-        "[installer] FATAL: このアプリは Python 3.12 / 3.13 を使って仮想環境を作成し、その後もそのバージョンで起動します。",
-        flush=True,
-    )
-    print(
-        "[installer] FATAL: Python 3.13 または 3.12 をインストールしてから、再度起動してください。",
-        flush=True,
-    )
+    _fatal(_t("fatal_missing_python_1", version=_version_text(current_version)))
+    _fatal(_t("fatal_missing_python_2"))
+    _fatal(_t("fatal_missing_python_3"))
 
 
 def _print_active_unsupported_venv_error(version: tuple[int, int] | None) -> None:
-    print(
-        f"[installer] FATAL: 現在の .venv は未対応の Python {_version_text(version)} で起動されています。",
-        flush=True,
-    )
-    print(
-        "[installer] FATAL: プロジェクト直下の run.bat / run.sh から起動し直してください。必要なら .venv を削除して再実行してください。",
-        flush=True,
-    )
+    _fatal(_t("fatal_unsupported_venv_1", version=_version_text(version)))
+    _fatal(_t("fatal_unsupported_venv_2"))
 
 
 def _create_venv_with_python(root: Path, creator_cmd: list[str], creator_version: tuple[int, int], source_label: str) -> Path | None:
     venv_dir = root / ".venv"
     py = _venv_python(venv_dir)
-    _progress(
-        "venv",
-        f"creating virtual environment with Python {_version_text(creator_version)} ({source_label})",
-    )
+    _progress("venv", _t("progress_create_venv", version=_version_text(creator_version), source=source_label))
     cmd = creator_cmd + ["-m", "venv", str(venv_dir)]
     if subprocess.call(cmd, cwd=str(root)) != 0:
-        print("[installer] FATAL: virtual environment creation failed", flush=True)
+        _fatal(_t("fatal_create_venv_failed"))
         return None
 
     created_version = _probe_python_command([str(py)])
     if not _is_supported_python_version(created_version):
-        print(
-            f"[installer] FATAL: created virtual environment uses unsupported Python {_version_text(created_version)}",
-            flush=True,
-        )
+        _fatal(_t("fatal_created_venv_unsupported", version=_version_text(created_version)))
         return None
     return py
 
@@ -224,7 +298,7 @@ def _ensure_venv(root: Path) -> Path | None:
     existing_version = _probe_python_command([str(py)]) if py.exists() else None
 
     if _is_supported_python_version(existing_version):
-        _progress("venv", f"using existing virtual environment (Python {_version_text(existing_version)})")
+        _progress("venv", _t("progress_use_existing_venv", version=_version_text(existing_version)))
         return py
 
     selected = _select_supported_python_command()
@@ -238,14 +312,11 @@ def _ensure_venv(root: Path) -> Path | None:
         if _is_running_in_venv(root):
             _print_active_unsupported_venv_error(existing_version)
             return None
-        _progress(
-            "venv",
-            f"existing virtual environment uses unsupported Python {_version_text(existing_version)}; recreating",
-        )
+        _progress("venv", _t("progress_recreate_venv", version=_version_text(existing_version)))
         try:
             shutil.rmtree(venv_dir, ignore_errors=False)
         except OSError as exc:
-            print(f"[installer] FATAL: failed to remove existing virtual environment: {exc}", flush=True)
+            _fatal(_t("fatal_remove_venv_failed", error=exc))
             return None
 
     return _create_venv_with_python(root, creator_cmd, creator_version, source_label)
@@ -266,7 +337,7 @@ def _ensure_pip_available(py: Path, root: Path) -> bool:
     if subprocess.call(probe_cmd, cwd=str(root)) == 0:
         return True
 
-    _progress("dependencies", "pip is missing in the virtual environment; bootstrapping with ensurepip")
+    _progress("dependencies", _t("progress_bootstrap_pip"))
     ensurepip_cmd = [str(py), "-m", "ensurepip", "--upgrade"]
     if subprocess.call(ensurepip_cmd, cwd=str(root)) != 0:
         return False
@@ -281,12 +352,12 @@ def _rerun_in_venv(py: Path) -> int:
 
 def _pip_install(root: Path, py: Path) -> bool:
     if not _ensure_pip_available(py, root):
-        print("[installer] FATAL: pip is not available in the project virtual environment", flush=True)
+        _fatal(_t("fatal_missing_pip"))
         return False
 
     req = root / "requirements.txt"
     cmd = [str(py), "-m", "pip", "install", "-r", str(req)]
-    _progress("dependencies", "installing Python requirements ...")
+    _progress("dependencies", _t("progress_install_requirements"))
     return subprocess.call(cmd, cwd=str(root)) == 0
 
 
@@ -302,7 +373,7 @@ def _run_server(root: Path, py: Path) -> subprocess.Popen:
     ]
     if os.environ.get("NAI_IM_RELOAD", "").strip().lower() in {"1", "true", "yes", "on"}:
         cmd.append("--reload")
-    _progress("server", f"launching uvicorn on http://localhost:{PORT}")
+    _progress("server", _t("progress_launch_server", port=PORT))
     return subprocess.Popen(cmd, cwd=str(root))
 
 
@@ -315,7 +386,7 @@ def _wait_for_local_server_ready(port: int, proc: subprocess.Popen, *, timeout_s
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             code = proc.returncode if proc.returncode is not None else "unknown"
-            _progress("server", f"process exited before ready (code={code})")
+            _progress("server", _t("progress_server_exited", code=code))
             return False
         try:
             req = urllib.request.Request(url, method="GET")
@@ -323,14 +394,14 @@ def _wait_for_local_server_ready(port: int, proc: subprocess.Popen, *, timeout_s
                 status = int(getattr(resp, "status", 200) or 200)
                 if 200 <= status < 500:
                     elapsed = time.monotonic() - started
-                    _progress("server", f"application ready after {elapsed:.1f}s")
+                    _progress("server", _t("progress_server_ready", elapsed=elapsed))
                     return True
                 last_error = f"HTTP {status}"
         except urllib.error.HTTPError as exc:
             status = int(getattr(exc, "code", 0) or 0)
             if 200 <= status < 500:
                 elapsed = time.monotonic() - started
-                _progress("server", f"application ready after {elapsed:.1f}s")
+                _progress("server", _t("progress_server_ready", elapsed=elapsed))
                 return True
             last_error = f"HTTP {status}"
         except Exception as exc:
@@ -338,26 +409,26 @@ def _wait_for_local_server_ready(port: int, proc: subprocess.Popen, *, timeout_s
         now = time.monotonic()
         if now >= next_report:
             elapsed = now - started
-            _progress("server", f"waiting for application startup ... {elapsed:.1f}s ({last_error})")
+            _progress("server", _t("progress_server_waiting", elapsed=elapsed, error=last_error))
             next_report = now + 1.0
         time.sleep(_STARTUP_POLL_INTERVAL_S)
-    _progress("server", f"startup timeout after {timeout_s:.0f}s ({last_error})")
+    _progress("server", _t("progress_server_timeout", timeout=timeout_s, error=last_error))
     return False
 
 
 def main() -> int:
     root = repo_root()
-    _progress("startup", "initializing launcher")
+    _progress("startup", _t("progress_startup_init"))
     ensure_dotenv(root, log_prefix="[installer]")
     py = _ensure_venv(root)
     if py is None:
         return 2
     if not _is_running_in_venv(root):
-        _progress("venv", "restarting inside project virtual environment")
+        _progress("venv", _t("progress_restart_in_venv"))
         return _rerun_in_venv(py)
 
     if not _pip_install(root, py):
-        print("[installer] FATAL: pip install failed", flush=True)
+        _fatal(_t("fatal_pip_install_failed"))
         return 2
 
     tunnel_flag = (os.environ.get("NAI_IM_TUNNEL") or "1").strip().lower()
@@ -365,10 +436,10 @@ def main() -> int:
 
     cloudflared = None
     if want_tunnel:
-        _progress("tunnel", "preparing Cloudflare tunnel support")
+        _progress("tunnel", _t("progress_prepare_tunnel"))
         cloudflared = ensure_cloudflared(root)
     else:
-        _progress("tunnel", "disabled by NAI_IM_TUNNEL")
+        _progress("tunnel", _t("progress_tunnel_disabled"))
 
     server = _run_server(root, py)
     if not _wait_for_local_server_ready(PORT, server):
@@ -382,28 +453,28 @@ def main() -> int:
     tunnel_proc = None
     public_url = None
     if want_tunnel:
-        _progress("tunnel", "checking named tunnel / quick tunnel")
+        _progress("tunnel", _t("progress_check_tunnel"))
         public_url = detect_named_tunnel_public_url(PORT)
         if public_url:
-            _progress("tunnel", "named tunnel detected")
+            _progress("tunnel", _t("progress_named_tunnel_detected"))
         elif cloudflared:
-            _progress("tunnel", "starting quick tunnel")
+            _progress("tunnel", _t("progress_start_quick_tunnel"))
             tunnel_proc, public_url = run_quick_tunnel(cloudflared, PORT)
         else:
-            _progress("tunnel", "cloudflared unavailable; public URL disabled")
+            _progress("tunnel", _t("progress_cloudflared_unavailable"))
 
     if public_url and "api.trycloudflare.com" in public_url.lower():
         public_url = None
 
-    print("\n[installer] startup complete", flush=True)
-    print("[installer] URLs", flush=True)
+    print(f"\n[installer] {_t('startup_complete')}", flush=True)
+    print(f"[installer] {_t('urls')}", flush=True)
     local_line = f"  local : http://localhost:{PORT}"
     print(_colorize(local_line, _LOCAL_URL_COLOR), flush=True)
     if public_url:
         public_line = f"  public: {public_url}"
         print(_colorize(public_line, _PUBLIC_URL_COLOR), flush=True)
     elif want_tunnel:
-        public_line = "  public: (failed)  ※ server/data/cloudflared_quick_tunnel.log を確認してください"
+        public_line = _t("public_failed")
         print(_colorize(public_line, _PUBLIC_URL_COLOR), flush=True)
 
     try:
@@ -412,7 +483,7 @@ def main() -> int:
             tunnel_proc.terminate()
         return int(rc or 0)
     except KeyboardInterrupt:
-        print("\n[installer] stopping...", flush=True)
+        print(f"\n[installer] {_t('stopping')}", flush=True)
         server.terminate()
         if tunnel_proc and tunnel_proc.poll() is None:
             tunnel_proc.terminate()

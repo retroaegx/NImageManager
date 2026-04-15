@@ -1,5 +1,16 @@
 const ext = globalThis.browser ?? globalThis.chrome;
 
+function msg(key, substitutions) {
+  const value = ext.i18n?.getMessage(key, substitutions);
+  return value || key;
+}
+
+function errorText(code, fallbackKey = 'error_UNKNOWN') {
+  const key = `error_${String(code || 'UNKNOWN').replace(/[^A-Za-z0-9_]/g, '_')}`;
+  const value = msg(key);
+  return value !== key ? value : msg(fallbackKey);
+}
+
 const BUTTON_FLAG = 'data-nim-transfer-button';
 const TOAST_CONTAINER_ID = 'nim-transfer-toast-container';
 const MAIN_IMAGE_SELECTOR = '.display-grid-images img.image-grid-image';
@@ -10,6 +21,10 @@ const BRIDGE_RESPONSE_TYPE = 'NIM_TRANSFER_FETCH_BLOB_RESPONSE';
 const BRIDGE_READY_TYPE = 'NIM_TRANSFER_BRIDGE_READY';
 const BRIDGE_SCRIPT_ID = 'nim-transfer-page-bridge';
 const OVERLAY_HOST_ID = 'nim-overlay-extension-host';
+const CONFIG_STORAGE_KEYS = {
+  showNovelAiMenu: 'nim.show_novelai_menu',
+  autoTransfer: 'nim.auto_transfer',
+};
 const CLOSE_MESSAGE_TYPES = new Set(['NIM_OVERLAY_CLOSE', 'nim-overlay-close']);
 const AUTH_REQUIRED_MESSAGE_TYPES = new Set(['NIM_EMBED_AUTH_REQUIRED']);
 const READY_MESSAGE_TYPES = new Set(['NIM_EMBED_READY']);
@@ -28,13 +43,13 @@ function messageRuntime(payload) {
       ext.runtime.sendMessage(payload, (response) => {
         const runtimeError = ext.runtime?.lastError;
         if (runtimeError) {
-          resolve({ ok: false, code: 'RUNTIME_ERROR', message: runtimeError.message || 'Extension runtime error' });
+          resolve({ ok: false, code: 'RUNTIME_ERROR' });
           return;
         }
         resolve(response);
       });
     } catch (error) {
-      resolve({ ok: false, code: 'RUNTIME_ERROR', message: String(error?.message || error || 'Extension runtime error') });
+      resolve({ ok: false, code: 'RUNTIME_ERROR' });
     }
   });
 }
@@ -86,7 +101,7 @@ async function canvasToBlob(canvas) {
   return await new Promise((resolve, reject) => {
     canvas.toBlob((blob) => {
       if (blob) resolve(blob);
-      else reject(new Error('canvas から画像化できませんでした'));
+      else reject(new Error(errorText('CANVAS_TO_BLOB_FAILED')));
     }, 'image/png');
   });
 }
@@ -120,7 +135,7 @@ function getSeedButton(toolbar) {
   const buttons = Array.from(toolbar.querySelectorAll('button'));
   return buttons.find((button) => {
     const text = (button.textContent || '').replace(/\s+/g, ' ').trim();
-    return /\b\d{6,}\b/.test(text) && /シード値をコピー/.test(text);
+    return /\b\d{6,}\b/.test(text) && /(シード値をコピー|Copy seed)/i.test(text);
   }) || buttons.find((button) => /\b\d{6,}\b/.test((button.textContent || '').replace(/\s+/g, ' ').trim())) || null;
 }
 
@@ -155,7 +170,7 @@ function waitForBridgeReady(timeoutMs = 5000) {
       if (done) return;
       done = true;
       window.removeEventListener('message', onMessage);
-      reject(new Error('NovelAI ページ応答がタイムアウトしました'));
+      reject(new Error(errorText('PAGE_RESPONSE_TIMEOUT')));
     }, timeoutMs);
     const onMessage = (event) => {
       if (event.source !== window) return;
@@ -180,7 +195,7 @@ function requestBlobFromPage(blobUrl, timeoutMs = 15000) {
       if (done) return;
       done = true;
       window.removeEventListener('message', onMessage);
-      reject(new Error('NovelAI ページ応答がタイムアウトしました'));
+      reject(new Error(errorText('PAGE_RESPONSE_TIMEOUT')));
     }, timeoutMs);
     const onMessage = (event) => {
       if (event.source !== window) return;
@@ -203,7 +218,7 @@ function requestBlobFromPage(blobUrl, timeoutMs = 15000) {
 
 function dataUrlToBytes(dataUrl) {
   const match = /^data:([^;,]+)?(;base64)?,(.*)$/i.exec(String(dataUrl || ''));
-  if (!match) throw new Error('ページから画像データを取得できませんでした');
+  if (!match) throw new Error(errorText('PAGE_IMAGE_DATA_UNAVAILABLE'));
   const mimeType = match[1] || 'application/octet-stream';
   const base64Flag = !!match[2];
   const payload = match[3] || '';
@@ -218,7 +233,7 @@ async function extractCurrentImagePayload() {
   if (img instanceof HTMLImageElement) {
     const src = String(img.currentSrc || img.src || '').trim();
     log('selected image src', src || '(empty)');
-    if (!src) throw new Error('画像 URL が見つかりません');
+    if (!src) throw new Error(errorText('IMAGE_URL_NOT_FOUND'));
     if (src.startsWith('blob:')) {
       await waitForBridgeReady();
       const bridged = await requestBlobFromPage(src);
@@ -251,7 +266,7 @@ async function extractCurrentImagePayload() {
       lastModifiedMs: Date.now(),
     };
   }
-  throw new Error('表示中の画像が見つかりません');
+  throw new Error(errorText('VISIBLE_IMAGE_NOT_FOUND'));
 }
 
 function createTransferIcon() {
@@ -283,8 +298,8 @@ function createTransferButton(referenceButton) {
   button.type = 'button';
   button.className = String(referenceButton?.className || '').trim() || 'nim-transfer-button';
   button.setAttribute(BUTTON_FLAG, '1');
-  button.setAttribute('aria-label', 'Transfer to NIM');
-  button.setAttribute('title', 'Transfer to NIM');
+  button.setAttribute('aria-label', msg('transferToNim'));
+  button.setAttribute('title', msg('transferToNim'));
   button.classList.add('nim-transfer-button');
   button.appendChild(createTransferIcon());
   button.style.display = 'inline-flex';
@@ -297,7 +312,7 @@ function createTransferButton(referenceButton) {
     event.stopPropagation();
     handleTransferClick(button).catch((error) => {
       warn('transfer click failed', error);
-      showToast(String(error?.message || error || '登録に失敗しました'), 'error');
+      showToast(String(error?.message || error || errorText('UPLOAD_FAILED')), 'error');
     });
   });
   return button;
@@ -333,33 +348,7 @@ function attachBottomTransferButton() {
 }
 
 async function handleTransferClick(button) {
-  button.disabled = true;
-  button.style.opacity = '0.7';
-  showToast('Transferring...', 'info');
-  try {
-    const payload = await extractCurrentImagePayload();
-    const response = await messageRuntime({
-      type: 'nim-upload-image',
-      payload: {
-        bytes: Array.from(payload.bytes),
-        mimeType: payload.mimeType,
-        filename: payload.filename,
-        lastModifiedMs: payload.lastModifiedMs,
-      },
-    });
-    if (!response?.ok) {
-      if (response?.code === 'AUTH_REQUIRED') {
-        showToast(response.message || 'Login required', 'error');
-        await messageRuntime({ type: 'nim-open-options' });
-        return;
-      }
-      throw new Error(response?.message || '登録に失敗しました');
-    }
-    showToast(response.message || 'Transferred', 'success');
-  } finally {
-    button.disabled = false;
-    button.style.opacity = '1';
-  }
+  await transferCurrentImage({ button, showProgressToast: true, showSuccessToast: true });
 }
 
 function createOverlayState() {
@@ -385,6 +374,130 @@ function createOverlayState() {
 }
 
 const overlayState = createOverlayState();
+
+const extensionConfig = {
+  showNovelAiMenu: true,
+  autoTransfer: false,
+};
+
+const autoTransferState = {
+  inFlight: false,
+  scheduled: 0,
+  attemptedSignatures: new Set(),
+};
+
+function rememberAttemptedSignature(signature) {
+  if (!signature) return;
+  autoTransferState.attemptedSignatures.add(signature);
+  if (autoTransferState.attemptedSignatures.size <= 128) return;
+  const oldest = autoTransferState.attemptedSignatures.values().next().value;
+  if (oldest) autoTransferState.attemptedSignatures.delete(oldest);
+}
+
+function applyExtensionConfig(config) {
+  extensionConfig.showNovelAiMenu = config?.showNovelAiMenu !== false;
+  extensionConfig.autoTransfer = config?.autoTransfer === true;
+  updateLauncherVisibility();
+}
+
+async function refreshExtensionConfig() {
+  const response = await messageRuntime({ type: 'nim-get-config' });
+  if (!response?.ok) return null;
+  const config = response.config || {};
+  applyExtensionConfig(config);
+  return config;
+}
+
+function updateLauncherVisibility() {
+  if (!overlayState.launcherButton) return;
+  overlayState.launcherButton.hidden = overlayState.isOpen || !extensionConfig.showNovelAiMenu;
+}
+
+function getCurrentImageSignature() {
+  const img = document.querySelector(MAIN_IMAGE_SELECTOR);
+  if (img instanceof HTMLImageElement) {
+    const src = String(img.currentSrc || img.src || '').trim();
+    if (!src) return '';
+    return `img:${src}`;
+  }
+  const canvas = document.querySelector(MAIN_CANVAS_SELECTOR);
+  if (canvas instanceof HTMLCanvasElement) {
+    if (!canvas.width || !canvas.height) return '';
+    const seed = inferSeedText();
+    return `canvas:${canvas.width}x${canvas.height}:${seed}`;
+  }
+  return '';
+}
+
+async function transferCurrentImage({ button = null, showProgressToast = true, showSuccessToast = true } = {}) {
+  if (button) {
+    button.disabled = true;
+    button.style.opacity = '0.7';
+  }
+  if (showProgressToast) {
+    showToast(msg('transferring'), 'info');
+  }
+  try {
+    const payload = await extractCurrentImagePayload();
+    const response = await messageRuntime({
+      type: 'nim-upload-image',
+      payload: {
+        bytes: Array.from(payload.bytes),
+        mimeType: payload.mimeType,
+        filename: payload.filename,
+        lastModifiedMs: payload.lastModifiedMs,
+      },
+    });
+    if (!response?.ok) {
+      if (response?.code === 'AUTH_REQUIRED') {
+        showToast(errorText(response?.code || 'AUTH_REQUIRED'), 'error');
+        await messageRuntime({ type: 'nim-open-options' });
+        return { ok: false, code: response?.code || 'AUTH_REQUIRED' };
+      }
+      throw new Error(errorText(response?.code || 'UPLOAD_FAILED'));
+    }
+    if (showSuccessToast) {
+      showToast(msg('transferSuccess'), 'success');
+    }
+    return response;
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.style.opacity = '1';
+    }
+  }
+}
+
+async function maybeAutoTransfer() {
+  if (!extensionConfig.autoTransfer) return;
+  const signature = getCurrentImageSignature();
+  if (!signature) return;
+  if (autoTransferState.attemptedSignatures.has(signature)) return;
+  if (autoTransferState.inFlight) return;
+
+  autoTransferState.inFlight = true;
+  rememberAttemptedSignature(signature);
+  try {
+    await transferCurrentImage({ showProgressToast: false, showSuccessToast: true });
+  } catch (error) {
+    warn('auto transfer failed', error);
+    showToast(String(error?.message || error || errorText('UPLOAD_FAILED')), 'error');
+  } finally {
+    autoTransferState.inFlight = false;
+  }
+}
+
+function scheduleAutoTransfer() {
+  if (!extensionConfig.autoTransfer) return;
+  if (autoTransferState.scheduled) return;
+  autoTransferState.scheduled = window.setTimeout(() => {
+    autoTransferState.scheduled = 0;
+    maybeAutoTransfer().catch((error) => {
+      warn('scheduled auto transfer failed', error);
+    });
+  }, 250);
+}
+
 
 function ensureOverlayHost() {
   const existingHost = document.getElementById(OVERLAY_HOST_ID);
@@ -558,19 +671,19 @@ function ensureOverlayHost() {
         }
       </style>
       <div class="nim-ui">
-        <button type="button" class="launcher" aria-label="NIM を開く">NIM</button>
+        <button type="button" class="launcher" aria-label="${msg('openNim')}">NIM</button>
         <div class="overlay" data-open="0" aria-hidden="true">
           <iframe class="frame" referrerpolicy="strict-origin-when-cross-origin"></iframe>
-          <div class="loading">NIM を読み込み中…</div>
+          <div class="loading">${msg('overlayLoading')}</div>
           <div class="toolbar">
             <div class="toolbarLeft">
-              <button type="button" class="toolbarButton" data-action="close">閉じる</button>
-              <button type="button" class="toolbarButton" data-action="reload" aria-label="再読込" title="再読込">⟳</button>
-              <button type="button" class="toolbarButton" data-action="toggle-menu" aria-label="NIM メニュー" aria-expanded="false">⋯</button>
+              <button type="button" class="toolbarButton" data-action="close">${msg('overlayClose')}</button>
+              <button type="button" class="toolbarButton" data-action="reload" aria-label="${msg('overlayReload')}" title="${msg('overlayReload')}">⟳</button>
+              <button type="button" class="toolbarButton" data-action="toggle-menu" aria-label="${msg('overlayMenu')}" aria-expanded="false">⋯</button>
               <div class="toolbarMenu" data-open="0">
-                <button type="button" class="toolbarButton" data-action="login">ログイン</button>
-                <button type="button" class="toolbarButton" data-action="settings">設定</button>
-                <button type="button" class="toolbarButton" data-action="newtab">別タブ</button>
+                <button type="button" class="toolbarButton" data-action="login">${msg('overlayLogin')}</button>
+                <button type="button" class="toolbarButton" data-action="settings">${msg('overlaySettings')}</button>
+                <button type="button" class="toolbarButton" data-action="newtab">${msg('overlayNewTab')}</button>
               </div>
             </div>
           </div>
@@ -606,7 +719,7 @@ function ensureOverlayHost() {
       event.preventDefault();
       openOverlay().catch((error) => {
         warn('overlay open failed', error);
-        showToast(String(error?.message || error || 'NIM を開けませんでした'), 'error');
+        showToast(String(error?.message || error || errorText('NIM_OPEN_FAILED')), 'error');
       });
     });
   }
@@ -628,18 +741,18 @@ function ensureOverlayHost() {
       if (action === 'login') {
         const targetUrl = overlayState.loginUrl || overlayState.currentUrl;
         if (!targetUrl) {
-          showToast('ログイン先 URL が未設定です', 'error');
+          showToast(errorText('LOGIN_URL_NOT_CONFIGURED'), 'error');
           return;
         }
         setOverlayMenuOpen(false);
         messageRuntime({ type: 'nim-open-url', url: targetUrl }).catch(() => {
-          showToast('ログインページを開けませんでした', 'error');
+          showToast(errorText('LOGIN_PAGE_OPEN_FAILED'), 'error');
         });
         return;
       }
       if (action === 'reload') {
         if (!overlayState.currentUrl || !overlayState.iframe) {
-          showToast('再読込できませんでした', 'error');
+          showToast(errorText('RELOAD_FAILED'), 'error');
           return;
         }
         setOverlayMenuOpen(false);
@@ -654,12 +767,12 @@ function ensureOverlayHost() {
       }
       if (action === 'newtab') {
         if (!overlayState.currentUrl) {
-          showToast('オーバーレイ URL が未設定です', 'error');
+          showToast(errorText('OVERLAY_URL_NOT_CONFIGURED'), 'error');
           return;
         }
         setOverlayMenuOpen(false);
         messageRuntime({ type: 'nim-open-url', url: overlayState.currentUrl }).catch(() => {
-          showToast('別タブを開けませんでした', 'error');
+          showToast(errorText('OPEN_NEW_TAB_FAILED'), 'error');
         });
       }
     });
@@ -697,7 +810,7 @@ function ensureOverlayHost() {
         overlayState.loginUrl = String(event.data?.loginUrl || overlayState.currentUrl || '').trim();
         if (!overlayState.autoLoginHintShown) {
           overlayState.autoLoginHintShown = true;
-          showToast('NIM は別タブで先にログインしてください。ログイン後に「再読込」を押してください。', 'info');
+          showToast(msg('toast_login_in_other_tab'), 'info');
         }
         return;
       }
@@ -730,9 +843,7 @@ function setOverlayOpen(isOpen) {
     overlayState.overlayMenuButton?.setAttribute('aria-expanded', 'false');
   }
   overlayState.overlay?.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
-  if (overlayState.launcherButton) {
-    overlayState.launcherButton.hidden = Boolean(isOpen);
-  }
+  updateLauncherVisibility();
 }
 
 function closeOverlay() {
@@ -747,7 +858,7 @@ function resolveOverlayUrl(config) {
 function updateOverlayTitle(url) {
   if (!overlayState.overlayTitle) return;
   if (!url) {
-    overlayState.overlayTitle.textContent = 'NIM Overlay';
+    overlayState.overlayTitle.textContent = msg('overlayTitle');
     return;
   }
   try {
@@ -764,13 +875,13 @@ async function openOverlay() {
 
   const response = await messageRuntime({ type: 'nim-get-config' });
   if (!response?.ok) {
-    throw new Error(response?.message || '拡張設定を取得できませんでした');
+    throw new Error(errorText(response?.code || 'GET_CONFIG_FAILED'));
   }
 
   const config = response.config || {};
   const overlayUrl = resolveOverlayUrl(config);
   if (!overlayUrl) {
-    showToast('拡張設定で NIM の URL を保存してください', 'error');
+    showToast(msg('toast_save_domain_first'), 'error');
     await messageRuntime({ type: 'nim-open-options' });
     return;
   }
@@ -778,7 +889,7 @@ async function openOverlay() {
   const session = await messageRuntime({ type: 'nim-check-session' }).catch(() => null);
   if (!session?.ok) {
     if (String(session?.code || '') === 'AUTH_REQUIRED') {
-      showToast('Firefox ではオーバーレイ利用前に拡張機能設定でログインしてください', 'error');
+      showToast(msg('firefoxOverlayLoginRequired'), 'error');
       await messageRuntime({ type: 'nim-open-options' }).catch(() => {});
       return;
     }
@@ -791,7 +902,7 @@ async function openOverlay() {
   try {
     nextOrigin = new URL(overlayUrl).origin;
   } catch (_) {
-    throw new Error('オーバーレイ URL が不正です');
+    throw new Error(errorText('INVALID_OVERLAY_URL'));
   }
 
   const shouldReloadFrame = overlayState.currentUrl !== overlayUrl;
@@ -813,11 +924,13 @@ async function openOverlay() {
 
 function installOverlay() {
   ensureOverlayHost();
+  updateLauncherVisibility();
 }
 
 function installObservers() {
   injectBridgeScript();
   installOverlay();
+  refreshExtensionConfig().catch(() => {});
 
   let retryCount = 0;
   const maxRetries = 60;
@@ -865,6 +978,7 @@ function installObservers() {
       retryCount = 0;
       installOverlay();
       runAttach();
+      scheduleAutoTransfer();
     }, 50);
   };
 
@@ -872,7 +986,26 @@ function installObservers() {
     scheduleAttachFromObserver();
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });
+
+  const imgLoadHandler = () => scheduleAutoTransfer();
+  document.addEventListener('load', (event) => {
+    const target = event.target;
+    if (target instanceof HTMLImageElement || target instanceof HTMLCanvasElement) {
+      imgLoadHandler();
+    }
+  }, true);
+
+  if (ext.storage?.onChanged) {
+    ext.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== 'local') return;
+      if (!changes[CONFIG_STORAGE_KEYS.showNovelAiMenu] && !changes[CONFIG_STORAGE_KEYS.autoTransfer]) return;
+      refreshExtensionConfig().catch(() => {});
+      scheduleAutoTransfer();
+    });
+  }
+
   runAttach();
+  scheduleAutoTransfer();
 }
 
 log('content script loaded');

@@ -1,13 +1,14 @@
 import { $ } from "./dom.js";
 import { apiFetch, apiJson } from "./http.js";
 import { logoutAndRedirect } from "./session.js";
+import { t, formatDateTime } from "./i18n.js";
 
 function formatUtc(ts){
   if(!ts) return "";
   try{
     const d = new Date(ts);
     if(Number.isNaN(d.getTime())) return String(ts);
-    return d.toLocaleString("ja-JP", {
+    return formatDateTime(d, {
       year: "numeric",
       month: "2-digit",
       day: "2-digit",
@@ -25,10 +26,10 @@ function buildUpdateNotice(state){
   const existing = right.querySelector(".updateNotice");
   if(existing) existing.remove();
 
-  const latest = String(state?.latest_version || "").trim() || "(unknown)";
-  const current = String(state?.current_version || "").trim() || "(unknown)";
+  const latest = String(state?.latest_version || "").trim() || t("common.unknown");
+  const current = String(state?.current_version || "").trim() || t("common.unknown");
   const releaseUrl = String(state?.release_url || state?.release_page_url || "").trim();
-  const releaseName = String(state?.release_name || latest || "最新版").trim();
+  const releaseName = String(state?.release_name || latest || t("common.latest")).trim();
   const checkedAt = formatUtc(state?.checked_at);
 
   const wrap = document.createElement("div");
@@ -37,8 +38,8 @@ function buildUpdateNotice(state){
   const badge = document.createElement("button");
   badge.type = "button";
   badge.className = "updateBadge";
-  badge.setAttribute("aria-label", "新しいバージョンがあります");
-  badge.title = `最新版 ${latest} が公開されています`;
+  badge.setAttribute("aria-label", t("user_menu.update.badge_aria"));
+  badge.title = t("user_menu.update.badge_title", { latest });
   badge.textContent = "!";
 
   const popup = document.createElement("div");
@@ -46,15 +47,17 @@ function buildUpdateNotice(state){
 
   const title = document.createElement("div");
   title.className = "updatePopupTitle";
-  title.textContent = "アップデートあり";
+  title.textContent = t("user_menu.update.popup_title");
 
   const body = document.createElement("div");
   body.className = "updatePopupBody";
-  body.textContent = `最新版 ${latest} (${releaseName}) が公開されています。ダウンロードしてフォルダを上書き後、システムを再起動してください。`;
+  body.textContent = t("user_menu.update.popup_body", { latest, releaseName });
 
   const meta = document.createElement("div");
   meta.className = "updatePopupMeta";
-  meta.textContent = `現在: ${current} / 最新: ${latest}` + (checkedAt ? ` / 確認: ${checkedAt}` : "");
+  meta.textContent = checkedAt
+    ? t("user_menu.update.popup_meta_checked", { current, latest, checkedAt })
+    : t("user_menu.update.popup_meta", { current, latest });
 
   popup.appendChild(title);
   popup.appendChild(body);
@@ -66,7 +69,7 @@ function buildUpdateNotice(state){
     link.href = releaseUrl;
     link.target = "_blank";
     link.rel = "noopener noreferrer";
-    link.textContent = "GitHubの最新版を開く";
+    link.textContent = t("user_menu.update.open_github");
     link.title = releaseUrl;
     popup.appendChild(link);
   }
@@ -155,7 +158,7 @@ export function bindUserMenu({
       const j = await apiJson(r);
       if(j && j.reset_url) location.assign(j.reset_url);
     }catch(_e){
-      alert("URL発行に失敗しました");
+      alert(t("user_menu.password_link_failed"));
     }
   });
   menuLogout?.addEventListener("click", () => logoutAndRedirect(logoutEndpoint));

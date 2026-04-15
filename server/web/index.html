@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>NIM</title>
+  <title data-i18n="page.index.title">NIM</title>
   <link rel="stylesheet" href="/styles.css?v=64" />
 </head>
 <body>
@@ -25,8 +25,8 @@
         </div>
 
         <nav class="menu" aria-label="main">
-          <button id="navPreview" class="tab active"><span>プレビュー</span><i class="tabGlow"></i></button>
-          <button id="navUpload" class="tab"><span>アップロード</span><i class="tabGlow"></i></button>
+          <button id="navPreview" class="tab active"><span data-i18n="nav.preview">プレビュー</span><i class="tabGlow"></i></button>
+          <button id="navUpload" class="tab"><span data-i18n="nav.upload">アップロード</span><i class="tabGlow"></i></button>
         </nav>
 
         <div class="right">
@@ -34,16 +34,16 @@
             <span id="meLabel" class="me"></span>
           </div>
 
-          <button id="hamburger" class="iconBtn" title="メニュー" aria-label="メニュー">
+          <button id="hamburger" class="iconBtn" data-i18n-title="menu.title" data-i18n-aria-label="menu.title">
             <span class="icon">☰</span>
           </button>
 
-          <div id="userMenu" class="menuPopup hidden" role="menu" aria-label="ユーザーメニュー">
-            <button id="menuAdmin" class="menuItem hidden" role="menuitem">アカウント管理</button>
-            <button id="menuMaintenance" class="menuItem hidden" role="menuitem">メンテナンス</button>
-            <button id="menuSettings" class="menuItem" role="menuitem">個人設定</button>
-            <button id="menuPwLink" class="menuItem" role="menuitem">パスワード変更</button>
-            <button id="menuLogout" class="menuItem" role="menuitem">ログアウト</button>
+          <div id="userMenu" class="menuPopup hidden" role="menu" data-i18n-aria-label="menu.user">
+            <button id="menuAdmin" class="menuItem hidden" role="menuitem" data-i18n="menu.admin">アカウント管理</button>
+            <button id="menuMaintenance" class="menuItem hidden" role="menuitem" data-i18n="menu.maintenance">メンテナンス</button>
+            <button id="menuSettings" class="menuItem" role="menuitem" data-i18n="menu.settings">個人設定</button>
+            <button id="menuPwLink" class="menuItem" role="menuitem" data-i18n="menu.password">パスワード変更</button>
+            <button id="menuLogout" class="menuItem" role="menuitem" data-i18n="menu.logout">ログアウト</button>
           </div>
         </div>
       </div>
@@ -55,44 +55,44 @@
         <div class="card toolCard">
           <div class="toolbar">
             <div class="toolItem">
-              <label>作成者</label>
-              <select id="filterCreator"><option value="">未指定</option></select>
+              <label data-i18n="filter.creator">作成者</label>
+              <select id="filterCreator"><option value="" data-i18n="common.unset">未指定</option></select>
             </div>
 
             <div class="toolItem">
-              <label>ソフトウェア</label>
-              <select id="filterSoftware"><option value="">未指定</option></select>
+              <label data-i18n="filter.software">ソフトウェア</label>
+              <select id="filterSoftware"><option value="" data-i18n="common.unset">未指定</option></select>
             </div>
 
             <div class="toolItem toolGrow">
-              <label>タグ検索</label>
+              <label data-i18n="filter.tags">タグ検索</label>
               <div class="searchInput">
-	              		<div id="tagChips" class="chips inline" aria-label="タグ条件"></div>
-	              		<input id="tagInput" placeholder="タグで絞り込み / 除外" />
-                <button id="tagSearchBtn" class="iconBtn inInput" aria-label="タグ検索"><span class="icon">⌕</span></button>
+	              		<div id="tagChips" class="chips inline" data-i18n-aria-label="common.tag_conditions"></div>
+	              		<input id="tagInput" data-i18n-placeholder="filter.tags_placeholder" />
+                <button id="tagSearchBtn" class="iconBtn inInput" data-i18n-aria-label="filter.tags"><span class="icon">⌕</span></button>
                 <div id="tagSuggest" class="suggest hidden"></div>
               </div>
             </div>
 
             <div class="toolItem">
-              <label>日付(開始)</label>
+              <label data-i18n="filter.date_from">日付(開始)</label>
               <input id="dateFrom" type="date" />
             </div>
             <div class="toolItem">
-              <label>日付(終了)</label>
+              <label data-i18n="filter.date_to">日付(終了)</label>
               <input id="dateTo" type="date" />
             </div>
 
             <div class="toolItem toolRight">
-              <label>重複排除</label>
+              <label data-i18n="filter.dedup">重複排除</label>
               <div class="toggleRow">
-                <button id="dedupToggle" class="toggle off">OFF</button>
+                <button id="dedupToggle" class="toggle off" data-i18n="common.off">OFF</button>
               </div>
             </div>
 
             <div class="toolItem">
               <label>&nbsp;</label>
-              <button id="searchBtn" class="primaryBtn">検索</button>
+              <button id="searchBtn" class="primaryBtn" data-i18n="common.search">検索</button>
             </div>
           </div>
         </div>
@@ -105,23 +105,23 @@
 
             <div class="sideSection sideSectionBookmark">
               <div class="sideHead">
-                <div class="sideHeadTitle">ブックマーク</div>
+                <div class="sideHeadTitle" data-i18n="common.bookmark">ブックマーク</div>
                 <div class="sideHeadActions">
-                  <button id="bookmarkCreatorAddBtn" class="sideAddBtn" type="button" title="ブックマーク作者を登録" aria-label="ブックマーク作者を追加">
+                  <button id="bookmarkCreatorAddBtn" class="sideAddBtn" type="button" data-i18n-title="app.bookmark.add_author.title" data-i18n-aria-label="app.bookmark.add_author.aria">
                     <svg class="sideActionIcon" viewBox="0 0 24 24" aria-hidden="true">
                       <path d="M9.2 11.4a3.7 3.7 0 1 0 0-7.4 3.7 3.7 0 0 0 0 7.4Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
                       <path d="M3.8 18.7c.7-2.8 3-4.6 5.4-4.6s4.7 1.8 5.4 4.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
                       <path d="M18.2 8.4v6.4M15 11.6h6.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
                     </svg>
                   </button>
-                  <button id="bookmarkListAddBtn" class="sideAddBtn" type="button" title="ブックマークリストを作成" aria-label="ブックマークリストを作成">
+                  <button id="bookmarkListAddBtn" class="sideAddBtn" type="button" data-i18n-title="app.bookmark.add_list.title" data-i18n-aria-label="app.bookmark.add_list.aria">
                     <svg class="sideActionIcon" viewBox="0 0 24 24" aria-hidden="true">
                       <path d="M5.2 5.2h9.1c1.2 0 2.1.9 2.1 2.1v9.5H7.3a2.1 2.1 0 0 0-2.1 2.1V6.3c0-.6.5-1.1 1.1-1.1Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
                       <path d="M7.4 16.8h10.1v2c0 .6-.5 1.1-1.1 1.1H7.3a2.1 2.1 0 0 1 0-4.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
                       <path d="M18.4 7.1v5.6M15.6 9.9h5.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
                     </svg>
                   </button>
-                  <button id="bookmarkClearBtn" class="sideClearBtn" type="button" disabled title="ブックマーク絞り込みを解除">解除</button>
+                  <button id="bookmarkClearBtn" class="sideClearBtn" type="button" disabled data-i18n="common.clear" data-i18n-title="bookmark.clear_filter">解除</button>
                 </div>
               </div>
               <div id="bookmarkList" class="sideList"></div>
@@ -129,16 +129,16 @@
 
             <div class="sideSection sideSectionCreator">
               <div class="sideHead">
-                <div class="sideHeadTitle">作者</div>
+                <div class="sideHeadTitle" data-i18n="common.author">作者</div>
                 <div class="sideHeadActions">
-                  <button id="creatorAddBtn" class="sideAddBtn" type="button" title="作者を登録" aria-label="作者を追加">
+                  <button id="creatorAddBtn" class="sideAddBtn" type="button" data-i18n-title="app.creator.add.title" data-i18n-aria-label="app.creator.add.aria">
                     <svg class="sideActionIcon" viewBox="0 0 24 24" aria-hidden="true">
                       <path d="M9.2 11.4a3.7 3.7 0 1 0 0-7.4 3.7 3.7 0 0 0 0 7.4Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
                       <path d="M3.8 18.7c.7-2.8 3-4.6 5.4-4.6s4.7 1.8 5.4 4.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
                       <path d="M18.2 8.4v6.4M15 11.6h6.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
                     </svg>
                   </button>
-                  <button id="creatorClearBtn" class="sideClearBtn" type="button" disabled title="作者絞り込みを解除">解除</button>
+                  <button id="creatorClearBtn" class="sideClearBtn" type="button" disabled data-i18n="common.clear" data-i18n-title="creator.clear_filter">解除</button>
                 </div>
               </div>
               <div id="creatorList" class="sideList"></div>
@@ -146,8 +146,8 @@
 
             <div class="sideSection sideSectionSoftware">
               <div class="sideHead">
-                <div class="sideHeadTitle">ソフト</div>
-                <button id="softwareClearBtn" class="sideClearBtn" type="button" disabled title="ソフト絞り込みを解除">解除</button>
+                <div class="sideHeadTitle" data-i18n="common.software_short">ソフト</div>
+                <button id="softwareClearBtn" class="sideClearBtn" type="button" disabled data-i18n="common.clear" data-i18n-title="software.clear_filter">解除</button>
               </div>
               <div id="softwareList" class="sideList"></div>
             </div>
@@ -156,27 +156,27 @@
           <div class="galleryArea">
             <div class="galleryHeader">
               <div class="galleryTitle">
-                <div id="galleryTitle">ギャラリー</div>
+                <div id="galleryTitle" data-i18n="app.gallery.title_default">ギャラリー</div>
                 <div id="galleryHint" class="small"></div>
               </div>
               <div class="galleryActions">
-	                <button id="mobileFilterBtn" class="iconBtn mobileOnly" aria-label="フィルタ" title="フィルタ"><span class="icon">⚙</span><span class="label">フィルタ</span></button>
-                <button id="pageSelectBtn" class="iconBtn desktopOnly" aria-label="ページ一括☑" title="ページ一括☑"><span class="icon">☑</span><span class="label">ページ一括</span></button>
-                <button id="allSelectBtn" class="iconBtn" aria-label="全対象☑" title="全対象☑"><span class="icon">☑☑</span><span class="label">全対象</span></button>
-                <button id="bulkBookmarkBtn" class="iconBtn" aria-label="一括ブックマーク" title="一括ブックマーク" disabled><span class="icon">★</span><span class="label">一括BM</span></button>
-                <button id="bulkDeleteBtn" class="dangerBtn" disabled>削除</button>
+	                <button id="mobileFilterBtn" class="iconBtn mobileOnly" data-i18n-aria-label="common.filter" data-i18n-title="common.filter"><span class="icon">⚙</span><span class="label" data-i18n="common.filter">フィルタ</span></button>
+                <button id="pageSelectBtn" class="iconBtn desktopOnly" data-i18n-aria-label="app.page_select" data-i18n-title="app.page_select"><span class="icon">☑</span><span class="label" data-i18n="app.page_select_short">ページ一括</span></button>
+                <button id="allSelectBtn" class="iconBtn" data-i18n-aria-label="app.all_select" data-i18n-title="app.all_select"><span class="icon">☑☑</span><span class="label" data-i18n="app.all_select_short">全対象</span></button>
+                <button id="bulkBookmarkBtn" class="iconBtn" data-i18n-aria-label="app.bulk_bookmark" data-i18n-title="app.bulk_bookmark" disabled><span class="icon">★</span><span class="label" data-i18n="app.bulk_bookmark_short">一括BM</span></button>
+                <button id="bulkDeleteBtn" class="dangerBtn" disabled data-i18n="common.delete">削除</button>
                 <div id="bulkStatus" class="small bulkStatus"></div>
                 <div class="sortRow">
-                  <span class="small">並び替え:</span>
+                  <span class="small" data-i18n="app.sort">並び替え:</span>
                   <select id="sortBy" class="miniSelect">
-                    <option value="newest">新しい順</option>
-                    <option value="oldest">古い順</option>
-                    <option value="favorite">ブックマーク</option>
+                    <option value="newest" data-i18n="sort.newest">新しい順</option>
+                    <option value="oldest" data-i18n="sort.oldest">古い順</option>
+                    <option value="favorite" data-i18n="sort.favorite">ブックマーク</option>
                   </select>
                 </div>
 <div class="viewBtns">
-                  <button class="iconBtn active" id="viewGrid" aria-label="グリッド"><span class="icon">▦</span></button>
-                  <button class="iconBtn" id="viewList" aria-label="リスト"><span class="icon">≣</span></button>
+                  <button class="iconBtn active" id="viewGrid" data-i18n-aria-label="common.grid" data-i18n-title="common.grid"><span class="icon">▦</span></button>
+                  <button class="iconBtn" id="viewList" data-i18n-aria-label="common.list" data-i18n-title="common.list"><span class="icon">≣</span></button>
                 </div>
               </div>
             </div>
@@ -194,17 +194,17 @@
         <div class="card">
           <div class="uploadPanelHead">
             <div class="uploadPanelTitle">
-              <h2>画像アップロード</h2>
+              <h2 data-i18n="app.upload.title">画像アップロード</h2>
             </div>
             <div class="uploadHeaderTools">
-              <div class="uploadBookmarkInline" aria-label="アップロード時ブックマーク設定">
+              <div class="uploadBookmarkInline" data-i18n-aria-label="app.upload.bookmark_settings">
                 <div class="uploadBookmarkInlineRow">
-                  <div class="uploadBookmarkInlineHead">アップロード時ブックマーク</div>
-                  <button id="uploadBookmarkToggle" class="toggle off uploadBookmarkInlineToggle" type="button" title="アップロード完了時にブックマークへ追加">OFF</button>
+                  <div class="uploadBookmarkInlineHead" data-i18n="app.upload.bookmark_heading">アップロード時ブックマーク</div>
+                  <button id="uploadBookmarkToggle" class="toggle off uploadBookmarkInlineToggle" type="button" data-i18n-title="app.bookmark.add_after_upload" data-i18n="common.off">OFF</button>
                 </div>
                 <div class="uploadBookmarkInlineBody">
-                  <select id="uploadBookmarkList" class="miniSelect uploadBookmarkInlineSelect hidden" aria-label="アップロード時ブックマークの登録先" disabled>
-                    <option value="">既定のリスト</option>
+                  <select id="uploadBookmarkList" class="miniSelect uploadBookmarkInlineSelect hidden" data-i18n-aria-label="app.upload.bookmark_target" disabled>
+                    <option value="" data-i18n="app.upload.bookmark_default_option">既定のリスト</option>
                   </select>
                 </div>
               </div>
@@ -215,12 +215,12 @@
             <div class="uploadMain">
               <div id="dropZone" class="dropZone">
                 <div class="dzIcon">☁</div>
-                <div class="dzText">PCから画像ファイルをここにドラッグ &amp; ドロップ</div>
+                <div class="dzText" data-i18n="app.upload.dropzone">PCから画像ファイルをここにドラッグ &amp; ドロップ</div>
                 <div class="row" style="justify-content:center">
                   <input id="fileInput" class="fileInput" type="file" accept="image/png,image/webp,image/jpeg,image/avif,.zip,application/zip" multiple />
                   <input id="folderInput" class="fileInput" type="file" accept="image/png,image/webp,image/jpeg,image/avif" webkitdirectory directory multiple />
-                  <button id="startUploadBtn" class="primaryBtn">ファイルを選択</button>
-                  <button id="startFolderBtn" class="ghostBtn">フォルダを選択</button>
+                  <button id="startUploadBtn" class="primaryBtn" data-i18n="app.upload.select_files">ファイルを選択</button>
+                  <button id="startFolderBtn" class="ghostBtn" data-i18n="app.upload.select_folder">フォルダを選択</button>
                 </div>
               </div>
 
@@ -238,8 +238,8 @@
 
             <aside class="uploadSide">
               <div class="sideHead uploadSummaryHead">
-                <div class="sideHeadTitle">タグアップロードサマリー</div>
-                <div class="small">このバッチの集計</div>
+                <div class="sideHeadTitle" data-i18n="app.upload.summary_title">タグアップロードサマリー</div>
+                <div class="small" data-i18n="app.upload.summary_subtitle">このバッチの集計</div>
               </div>
               <div id="uploadSummary" class="uploadSummary"></div>
             </aside>
@@ -254,10 +254,10 @@
       <div class="overlayPanel">
         <div class="overlayImage" id="overlayImageBox">
           <div id="overlayFixedBtns" class="overlayFixedBtns hidden" aria-hidden="true">
-            <a id="viewFull" class="iconBtn overlayActionBtn" href="#" target="_blank" rel="noopener" aria-label="全画面表示" title="全画面表示"><span class="icon iconSvg" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span></a>
-            <a id="dlFile" class="iconBtn overlayActionBtn" href="#" download aria-label="ダウンロード" title="ダウンロード"><span class="icon iconSvg" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M12 4.5v8.25" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="m8.25 9.75 3.75 3.75 3.75-3.75" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 16.75h14v2.75H5z" fill="currentColor"/></svg></span></a>
-            <button id="favDetailBtnFixed" class="iconBtn" aria-label="ブックマーク" title="ブックマーク"><span class="icon">☆</span></button>
-            <button id="closeOverlayFixed" class="iconBtn" aria-label="閉じる" title="閉じる"><span class="icon">✕</span></button>
+            <a id="viewFull" class="iconBtn overlayActionBtn" href="#" target="_blank" rel="noopener" data-i18n-aria-label="common.fullscreen" data-i18n-title="common.fullscreen"><span class="icon iconSvg" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span></a>
+            <a id="dlFile" class="iconBtn overlayActionBtn" href="#" download data-i18n-aria-label="common.download" data-i18n-title="common.download"><span class="icon iconSvg" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M12 4.5v8.25" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="m8.25 9.75 3.75 3.75 3.75-3.75" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 16.75h14v2.75H5z" fill="currentColor"/></svg></span></a>
+            <button id="favDetailBtnFixed" class="iconBtn" data-i18n-aria-label="common.bookmark" data-i18n-title="common.bookmark"><span class="icon">☆</span></button>
+            <button id="closeOverlayFixed" class="iconBtn" data-i18n-aria-label="common.close" data-i18n-title="common.close"><span class="icon">✕</span></button>
           </div>
           <div id="overlayThumb" class="overlayThumb" aria-hidden="true"></div>
           <img id="overlayImg" />
@@ -278,10 +278,10 @@
             <div class="slideHeadTop">
               <div id="dTitle" class="dTitle"></div>
               <div class="slideHeadActions desktopDetailActions" aria-label="詳細アクション">
-                <a id="viewFullDesktop" class="iconBtn overlayActionBtn" href="#" target="_blank" rel="noopener" aria-label="全画面表示" title="全画面表示"><span class="icon iconSvg" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span></a>
-                <a id="dlFileDesktop" class="iconBtn overlayActionBtn" href="#" download aria-label="ダウンロード" title="ダウンロード"><span class="icon iconSvg" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M12 4.5v8.25" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="m8.25 9.75 3.75 3.75 3.75-3.75" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 16.75h14v2.75H5z" fill="currentColor"/></svg></span></a>
-                <button id="favDetailBtn" class="iconBtn" aria-label="ブックマーク" title="ブックマーク"><span class="icon">☆</span></button>
-                <button id="closeOverlay" class="iconBtn" aria-label="閉じる" title="閉じる"><span class="icon">✕</span></button>
+                <a id="viewFullDesktop" class="iconBtn overlayActionBtn" href="#" target="_blank" rel="noopener" data-i18n-aria-label="common.fullscreen" data-i18n-title="common.fullscreen"><span class="icon iconSvg" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span></a>
+                <a id="dlFileDesktop" class="iconBtn overlayActionBtn" href="#" download data-i18n-aria-label="common.download" data-i18n-title="common.download"><span class="icon iconSvg" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M12 4.5v8.25" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="m8.25 9.75 3.75 3.75 3.75-3.75" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 16.75h14v2.75H5z" fill="currentColor"/></svg></span></a>
+                <button id="favDetailBtn" class="iconBtn" data-i18n-aria-label="common.bookmark" data-i18n-title="common.bookmark"><span class="icon">☆</span></button>
+                <button id="closeOverlay" class="iconBtn" data-i18n-aria-label="common.close" data-i18n-title="common.close"><span class="icon">✕</span></button>
               </div>
             </div>
             <div class="slideHeadMeta">
@@ -289,23 +289,23 @@
               <div id="dMeta" class="dMeta"></div>
               <div class="dMiniLines dMiniLinesCompact">
                 <div class="dMiniLine dMiniSummaryLine"><span id="dCompactMeta" class="v"></span></div>
-                <div class="dMiniLine dCreatorLine"><span class="k">制作者</span><span id="dCreator" class="v"></span><button id="addCreatorFromDetailBtn" class="miniIconBtn" type="button" title="作者一覧へ登録" aria-label="作者一覧へ登録"><svg class="icoPlus" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button></div>
+                <div class="dMiniLine dCreatorLine"><span class="k" data-i18n="app.detail.creator">制作者</span><span id="dCreator" class="v"></span><button id="addCreatorFromDetailBtn" class="miniIconBtn" type="button" data-i18n-title="app.creator.add.title" data-i18n-aria-label="app.creator.add.aria"><svg class="icoPlus" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button></div>
               </div>
             </div>
           </div>
 
           <div class="actions">
             <div class="actionToggleRow">
-              <button id="detailTagViewToggle" class="compactTrackToggle" type="button" aria-label="表示形式切替" aria-pressed="false">
+              <button id="detailTagViewToggle" class="compactTrackToggle" type="button" data-i18n-aria-label="app.detail.tag_view" data-i18n-title="app.detail.tag_view" aria-pressed="false">
                 <span class="compactTrackToggleText">
                   <span class="compactTrackToggleLabel">B&lt;&gt;T</span>
                   <span id="detailTagViewToggleValue" class="compactTrackToggleValue">B</span>
                 </span>
                 <span class="compactTrack" aria-hidden="true"></span>
               </button>
-              <button id="detailEmphasisToggle" class="compactTrackToggle" type="button" aria-label="強調コピー切替" aria-pressed="false">
+              <button id="detailEmphasisToggle" class="compactTrackToggle" type="button" data-i18n-aria-label="app.detail.copy_emphasis" data-i18n-title="app.detail.copy_emphasis" aria-pressed="false">
                 <span class="compactTrackToggleText">
-                  <span class="compactTrackToggleLabel">強調コピー</span>
+                  <span class="compactTrackToggleLabel" data-i18n="app.detail.copy_emphasis_label">強調コピー</span>
                   <span id="detailEmphasisToggleValue" class="compactTrackToggleValue">OFF</span>
                 </span>
                 <span class="compactTrack" aria-hidden="true"></span>
@@ -316,10 +316,10 @@
 
           <div class="section detailTagSection">
             <div class="secHead">
-              <h3>アーティスト</h3>
+              <h3 data-i18n="app.detail.section.artist">アーティスト</h3>
               <div class="secBtns">
-                <button class="mini" title="括弧/数値強調を保持したままコピーします" data-copyall="artist_keep">全コピー</button>
-                <button class="mini" title="括弧/数値強調を外してコピーします" data-copyall="artist_plain">全コピー(解除)</button>
+                <button class="mini" data-i18n-title="app.copy.prompt.keep" data-copyall="artist_keep" data-i18n="app.copy.all">全コピー</button>
+                <button class="mini" data-i18n-title="app.copy.prompt.plain" data-copyall="artist_plain" data-i18n="app.copy.all_plain">全コピー(解除)</button>
               </div>
             </div>
             <div id="secArtist" class="tagBox"></div>
@@ -327,10 +327,10 @@
 
           <div class="section detailTagSection">
             <div class="secHead">
-              <h3>クオリティ</h3>
+              <h3 data-i18n="app.detail.section.quality">クオリティ</h3>
               <div class="secBtns">
-                <button class="mini" title="括弧/数値強調を保持したままコピーします" data-copyall="quality_keep">全コピー</button>
-                <button class="mini" title="括弧/数値強調を外してコピーします" data-copyall="quality_plain">全コピー(解除)</button>
+                <button class="mini" data-i18n-title="app.copy.prompt.keep" data-copyall="quality_keep" data-i18n="app.copy.all">全コピー</button>
+                <button class="mini" data-i18n-title="app.copy.prompt.plain" data-copyall="quality_plain" data-i18n="app.copy.all_plain">全コピー(解除)</button>
               </div>
             </div>
             <div id="secQuality" class="tagBox"></div>
@@ -338,10 +338,10 @@
 
           <div class="section detailTagSection">
             <div class="secHead">
-              <h3>キャラクター</h3>
+              <h3 data-i18n="app.detail.section.character">キャラクター</h3>
               <div class="secBtns">
-                <button class="mini" title="括弧/数値強調を保持したままコピーします" data-copyall="character_keep">全コピー</button>
-                <button class="mini" title="括弧/数値強調を外してコピーします" data-copyall="character_plain">全コピー(解除)</button>
+                <button class="mini" data-i18n-title="app.copy.prompt.keep" data-copyall="character_keep" data-i18n="app.copy.all">全コピー</button>
+                <button class="mini" data-i18n-title="app.copy.prompt.plain" data-copyall="character_plain" data-i18n="app.copy.all_plain">全コピー(解除)</button>
               </div>
             </div>
             <div id="secCharacter" class="tagBox"></div>
@@ -349,10 +349,10 @@
 
           <div class="section detailTagSection">
             <div class="secHead">
-              <h3>その他</h3>
+              <h3 data-i18n="app.detail.section.other">その他</h3>
               <div class="secBtns">
-                <button class="mini" title="括弧/数値強調を保持したままコピーします" data-copyall="other_keep">全コピー</button>
-                <button class="mini" title="括弧/数値強調を外してコピーします" data-copyall="other_plain">全コピー(解除)</button>
+                <button class="mini" data-i18n-title="app.copy.prompt.keep" data-copyall="other_keep" data-i18n="app.copy.all">全コピー</button>
+                <button class="mini" data-i18n-title="app.copy.prompt.plain" data-copyall="other_plain" data-i18n="app.copy.all_plain">全コピー(解除)</button>
               </div>
             </div>
             <div id="secOther" class="tagBox"></div>
@@ -360,10 +360,10 @@
 
           <div class="section detailTagSection">
             <div class="secHead">
-              <h3>ネガティブ</h3>
+              <h3 data-i18n="app.detail.section.negative">ネガティブ</h3>
               <div class="secBtns">
-                <button class="mini" title="括弧/数値強調を保持したままコピーします" data-copyall="negative_keep">全コピー</button>
-                <button class="mini" title="括弧/数値強調を外してコピーします" data-copyall="negative_plain">全コピー(解除)</button>
+                <button class="mini" data-i18n-title="app.copy.prompt.keep" data-copyall="negative_keep" data-i18n="app.copy.all">全コピー</button>
+                <button class="mini" data-i18n-title="app.copy.prompt.plain" data-copyall="negative_plain" data-i18n="app.copy.all_plain">全コピー(解除)</button>
               </div>
             </div>
             <div id="secNegative" class="tagBox"></div>
@@ -372,7 +372,7 @@
           <div id="promptSections"></div>
 
           <details class="meta">
-            <summary>メタデータ</summary>
+            <summary data-i18n="app.detail.metadata">メタデータ</summary>
             <pre id="metaPre"></pre>
           </details>
         </aside>
@@ -380,14 +380,13 @@
     </div>
   </div>
 
-  <script type="module" src="/app.js?v=20260323_04"></script>
-
+  
   <div id="filterOverlay" class="filterOverlay hidden" aria-hidden="true">
     <div id="filterOverlayBg" class="filterOverlayBg"></div>
-    <div class="filterOverlayPanel" role="dialog" aria-label="フィルタ">
+    <div class="filterOverlayPanel" role="dialog" data-i18n-aria-label="app.filter.title">
       <div class="filterOverlayHead">
-        <div class="filterOverlayTitle">フィルタ</div>
-        <button id="filterOverlayClose" class="iconBtn" aria-label="閉じる"><span class="icon">✕</span></button>
+        <div class="filterOverlayTitle" data-i18n="app.filter.title">フィルタ</div>
+        <button id="filterOverlayClose" class="iconBtn" data-i18n-aria-label="common.close" data-i18n-title="common.close"><span class="icon">✕</span></button>
       </div>
       <div id="filterOverlayBody" class="filterOverlayBody"></div>
     </div>
@@ -396,18 +395,18 @@
 
   <div id="bmOverlay" class="bmOverlay hidden" aria-hidden="true">
     <div id="bmOverlayBg" class="bmOverlayBg"></div>
-    <div class="bmOverlayPanel" role="dialog" aria-label="ブックマーク">
+    <div class="bmOverlayPanel" role="dialog" data-i18n-aria-label="app.bookmark.overlay.title">
       <div class="bmOverlayHead">
-        <div class="bmOverlayTitle">ブックマーク</div>
-        <button id="bmOverlayClose" class="iconBtn" aria-label="閉じる"><span class="icon">✕</span></button>
+        <div class="bmOverlayTitle" data-i18n="app.bookmark.overlay.title">ブックマーク</div>
+        <button id="bmOverlayClose" class="iconBtn" data-i18n-aria-label="common.close" data-i18n-title="common.close"><span class="icon">✕</span></button>
       </div>
       <div class="bmOverlayBody">
         <div class="bmOverlayHint small" id="bmOverlayHint"></div>
         <div id="bmOverlayLists" class="bmOverlayLists"></div>
         <div class="bmOverlayFoot">
           <div class="bmOverlayBtns">
-            <button id="bmCreateListBtn" class="ghostBtn">リスト作成</button>
-            <button id="bmClearThisBtn" class="dangerBtn">この画像を全解除</button>
+            <button id="bmCreateListBtn" class="ghostBtn" data-i18n="app.bookmark.overlay.create_list">リスト作成</button>
+            <button id="bmClearThisBtn" class="dangerBtn" data-i18n="app.bookmark.overlay.clear_this">この画像を全解除</button>
           </div>
           <div id="bmOverlayStatus" class="small"></div>
         </div>
@@ -417,19 +416,19 @@
 
   <div id="bulkBmOverlay" class="bmOverlay hidden" aria-hidden="true">
     <div id="bulkBmOverlayBg" class="bmOverlayBg"></div>
-    <div class="bmOverlayPanel" role="dialog" aria-label="一括ブックマーク">
+    <div class="bmOverlayPanel" role="dialog" data-i18n-aria-label="app.bookmark.overlay.bulk_title">
       <div class="bmOverlayHead">
-        <div class="bmOverlayTitle">一括ブックマーク</div>
-        <button id="bulkBmOverlayClose" class="iconBtn" aria-label="閉じる"><span class="icon">✕</span></button>
+        <div class="bmOverlayTitle" data-i18n="app.bookmark.overlay.bulk_title">一括ブックマーク</div>
+        <button id="bulkBmOverlayClose" class="iconBtn" data-i18n-aria-label="common.close" data-i18n-title="common.close"><span class="icon">✕</span></button>
       </div>
       <div class="bmOverlayBody">
         <div class="bmOverlayHint small" id="bulkBmOverlayHint"></div>
         <div id="bulkBmOverlayLists" class="bmOverlayLists"></div>
         <div class="bmOverlayFoot">
           <div class="bmOverlayBtns">
-            <button id="bulkBmCreateListBtn" class="ghostBtn">リスト作成</button>
-            <button id="bulkBmCancelBtn" class="ghostBtn">キャンセル</button>
-            <button id="bulkBmSaveBtn" class="primaryBtn" disabled>保存</button>
+            <button id="bulkBmCreateListBtn" class="ghostBtn" data-i18n="app.bookmark.overlay.create_list">リスト作成</button>
+            <button id="bulkBmCancelBtn" class="ghostBtn" data-i18n="common.cancel">キャンセル</button>
+            <button id="bulkBmSaveBtn" class="primaryBtn" disabled data-i18n="common.save_action">保存</button>
           </div>
           <div id="bulkBmOverlayStatus" class="small"></div>
         </div>
@@ -440,18 +439,18 @@
 
   <div id="userPickModal" class="userPickModal hidden" aria-hidden="true" data-kind="creators">
     <div id="userPickBg" class="userPickBg"></div>
-    <div class="userPickPanel" role="dialog" aria-label="ユーザー選択">
+    <div class="userPickPanel" role="dialog" data-i18n-aria-label="app.user_pick.dialog">
       <div class="userPickHead">
         <div class="userPickHeadText">
-          <div id="userPickTitle" class="userPickTitle">追加</div>
+          <div id="userPickTitle" class="userPickTitle" data-i18n="app.user_pick.title">追加</div>
           <div id="userPickSub" class="userPickSub small"></div>
         </div>
-        <button id="userPickClose" class="iconBtn" aria-label="閉じる"><span class="icon">✕</span></button>
+        <button id="userPickClose" class="iconBtn" data-i18n-aria-label="common.close" data-i18n-title="common.close"><span class="icon">✕</span></button>
       </div>
       <div class="userPickBody">
         <div class="userPickSearchRow">
-          <input id="userPickQuery" class="userPickInput" placeholder="ユーザー名（部分一致）" />
-          <button id="userPickSearchBtn" class="ghostBtn" type="button">検索</button>
+          <input id="userPickQuery" class="userPickInput" data-i18n-placeholder="app.user_pick.query_placeholder" />
+          <button id="userPickSearchBtn" class="ghostBtn" type="button" data-i18n="common.search">検索</button>
         </div>
         <div id="userPickHint" class="small" style="margin-top:10px"></div>
         <div id="userPickList" class="userPickList"></div>
@@ -461,5 +460,7 @@
 
   <div id="toastViewport" class="toastViewport" aria-live="polite" aria-atomic="true"></div>
 
+  <script type="module" src="/lib/page-i18n.js"></script>
+  <script type="module" src="/app.js"></script>
 </body>
 </html>

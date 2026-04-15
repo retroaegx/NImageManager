@@ -1,7 +1,7 @@
-import { $ } from "./lib/dom.js?v=20260307_01";
-import { apiFetch, apiJson } from "./lib/http.js?v=20260307_01";
-import { bindUserMenu } from "./lib/userMenu.js?v=20260312_02";
-import { loadCurrentUser, logoutAndRedirect } from "./lib/session.js?v=20260307_01";
+import { $ } from "./lib/dom.js";
+import { apiFetch, apiJson } from "./lib/http.js";
+import { bindUserMenu } from "./lib/userMenu.js";
+import { loadCurrentUser, logoutAndRedirect } from "./lib/session.js";
 
 const API = {
   me: "/api/me",
@@ -72,31 +72,31 @@ function setButtonsLocked({ reparseActive=false, rebuildActive=false, derivative
 
   if(reparseBtn){
     reparseBtn.disabled = reparseBusy;
-    reparseBtn.textContent = reparseActive ? "再解析（実行中）" : "再解析（全件）";
+    reparseBtn.textContent = reparseActive ? t("maintenance.reparse.running") : t("maintenance.reparse.action");
   }
   if(rebuildBtn){
     rebuildBtn.disabled = rebuildBusy;
-    rebuildBtn.textContent = rebuildActive ? "統計再集計（実行中）" : "統計再集計";
+    rebuildBtn.textContent = rebuildActive ? t("maintenance.rebuild.running") : t("maintenance.rebuild.action");
   }
   if(derivativeFillBtn){
     derivativeFillBtn.disabled = derivativeBusy;
-    derivativeFillBtn.textContent = derivativeFillActive ? "派生画像補完（実行中）" : "派生画像補完";
+    derivativeFillBtn.textContent = derivativeFillActive ? t("maintenance.derivative.running") : t("maintenance.derivative.action");
   }
 
   if(reparseLock){
     reparseLock.textContent = rebuildActive
-      ? "統計再集計が実行中のため開始できません。"
-      : (derivativeFillActive ? "派生画像補完が実行中のため開始できません。" : "");
+      ? t("maintenance.start_blocked.reparse_by_rebuild")
+      : (derivativeFillActive ? t("maintenance.start_blocked.reparse_by_derivative") : "");
   }
   if(rebuildLock){
     rebuildLock.textContent = reparseActive
-      ? "再解析が実行中のため開始できません。"
-      : (derivativeFillActive ? "派生画像補完が実行中のため開始できません。" : "");
+      ? t("maintenance.start_blocked.rebuild_by_reparse")
+      : (derivativeFillActive ? t("maintenance.start_blocked.rebuild_by_derivative") : "");
   }
   if(derivativeFillLock){
     derivativeFillLock.textContent = reparseActive
-      ? "再解析が実行中のため開始できません。"
-      : (rebuildActive ? "統計再集計が実行中のため開始できません。" : "");
+      ? t("maintenance.start_blocked.derivative_by_reparse")
+      : (rebuildActive ? t("maintenance.start_blocked.derivative_by_rebuild") : "");
   }
 }
 
@@ -110,20 +110,20 @@ function stateToStatusLabel(state){
   const active = !!state?.active;
   const hbAge = state?.hb_age_sec ?? null;
 
-  if(!run) return { text: "未実行", tone: "idle" };
+  if(!run) return { text: t("maintenance.status.not_started"), tone: "idle" };
   if(run.status === "running"){
-    if(active) return { text: "実行中", tone: "run" };
-    return { text: `実行中（更新停止? hb=${fmtAge(hbAge)}）`, tone: "warn" };
+    if(active) return { text: t("maintenance.status.running"), tone: "run" };
+    return { text: t("maintenance.status.stalled", { hb: fmtAge(hbAge) }), tone: "warn" };
   }
-  if(run.status === "done") return { text: "完了", tone: "done" };
-  return { text: "停止", tone: "warn" };
+  if(run.status === "done") return { text: t("maintenance.status.done"), tone: "done" };
+  return { text: t("maintenance.status.stopped"), tone: "warn" };
 }
 
 function renderHistory(el, history){
   if(!el) return;
   const rows = (history || []).slice(0, 5);
   if(!rows.length){
-    el.textContent = "履歴はありません";
+    el.textContent = t("maintenance.history.empty");
     return;
   }
 
@@ -131,9 +131,9 @@ function renderHistory(el, history){
   rows.forEach((row) => {
     const line = document.createElement("div");
     line.className = "maintHistoryRow";
-    const status = row.status === "running" ? "実行中" : (row.status === "done" ? "完了" : "停止");
+    const status = row.status === "running" ? t("maintenance.status.running") : (row.status === "done" ? t("maintenance.status.done") : t("maintenance.status.stopped"));
     const last = row.last_image_id !== undefined ? `  last=${fmt(row.last_image_id)}` : "";
-    line.textContent = `#${row.id} ${status}  開始:${fmtTs(row.created_at)}  更新:${fmtTs(row.updated_at)}  処理:${fmt(row.processed)}  成功:${fmt(row.updated)}  失敗:${fmt(row.error_count)}${last}`;
+    line.textContent = t("maintenance.history.line", { id: row.id, status, createdAt: fmtTs(row.created_at), updatedAt: fmtTs(row.updated_at), processed: fmt(row.processed), updated: fmt(row.updated), errorCount: fmt(row.error_count), last });
     el.appendChild(line);
   });
 }
@@ -195,7 +195,7 @@ function renderReparseState(state){
   const status = stateToStatusLabel(state);
 
   $("reparseStatus").textContent = status.text;
-  $("reparseSummary").textContent = run ? `run_id=${run.id} / status=${run.status}` : "";
+  $("reparseSummary").textContent = run ? t("maintenance.summary.run_status", { id: run.id, status: run.status }) : "";
   $("reparseStarted").textContent = run ? fmtTs(run.created_at) : "-";
   $("reparseUpdated").textContent = run ? fmtTs(run.updated_at) : "-";
 
@@ -204,7 +204,7 @@ function renderReparseState(state){
   const updated = Number(run?.updated || 0);
   const errors = Number(run?.error_count || 0);
 
-  $("reparseCounts").textContent = run ? `${fmt(processed)} (成功 ${fmt(updated)} / 失敗 ${fmt(errors)})` : "-";
+  $("reparseCounts").textContent = run ? t("maintenance.counts.success_fail", { processed: fmt(processed), updated: fmt(updated), errors: fmt(errors) }) : "-";
 
   const afterId = Number(state?.after_id || 0);
   const maxId = Number(state?.max_image_id || 0);
@@ -214,12 +214,12 @@ function renderReparseState(state){
 
   const pct = total > 0 ? (processed / total * 100) : 0;
   setProgress($("reparseProgressFill"), pct);
-  $("reparseProgressText").textContent = total > 0 && run ? `進捗: ${pct.toFixed(1)}%（${fmt(processed)} / ${fmt(total)}）` : "";
+  $("reparseProgressText").textContent = total > 0 && run ? t("maintenance.progress", { pct: pct.toFixed(1), processed: fmt(processed), total: fmt(total) }) : "";
 
   renderHistory($("reparseHistory"), state?.history || []);
 
   const nextKey = run ? `${run.id}:${run.status}:${state?.active ? 1 : 0}` : "none";
-  trackCompletion(prevReparseStatus, nextKey, "再解析が完了しました");
+  trackCompletion(prevReparseStatus, nextKey, t("maintenance.toast.reparse_done"));
   prevReparseStatus = nextKey;
 }
 
@@ -228,14 +228,14 @@ function renderRebuildState(state){
   const status = stateToStatusLabel(state);
 
   $("rebuildStatus").textContent = status.text;
-  $("rebuildSummary").textContent = run ? `run_id=${run.id} / status=${run.status}` : "";
+  $("rebuildSummary").textContent = run ? t("maintenance.summary.run_status", { id: run.id, status: run.status }) : "";
   $("rebuildStarted").textContent = run ? fmtTs(run.created_at) : "-";
   $("rebuildUpdated").textContent = run ? fmtTs(run.updated_at) : "-";
 
   const processed = Number(run?.processed || 0);
   const updated = Number(run?.updated || 0);
   const errors = Number(run?.error_count || 0);
-  $("rebuildCounts").textContent = run ? `${fmt(processed)} (成功 ${fmt(updated)} / 失敗 ${fmt(errors)})` : "-";
+  $("rebuildCounts").textContent = run ? t("maintenance.counts.success_fail", { processed: fmt(processed), updated: fmt(updated), errors: fmt(errors) }) : "-";
   $("rebuildHeartbeat").textContent = fmtAge(state?.hb_age_sec);
 
   const pct = run && run.status === "running" ? 35 : (run && run.status === "done" ? 100 : 0);
@@ -245,7 +245,7 @@ function renderRebuildState(state){
   renderHistory($("rebuildHistory"), state?.history || []);
 
   const nextKey = run ? `${run.id}:${run.status}:${state?.active ? 1 : 0}` : "none";
-  trackCompletion(prevRebuildStatus, nextKey, "統計再集計が完了しました");
+  trackCompletion(prevRebuildStatus, nextKey, t("maintenance.toast.rebuild_done"));
   prevRebuildStatus = nextKey;
 }
 
@@ -255,8 +255,8 @@ function renderDerivativeFillState(state){
 
   $("derivativeFillStatus").textContent = status.text;
   $("derivativeFillSummary").textContent = run
-    ? `run_id=${run.id} / status=${run.status} / サムネ未作成候補=${fmt(state?.grid_missing || 0)} / オーバーレイ未作成候補=${fmt(state?.overlay_missing || 0)}`
-    : `サムネ未作成候補=${fmt(state?.grid_missing || 0)} / オーバーレイ未作成候補=${fmt(state?.overlay_missing || 0)}`;
+    ? t("maintenance.summary.run_status_missing", { id: run.id, status: run.status, gridMissing: fmt(state?.grid_missing || 0), overlayMissing: fmt(state?.overlay_missing || 0) })
+    : t("maintenance.summary.missing", { gridMissing: fmt(state?.grid_missing || 0), overlayMissing: fmt(state?.overlay_missing || 0) });
 
   $("derivativeFillStarted").textContent = run ? fmtTs(run.created_at) : "-";
   $("derivativeFillUpdated").textContent = run ? fmtTs(run.updated_at) : "-";
@@ -265,7 +265,7 @@ function renderDerivativeFillState(state){
   const processed = Number(run?.processed || 0);
   const updated = Number(run?.updated || 0);
   const errors = Number(run?.error_count || 0);
-  $("derivativeFillCounts").textContent = run ? `${fmt(processed)} (生成 ${fmt(updated)} / 失敗 ${fmt(errors)})` : "-";
+  $("derivativeFillCounts").textContent = run ? t("maintenance.counts.generated_fail", { processed: fmt(processed), updated: fmt(updated), errors: fmt(errors) }) : "-";
 
   const afterId = Number(state?.after_id || 0);
   const maxId = Number(state?.max_image_id || 0);
@@ -276,13 +276,13 @@ function renderDerivativeFillState(state){
 
   const pct = total > 0 ? (processed / total * 100) : 0;
   setProgress($("derivativeFillProgressFill"), pct);
-  $("derivativeFillProgressText").textContent = total > 0 && run ? `進捗: ${pct.toFixed(1)}%（${fmt(processed)} / ${fmt(total)}）` : "";
+  $("derivativeFillProgressText").textContent = total > 0 && run ? t("maintenance.progress", { pct: pct.toFixed(1), processed: fmt(processed), total: fmt(total) }) : "";
 
   renderHistory($("derivativeFillHistory"), state?.history || []);
-  renderSimpleErrors($("derivativeFillErrors"), state?.errors || [], "失敗はありません");
+  renderSimpleErrors($("derivativeFillErrors"), state?.errors || [], t("maintenance.errors.none"));
 
   const nextKey = run ? `${run.id}:${run.status}:${state?.active ? 1 : 0}` : "none";
-  trackCompletion(prevDerivativeFillStatus, nextKey, "派生画像補完が完了しました");
+  trackCompletion(prevDerivativeFillStatus, nextKey, t("maintenance.toast.derivative_done"));
   prevDerivativeFillStatus = nextKey;
 }
 
@@ -298,7 +298,7 @@ function renderReparseErrors(state){
     td.colSpan = 4;
     td.className = "small";
     td.style.opacity = "0.85";
-    td.textContent = "失敗はありません";
+    td.textContent = t("maintenance.errors.none");
     tr.appendChild(td);
     tbody.appendChild(tr);
     return;
@@ -327,7 +327,7 @@ function renderReparseErrors(state){
 
     const retryBtn = document.createElement("button");
     retryBtn.className = "primaryBtn smallBtn";
-    retryBtn.textContent = "再試行";
+    retryBtn.textContent = t("common.retry");
     retryBtn.addEventListener("click", async () => {
       if(!imageId) return;
       retryBtn.disabled = true;
@@ -337,10 +337,10 @@ function renderReparseErrors(state){
           body: JSON.stringify({ image_id: imageId, clear_skip: isSkip ? 1 : 0 }),
         });
         const json = await apiJson(res);
-        if(!json.ok) alert("再試行に失敗しました");
+        if(!json.ok) alert(t("maintenance.error.retry_failed"));
         await refreshAll(true);
       }catch(_err){
-        alert("再試行に失敗しました");
+        alert(t("maintenance.error.retry_failed"));
       }finally{
         retryBtn.disabled = false;
       }
@@ -348,7 +348,7 @@ function renderReparseErrors(state){
 
     const skipBtn = document.createElement("button");
     skipBtn.className = "ghostBtn smallBtn";
-    skipBtn.textContent = isSkip ? "skip解除" : "skip";
+    skipBtn.textContent = isSkip ? t("maintenance.skip.clear") : t("common.skip");
     skipBtn.addEventListener("click", async () => {
       if(!imageId) return;
       try{
@@ -358,7 +358,7 @@ function renderReparseErrors(state){
         });
         await refreshAll(true);
       }catch(_err){
-        alert("skip更新に失敗しました");
+        alert(t("maintenance.error.skip_failed"));
       }
     });
 

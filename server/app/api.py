@@ -551,15 +551,15 @@ def _upsert_direct_upload_item_row(
     if existing:
         item_id = int(existing["id"])
         state_now = str(existing["state"] or "")
-        next_state = state_now if state_now in {"処理中", "完了", "重複"} else "受信済み"
+        next_state = state_now if state_now in {"processing", "done", "duplicate"} else "received"
         conn.execute(
-            "UPDATE upload_zip_items SET filename=?, staged_path=?, mtime_iso=?, state=?, message=CASE WHEN ? IN ('処理中','完了','重複') THEN message ELSE NULL END WHERE id=?",
+            "UPDATE upload_zip_items SET filename=?, staged_path=?, mtime_iso=?, state=?, message=CASE WHEN ? IN ('processing','done','duplicate') THEN message ELSE NULL END WHERE id=?",
             (str(filename), str(staged_path), str(mtime_iso), next_state, state_now, int(item_id)),
         )
         return item_id
     cur = conn.execute(
         "INSERT INTO upload_zip_items(job_id, seq, filename, state, image_id, message, staged_path, mtime_iso) VALUES (?,?,?,?,?,?,?,?)",
-        (int(job_id), int(seq_i), str(filename), "受信済み", None, None, str(staged_path), str(mtime_iso)),
+        (int(job_id), int(seq_i), str(filename), "received", None, None, str(staged_path), str(mtime_iso)),
     )
     return int(cur.lastrowid)
 
@@ -1476,7 +1476,7 @@ def _ext_auth_failed(request: Request | None = None) -> JSONResponse:
     payload = {
         "ok": False,
         "code": "AUTH_REQUIRED",
-        "message": "再ログインが必要です",
+        "message": "Authentication required",
     }
     if request is not None:
         payload["login_url"] = _abs_url("/login.html", request)
@@ -1591,7 +1591,7 @@ def ext_login(request: Request, req: LoginReq):
             content={
                 "ok": False,
                 "code": "INVALID_CREDENTIALS",
-                "message": "ログインに失敗しました",
+                "message": "Login failed",
             },
         )
     token = create_token(user_id=int(row["id"]), username=row["username"], role=row["role"])
@@ -1599,7 +1599,7 @@ def ext_login(request: Request, req: LoginReq):
         "ok": True,
         "token": token,
         "user": {"id": row["id"], "username": row["username"], "role": row["role"]},
-        "message": "ログインしました",
+        "message": "Login successful",
         "login_url": _abs_url("/login.html", request),
     }
 
@@ -1642,6 +1642,23 @@ def app_update_status(user: dict = Depends(get_user)):
 class UpdateMeSettingsReq(BaseModel):
     share_works: int | None = None
     share_bookmarks: int | None = None
+    ui_language: str | None = None
+
+
+def _ensure_user_settings_ui_language_column(conn) -> bool:
+    try:
+        cols = {str(r["name"] or "") for r in conn.execute("PRAGMA table_info(user_settings)").fetchall()}
+    except Exception:
+        cols = set()
+    if "ui_language" in cols:
+        return True
+    try:
+        conn.execute("ALTER TABLE user_settings ADD COLUMN ui_language TEXT NOT NULL DEFAULT 'auto'")
+        conn.execute("UPDATE user_settings SET ui_language='auto' WHERE COALESCE(TRIM(ui_language),'')=''")
+        conn.execute("UPDATE user_settings SET ui_language='auto' WHERE ui_language='ja'")
+        return True
+    except Exception:
+        return False
 
 
 @api_router.patch("/me/settings")
@@ -1654,36 +1671,64 @@ def update_me_settings(req: UpdateMeSettingsReq, user: dict = Depends(get_user))
 
     sw = None if req.share_works is None else (1 if int(req.share_works or 0) else 0)
     sb = None if req.share_bookmarks is None else (1 if int(req.share_bookmarks or 0) else 0)
-    if sw is None and sb is None:
+    lang = None
+    if req.ui_language is not None:
+        raw_lang = str(req.ui_language or '').strip().lower()
+        lang = raw_lang if raw_lang in {'auto', 'ja', 'en'} else 'auto'
+    if sw is None and sb is None and lang is None:
         return {"ok": True, **user}
 
     conn = get_conn()
     try:
+        has_ui_language = _ensure_user_settings_ui_language_column(conn)
         # Upsert (SQLite).
         # Keep updated_at fresh for debugging.
-        cur = conn.execute("SELECT share_works, share_bookmarks FROM user_settings WHERE user_id=?", (uid,)).fetchone()
+        if has_ui_language:
+            cur = conn.execute("SELECT share_works, share_bookmarks, COALESCE(NULLIF(TRIM(ui_language),''),'auto') AS ui_language FROM user_settings WHERE user_id=?", (uid,)).fetchone()
+        else:
+            cur = conn.execute("SELECT share_works, share_bookmarks FROM user_settings WHERE user_id=?", (uid,)).fetchone()
         if cur:
             nsw = int(cur[0] or 0) if sw is None else sw
             nsb = int(cur[1] or 0) if sb is None else sb
-            conn.execute(
-                "UPDATE user_settings SET share_works=?, share_bookmarks=?, updated_at=datetime('now') WHERE user_id=?",
-                (nsw, nsb, uid),
-            )
+            nlang = (str(cur[2] or 'auto') if (has_ui_language and len(cur) >= 3) else 'auto') if lang is None else lang
+            if has_ui_language:
+                conn.execute(
+                    "UPDATE user_settings SET share_works=?, share_bookmarks=?, ui_language=?, updated_at=datetime('now') WHERE user_id=?",
+                    (nsw, nsb, nlang, uid),
+                )
+            else:
+                conn.execute(
+                    "UPDATE user_settings SET share_works=?, share_bookmarks=?, updated_at=datetime('now') WHERE user_id=?",
+                    (nsw, nsb, uid),
+                )
         else:
-            conn.execute(
-                "INSERT INTO user_settings(user_id, share_works, share_bookmarks) VALUES (?,?,?)",
-                (uid, (sw or 0), (sb or 0)),
-            )
+            if has_ui_language:
+                conn.execute(
+                    "INSERT INTO user_settings(user_id, share_works, share_bookmarks, ui_language) VALUES (?,?,?,?)",
+                    (uid, (sw or 0), (sb or 0), (lang or 'auto')),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO user_settings(user_id, share_works, share_bookmarks) VALUES (?,?,?)",
+                    (uid, (sw or 0), (sb or 0)),
+                )
         conn.commit()
         # reflect back
-        row = conn.execute(
-            "SELECT COALESCE(share_works,0) AS share_works, COALESCE(share_bookmarks,0) AS share_bookmarks FROM user_settings WHERE user_id=?",
-            (uid,),
-        ).fetchone()
+        if has_ui_language:
+            row = conn.execute(
+                "SELECT COALESCE(share_works,0) AS share_works, COALESCE(share_bookmarks,0) AS share_bookmarks, COALESCE(NULLIF(TRIM(ui_language),''),'auto') AS ui_language FROM user_settings WHERE user_id=?",
+                (uid,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT COALESCE(share_works,0) AS share_works, COALESCE(share_bookmarks,0) AS share_bookmarks FROM user_settings WHERE user_id=?",
+                (uid,),
+            ).fetchone()
         user2 = dict(user)
         if row:
             user2["share_works"] = int(row["share_works"] or 0)
             user2["share_bookmarks"] = int(row["share_bookmarks"] or 0)
+            user2["ui_language"] = str(row["ui_language"] or "auto") if has_ui_language and "ui_language" in row.keys() else "auto"
         return {"ok": True, **user2}
     finally:
         conn.close()
@@ -4809,7 +4854,7 @@ def _poll_ext_upload_job(*, request: Request, job_id: int, user_id: int, timeout
                 (int(job_id),),
             ).fetchone()
             if not row:
-                return JSONResponse(status_code=404, content={"ok": False, "code": "JOB_NOT_FOUND", "message": "アップロードジョブが見つかりません"})
+                return JSONResponse(status_code=404, content={"ok": False, "code": "JOB_NOT_FOUND", "message": "Upload job not found"})
             if int(row["user_id"] or 0) != int(user_id):
                 return JSONResponse(status_code=403, content={"ok": False, "code": "FORBIDDEN", "message": "forbidden"})
             last_status = str(row["status"] or "")
@@ -4820,23 +4865,23 @@ def _poll_ext_upload_job(*, request: Request, job_id: int, user_id: int, timeout
             ).fetchone()
             if last_status == "done" and item:
                 state_txt = str(item["state"] or "")
-                if state_txt in {"完了", "重複"}:
+                if state_txt in {"done", "duplicate"}:
                     image_id = int(item["image_id"] or 0)
                     return {
                         "ok": True,
                         "image_id": image_id,
-                        "dedup": state_txt == "重複",
-                        "message": ("既存画像として登録済みです" if state_txt == "重複" else "登録しました"),
+                        "dedup": state_txt == "duplicate",
+                        "message": ("Already registered as an existing image" if state_txt == "duplicate" else "Upload completed"),
                         "detail_url": _abs_url(f"/api/images/{image_id}/detail", request),
                         "job_id": int(job_id),
                     }
-                if state_txt == "失敗":
+                if state_txt == "failed":
                     return JSONResponse(
                         status_code=500,
                         content={
                             "ok": False,
                             "code": "UPLOAD_FAILED",
-                            "message": str(item["message"] or last_error or "アップロードに失敗しました"),
+                            "message": str(item["message"] or last_error or "Upload failed"),
                             "job_id": int(job_id),
                         },
                     )
@@ -4846,7 +4891,7 @@ def _poll_ext_upload_job(*, request: Request, job_id: int, user_id: int, timeout
                     content={
                         "ok": False,
                         "code": "UPLOAD_FAILED",
-                        "message": str(last_error or "アップロードに失敗しました"),
+                        "message": str(last_error or "Upload failed"),
                         "job_id": int(job_id),
                     },
                 )
@@ -4858,7 +4903,7 @@ def _poll_ext_upload_job(*, request: Request, job_id: int, user_id: int, timeout
         content={
             "ok": False,
             "code": "UPLOAD_TIMEOUT",
-            "message": "アップロード処理がタイムアウトしました",
+            "message": "Upload processing timed out",
             "job_id": int(job_id),
             "status": last_status or "processing",
         },
@@ -4881,7 +4926,7 @@ async def ext_upload_image(
     staging_dir: Path | None = None
     try:
         if total <= 0:
-            return JSONResponse(status_code=400, content={"ok": False, "code": "EMPTY_FILE", "message": "画像データが空です"})
+            return JSONResponse(status_code=400, content={"ok": False, "code": "EMPTY_FILE", "message": "Image data is empty"})
         if not _allowed_image_ext(safe_name):
             return JSONResponse(status_code=400, content={"ok": False, "code": "UNSUPPORTED_FILE_TYPE", "message": "unsupported file type"})
 
@@ -5425,11 +5470,11 @@ def _refresh_upload_job_progress(conn: sqlite3.Connection, job_id: int, *, seal:
         """
         SELECT
           COUNT(*) AS n_all,
-          SUM(CASE WHEN state IN ('完了','重複') THEN 1 ELSE 0 END) AS n_done,
-          SUM(CASE WHEN state='失敗' THEN 1 ELSE 0 END) AS n_failed,
-          SUM(CASE WHEN state='重複' THEN 1 ELSE 0 END) AS n_dup,
-          SUM(CASE WHEN state='処理中' THEN 1 ELSE 0 END) AS n_running,
-          SUM(CASE WHEN state IN ('待機','受信済み') THEN 1 ELSE 0 END) AS n_pending
+          SUM(CASE WHEN state IN ('done','duplicate') THEN 1 ELSE 0 END) AS n_done,
+          SUM(CASE WHEN state='failed' THEN 1 ELSE 0 END) AS n_failed,
+          SUM(CASE WHEN state='duplicate' THEN 1 ELSE 0 END) AS n_dup,
+          SUM(CASE WHEN state='processing' THEN 1 ELSE 0 END) AS n_running,
+          SUM(CASE WHEN state IN ('pending','received') THEN 1 ELSE 0 END) AS n_pending
         FROM upload_zip_items
         WHERE job_id=?
         """,
@@ -5494,13 +5539,13 @@ def _process_upload_item_job(item_id: int, source: str | None = None, trace_id: 
         job_id = int(row["job_id"])
         staged_path = str(row["staged_path"] or "")
         if str(row["job_status"] or "") == "cancelled":
-            conn.execute("UPDATE upload_zip_items SET state='失敗', message=? WHERE id=?", ("cancelled", int(item_id)))
+            conn.execute("UPDATE upload_zip_items SET state='failed', message=? WHERE id=?", ("cancelled", int(item_id)))
             status, staging_dir, _source_kind = _refresh_upload_job_progress(conn, job_id, seal=False)
             conn.commit()
             if status == "done":
                 _cleanup_upload_staging_dir(staging_dir)
             return
-        conn.execute("UPDATE upload_zip_items SET state='処理中', message=NULL WHERE id=?", (int(item_id),))
+        conn.execute("UPDATE upload_zip_items SET state='processing', message=NULL WHERE id=?", (int(item_id),))
         status, _staging_dir, _source_kind = _refresh_upload_job_progress(conn, job_id, seal=False)
         conn.commit()
         upload_bookmark_list_id = _job_upload_bookmark_list_id(
@@ -5522,7 +5567,7 @@ def _process_upload_item_job(item_id: int, source: str | None = None, trace_id: 
             derivative_kinds=("grid", "overlay"),
             upload_bookmark_list_id=upload_bookmark_list_id,
         )
-        state_txt = "重複" if bool(res.get("dedup")) else "完了"
+        state_txt = "duplicate" if bool(res.get("dedup")) else "done"
         image_id = int(res.get("image_id") or 0) or None
         msg = str(res.get("dedup_reason") or "") or None
         conn.execute(
@@ -5536,7 +5581,7 @@ def _process_upload_item_job(item_id: int, source: str | None = None, trace_id: 
     except Exception as e:
         try:
             conn.execute(
-                "UPDATE upload_zip_items SET state='失敗', image_id=NULL, message=? WHERE id=?",
+                "UPDATE upload_zip_items SET state='failed', image_id=NULL, message=? WHERE id=?",
                 (f"{type(e).__name__}: {e}"[:255], int(item_id)),
             )
             row2 = conn.execute("SELECT job_id FROM upload_zip_items WHERE id=?", (int(item_id),)).fetchone()
@@ -6498,7 +6543,7 @@ def _upload_zip_worker(job_id: int, zip_path: str, user_id: int, username: str) 
                     mtime_iso = datetime.now(timezone.utc).isoformat()
                 conn.execute(
                     "INSERT INTO upload_zip_items(job_id, seq, filename, state, image_id, message, staged_path, mtime_iso) VALUES (?,?,?,?,?,?,?,?)",
-                    (int(job_id), int(seq), safe_base, "待機", None, None, str(dst), mtime_iso),
+                    (int(job_id), int(seq), safe_base, "pending", None, None, str(dst), mtime_iso),
                 )
                 if (seq % 20) == 0:
                     conn.execute(

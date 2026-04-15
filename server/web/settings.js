@@ -1,7 +1,9 @@
-import { $ } from "./lib/dom.js?v=20260307_01";
-import { apiFetch, apiJson, safeJson } from "./lib/http.js?v=20260307_01";
-import { bindUserMenu } from "./lib/userMenu.js?v=20260312_02";
-import { loadCurrentUser, logoutAndRedirect, isAdminRole } from "./lib/session.js?v=20260307_01";
+import { $ } from "./lib/dom.js";
+import { apiFetch, apiJson, safeJson } from "./lib/http.js";
+import { bindUserMenu } from "./lib/userMenu.js";
+import { loadCurrentUser, logoutAndRedirect, isAdminRole } from "./lib/session.js";
+import { t, setLocalePreference } from "./lib/i18n.js";
+
 
 const SettingsPage = (window.NIMSettings && typeof window.NIMSettings === "object") ? window.NIMSettings : {};
 let ME = null;
@@ -38,6 +40,8 @@ async function loadMe(){
       const sb = !!Number(me?.share_bookmarks || 0);
       setToggle($("toggleShareWorks"), sw);
       setToggle($("toggleShareBookmarks"), sb);
+      const langSel = $("uiLanguage");
+      if(langSel) langSel.value = String(me?.ui_language || "auto");
       renderAccountDelete(me);
       bindUserMenu({
         logoutEndpoint: API.logout,
@@ -54,7 +58,7 @@ function setToggle(btn, on){
   if(!btn) return;
   btn.classList.toggle("on", !!on);
   btn.classList.toggle("off", !on);
-  btn.textContent = on ? "ON" : "OFF";
+  btn.textContent = on ? t("common.on") : t("common.off");
 }
 
 function renderAccountDelete(me){
@@ -65,14 +69,14 @@ function renderAccountDelete(me){
   const isMaster = String(me?.role || "") === "master";
   btn.disabled = isMaster;
   note.textContent = isMaster
-    ? "master アカウントは削除できません。"
-    : "作品、ブックマーク、作者登録、共有ブックマーク登録、関連データも削除します。";
+    ? t("settings.account.delete.master_blocked")
+    : t("settings.account.delete.note");
 }
 
 function confirmMyAccountDelete(username){
   const name = String(username || "").trim();
-  if(!confirm(`アカウント「${name}」を削除します。\n作品、ブックマーク、作者登録、共有ブックマーク登録、関連データも削除します。元に戻せません。`)) return false;
-  return confirm("本当に削除しますか？");
+  if(!confirm(t("admin.account.delete.first_confirm", { name }))) return false;
+  return confirm(t("common.confirm_delete"));
 }
 
 
@@ -114,13 +118,13 @@ function bindShareToggles(){
     setToggle(btnW, on);
     btnW.disabled = true;
     try{
-      setStatus("更新中…", null);
+      setStatus(t("status.updating"), null);
       const j = await updateMySettings({ share_works: on ? 1 : 0 });
       setToggle(btnW, !!Number(j?.share_works || 0));
-      setStatus("更新しました", "ok");
+      setStatus(t("status.updated"), "ok");
     }catch(_e){
       setToggle(btnW, prev);
-      setStatus("更新に失敗しました", "error");
+      setStatus(t("status.update_failed"), "error");
     }finally{
       btnW.disabled = false;
     }
@@ -133,17 +137,38 @@ function bindShareToggles(){
     setToggle(btnB, on);
     btnB.disabled = true;
     try{
-      setStatus("更新中…", null);
+      setStatus(t("status.updating"), null);
       const j = await updateMySettings({ share_bookmarks: on ? 1 : 0 });
       setToggle(btnB, !!Number(j?.share_bookmarks || 0));
-      setStatus("更新しました", "ok");
+      setStatus(t("status.updated"), "ok");
     }catch(_e){
       setToggle(btnB, prev);
-      setStatus("更新に失敗しました", "error");
+      setStatus(t("status.update_failed"), "error");
     }finally{
       btnB.disabled = false;
     }
   });
+
+  const langSel = $("uiLanguage");
+  if(langSel){
+    langSel.addEventListener("change", async () => {
+      const nextLang = String(langSel.value || "auto");
+      const prevLang = String(ME?.ui_language || "auto");
+      langSel.disabled = true;
+      try{
+        setStatus(t("status.updating"), null);
+        const j = await updateMySettings({ ui_language: nextLang });
+        ME = { ...(ME || {}), ...(j || {}), ui_language: String(j?.ui_language || nextLang) };
+        await setLocalePreference(String(ME.ui_language || nextLang), { apply: true });
+        setStatus(t("status.updated"), "ok");
+      }catch(_e){
+        langSel.value = prevLang;
+        setStatus(t("status.update_failed"), "error");
+      }finally{
+        langSel.disabled = false;
+      }
+    });
+  }
 }
 
 function renderLists(data){
@@ -167,7 +192,7 @@ function renderLists(data){
     const meta = document.createElement("div");
     meta.className = "bmManageMeta";
     const cnt = Number(l.count || 0);
-    meta.textContent = `${cnt.toLocaleString()} 件` + (Number(l.is_default || 0) ? "  (default)" : "");
+    meta.textContent = t("count.items", { count: cnt.toLocaleString() }) + (Number(l.is_default || 0) ? `  ${t("label.default")}` : "");
 
     left.appendChild(nm);
     left.appendChild(meta);
@@ -177,15 +202,15 @@ function renderLists(data){
 
     const renameBtn = document.createElement("button");
     renameBtn.className = "ghostBtn";
-    renameBtn.textContent = "名前変更";
+    renameBtn.textContent = t("settings.list.rename");
     renameBtn.addEventListener("click", async () => {
       const cur = String(l.name || "");
-      const nxt = prompt("リスト名", cur);
+      const nxt = prompt(t("settings.list.name"), cur);
       if(nxt === null) return;
       const name = String(nxt || "").trim();
       if(!name) return;
       try{
-        setStatus("更新中…", null);
+        setStatus(t("status.updating"), null);
         const r = await apiFetch(API.bookmarkList(l.id), {
           method: "PATCH",
           headers: {"Content-Type":"application/json"},
@@ -193,32 +218,32 @@ function renderLists(data){
         });
         const j = await apiJson(r);
         renderLists(j);
-        setStatus("更新しました", "ok");
+        setStatus(t("status.updated"), "ok");
       }catch(_e){
-        setStatus("更新に失敗しました", "error");
+        setStatus(t("status.update_failed"), "error");
       }
     });
 
     const delBtn = document.createElement("button");
     delBtn.className = "dangerBtn";
-    delBtn.textContent = "削除";
+    delBtn.textContent = t("common.delete");
     delBtn.disabled = !!Number(l.is_default || 0);
     delBtn.addEventListener("click", async () => {
       if(Number(l.is_default || 0)){
-        alert("default は削除できません");
+        alert(t("settings.list.default_delete_blocked"));
         return;
       }
       const nm = String(l.name || "");
-      if(!confirm(`リスト「${nm}」を削除します。元に戻せません。よろしいですか？`)) return;
-      if(!confirm("本当に削除しますか？")) return;
+      if(!confirm(t("settings.list.delete.confirm", { name: nm }))) return;
+      if(!confirm(t("common.confirm_delete"))) return;
       try{
-        setStatus("削除中…", null);
+        setStatus(t("status.deleting"), null);
         const r = await apiFetch(API.bookmarkList(l.id), { method: "DELETE" });
         const j = await apiJson(r);
         renderLists(j);
-        setStatus("削除しました", "ok");
+        setStatus(t("status.deleted"), "ok");
       }catch(_e){
-        setStatus("削除に失敗しました", "error");
+        setStatus(t("status.delete_failed"), "error");
       }
     });
 
@@ -244,16 +269,16 @@ async function deleteMyAccount(){
 
   btn.disabled = true;
   try{
-    setStatus("削除中…", null);
+    setStatus(t("status.deleting"), null);
     const r = await apiFetch(API.deleteMe, { method: "DELETE" });
     if(!r.ok){
       const j = await safeJson(r);
-      throw new Error(j?.detail || "削除に失敗しました");
+      throw new Error(j?.detail || t("status.delete_failed"));
     }
     await logoutAndRedirect(API.logout);
   }catch(e){
     renderAccountDelete(ME);
-    setStatus(e?.message || "削除に失敗しました", "error");
+    setStatus(e?.message || t("status.delete_failed"), "error");
   }
 }
 
@@ -265,7 +290,7 @@ function bindCreate(){
     const name = String(input?.value || "").trim();
     if(!name) return;
     try{
-      setStatus("作成中…", null);
+      setStatus(t("status.creating"), null);
       const r = await apiFetch(API.bookmarkLists, {
         method: "POST",
         headers: {"Content-Type":"application/json"},
@@ -274,9 +299,9 @@ function bindCreate(){
       const j = await apiJson(r);
       if(input) input.value = "";
       renderLists(j);
-      setStatus("作成しました", "ok");
+      setStatus(t("status.created"), "ok");
     }catch(_e){
-      setStatus("作成に失敗しました", "error");
+      setStatus(t("status.create_failed"), "error");
     }
   });
 }
@@ -295,7 +320,7 @@ async function boot(){
   try{
     await refreshLists();
   }catch(_e){
-    setStatus("読み込みに失敗しました", "error");
+    setStatus(t("status.load_failed"), "error");
   }
 }
 

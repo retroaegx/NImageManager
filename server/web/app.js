@@ -1,9 +1,17 @@
-import { $, escapeHtml } from "./lib/dom.js?v=20260307_01";
-import { apiFetch, apiJson } from "./lib/http.js?v=20260307_01";
-import { bindUserMenu } from "./lib/userMenu.js?v=20260312_02";
-import { loadCurrentUser, logoutAndRedirect } from "./lib/session.js?v=20260307_01";
-import { buildPageQuery as buildPageQueryShared, buildPageQueryCore as buildPageQueryCoreShared, buildScrollQuery as buildScrollQueryShared } from "./lib/galleryQuery.js?v=20260307_01";
-import { joinKeep, joinPlain, promptTextForCopyKeep, promptTextForCopyPlain } from "./lib/prompt.js?v=20260321_02";
+import { $, escapeHtml } from "./lib/dom.js";
+import { apiFetch, apiJson } from "./lib/http.js";
+import { bindUserMenu } from "./lib/userMenu.js";
+import { loadCurrentUser, logoutAndRedirect } from "./lib/session.js";
+import { buildPageQuery as buildPageQueryShared, buildPageQueryCore as buildPageQueryCoreShared, buildScrollQuery as buildScrollQueryShared } from "./lib/galleryQuery.js";
+import { joinKeep, joinPlain, promptTextForCopyKeep, promptTextForCopyPlain } from "./lib/prompt.js";
+import { t } from "./lib/i18n.js";
+
+const UPLOAD_STATE_LABELS = { pending: "upload.state.pending", uploading: "upload.state.uploading", received: "upload.state.received", processing: "upload.state.processing", done: "upload.state.done", duplicate: "upload.state.duplicate", failed: "upload.state.failed" };
+const uploadStateCode = (value) => String(value || "").trim();
+const uploadStateLabel = (value) => t(UPLOAD_STATE_LABELS[uploadStateCode(value)] || "upload.state.pending");
+
+
+const t_ = (key, count) => t(key, { count });
 
 const API = {
   login: "/api/auth/login",
@@ -586,7 +594,7 @@ function renderUploadSummary(){
   };
 
   box.innerHTML = "";
-  box.appendChild(renderList("ソフト", softwares));
+  box.appendChild(renderList(t("common.software_short"), softwares));
 }
 
 function _defaultUploadBookmarkListId(){
@@ -610,7 +618,7 @@ function syncUploadBookmarkControls(){
   if(!lists.length){
     const opt = document.createElement("option");
     opt.value = "";
-    opt.textContent = "ブックマークなし";
+    opt.textContent = t("status.not_bookmarked");
     sel.appendChild(opt);
     state.uploadBookmark.enabled = false;
   }else{
@@ -618,7 +626,7 @@ function syncUploadBookmarkControls(){
       const opt = document.createElement("option");
       const id = Number(item?.id || 0);
       opt.value = String(id);
-      opt.textContent = Number(item?.is_default || 0) === 1 ? `${String(item?.name || "")}（既定）` : String(item?.name || "");
+      opt.textContent = Number(item?.is_default || 0) === 1 ? t("app.bookmark.default_name", { name: String(item?.name || "") }) : String(item?.name || "");
       if(id === Number(state.uploadBookmark.list_id || 0)) opt.selected = true;
       sel.appendChild(opt);
     });
@@ -630,7 +638,7 @@ function syncUploadBookmarkControls(){
   toggle.classList.toggle("off", !enabled);
   toggle.textContent = enabled ? "ON" : "OFF";
   toggle.disabled = !hasLists;
-  toggle.title = hasLists ? "アップロード完了時にブックマークへ追加" : "ブックマークリストがありません";
+  toggle.title = hasLists ? t("app.bookmark.add_after_upload") : t("app.bookmark.no_lists");
   sel.disabled = !enabled;
   sel.classList.toggle("hidden", !enabled);
   if(enabled && Number(state.uploadBookmark.list_id || 0) > 0){
@@ -689,11 +697,12 @@ function uploadProgressUpdate(){
   let ok = 0, ng = 0, dup = 0, doing = 0, staged = 0;
   (state.uploadQueue || []).forEach(it => {
     if(!it) return;
-    if(it.state === "完了") ok++;
-    else if(it.state === "失敗") ng++;
-    else if(it.state === "重複") dup++;
-    else if(it.state === "アップロード中") doing++;
-    else if(it.state === "受信済み") staged++;
+    const stCode = uploadStateCode(it.state);
+    if(stCode === "done") ok++;
+    else if(stCode === "failed") ng++;
+    else if(stCode === "duplicate") dup++;
+    else if(stCode === "uploading") doing++;
+    else if(stCode === "received") staged++;
   });
   const job = state.uploadZipJob;
   const isDirectCollecting = !!(job && job.source_kind === "direct" && (job.status === "collecting" || job.status === "queued"));
@@ -703,10 +712,10 @@ function uploadProgressUpdate(){
   if(total){
     if(isDirectCollecting){
       const sent = Math.min(total, staged + ng);
-      text = `受信 ${sent}/${total}（受信済み ${staged} / 失敗 ${ng}${doing ? ` / 送信中 ${doing}` : ""}）`;
+      text = t("app.upload.progress.received", { sent, total, staged, ng, sending: doing ? ` / ${t("upload.state.uploading")} ${doing}` : "" });
       pct = Math.min(100, Math.max(0, (sent / total) * 100));
     }else{
-      text = `完了 ${done}/${total}（成功 ${ok} / 重複 ${dup} / 失敗 ${ng}${doing ? ` / 送信中 ${doing}` : ""}${staged ? ` / 受信済み ${staged}` : ""}）`;
+      text = t("app.upload.progress.completed", { done, total, ok, dup, ng, sending: doing ? ` / ${t("upload.state.uploading")} ${doing}` : "", received: staged ? ` / ${t("upload.state.received")} ${staged}` : "" });
       pct = Math.min(100, Math.max(0, (done / total) * 100));
     }
   }
@@ -758,7 +767,7 @@ function _createUploadListItemElement(it){
   right.className = "uploadRight";
   const st = document.createElement("div");
   st.className = "uploadState";
-  st.textContent = it.state || "待機";
+  st.textContent = uploadStateLabel(it.state);
   right.appendChild(st);
 
   div.appendChild(left);
@@ -790,11 +799,11 @@ function uploadListAppendItems(items){
 
 function uploadListUpdateItem(it){
   if(!it || !it._elState) return;
-  const st = it.state || "";
-  it._elState.textContent = st;
-  it._elState.classList.toggle("ok", st === "完了");
-  it._elState.classList.toggle("ng", st === "失敗");
-  it._elState.classList.toggle("dup", st === "重複");
+  const st = uploadStateCode(it.state || "");
+  it._elState.textContent = uploadStateLabel(st);
+  it._elState.classList.toggle("ok", st === "done");
+  it._elState.classList.toggle("ng", st === "failed");
+  it._elState.classList.toggle("dup", st === "duplicate");
 
   if(it._elChips){
     const chips = [];
@@ -840,16 +849,16 @@ function _renderUploadJobStatus(jobLabel, job){
   if(!job) return;
   const doneAll = Number(job.done || 0) + Number(job.failed || 0) + Number(job.dup || 0);
   const total = Number(job.total || 0);
-  const label = job.source_kind === "direct" ? "画像" : "zip";
+  const label = job.source_kind === "direct" ? t("app.upload.image_label") : "zip";
   const name = escapeHtml(jobLabel || job.filename || "");
   if(jobBox){
     const progText = (total > 0)
-      ? `${doneAll}/${total}（成功 ${job.done || 0} / 重複 ${job.dup || 0} / 失敗 ${job.failed || 0}）`
-      : `スキャン中…（成功 ${job.done || 0} / 重複 ${job.dup || 0} / 失敗 ${job.failed || 0}）`;
+      ? t("app.upload.job.progress.running", { doneAll, total, ok: job.done || 0, dup: job.dup || 0, failed: job.failed || 0 })
+      : t("app.upload.job.progress.scanning", { ok: job.done || 0, dup: job.dup || 0, failed: job.failed || 0 });
     jobBox.classList.remove("hidden");
     jobBox.innerHTML = `
       <div class="row"><b>${label}</b><span class="mut">${name}</span></div>
-      <div class="row"><span>進捗</span><span>${progText}</span></div>
+      <div class="row"><span>${escapeHtml(t("common.status"))}</span><span>${progText}</span></div>
     `;
   }
   if(fill){
@@ -857,7 +866,9 @@ function _renderUploadJobStatus(jobLabel, job){
     fill.style.width = `${pct.toFixed(1)}%`;
   }
   if(elText){
-    elText.textContent = total > 0 ? `${label} ${doneAll}/${total}` : `${label} スキャン中…`;
+    elText.textContent = total > 0
+      ? t("app.upload.job.progress.label", { label, doneAll, total })
+      : t("app.upload.job.progress.simple", { label });
   }
 }
 
@@ -959,14 +970,14 @@ async function startUploadFiles(files){
   const jobBox = $("uploadZipJob");
   if(jobBox){
     jobBox.classList.remove("hidden");
-    jobBox.innerHTML = `<div class="row"><b>画像</b><span class="mut">アップロードを準備中…</span></div>`;
+    jobBox.innerHTML = `<div class="row"><b>${escapeHtml(t("app.upload.image_label"))}</b><span class="mut">${escapeHtml(t("app.upload.preparing"))}</span></div>`;
   }
 
   state.uploadQueue = imgs.map((f, idx) => ({
     seq: idx + 1,
     file: f,
     name: f.name || "",
-    state: "待機",
+    state: "pending",
     previewUrl: (() => {
       try{ return URL.createObjectURL(f); }catch(_e){ return ""; }
     })(),
@@ -988,15 +999,15 @@ async function startUploadFiles(files){
     const initData = await apiJson(initRes);
     jobId = Number(initData?.job_id || 0);
     if(!jobId) throw new Error("batch init failed");
-    state.uploadZipJob = { id: jobId, total: Number(initData?.total || state.uploadQueue.length), done: 0, failed: 0, dup: 0, status: "collecting", source_kind: "direct", filename: "画像アップロード" };
+    state.uploadZipJob = { id: jobId, total: Number(initData?.total || state.uploadQueue.length), done: 0, failed: 0, dup: 0, status: "collecting", source_kind: "direct", filename: t("app.upload.title") };
   }catch(_e){
-    if(jobBox) jobBox.innerHTML = `<div class="row"><b>画像</b><span class="mut">開始に失敗</span></div>`;
+    if(jobBox) jobBox.innerHTML = `<div class="row"><b>${escapeHtml(t("app.upload.title"))}</b><span class="mut">${escapeHtml(t("app.upload.start_failed"))}</span></div>`;
     return;
   }
 
   await _runUploadPool(state.uploadQueue, UPLOAD_PARALLEL, async (it) => {
     if(state.uploadStop) return;
-    it.state = "アップロード中";
+    it.state = "uploading";
     uploadListUpdateItem(it);
     uploadProgressUpdate();
     try{
@@ -1009,9 +1020,9 @@ async function startUploadFiles(files){
         it.file,
         String((it.file && it.file.type) || "application/octet-stream"),
       );
-      it.state = "受信済み";
+      it.state = "received";
     }catch(_e){
-      it.state = "失敗";
+      it.state = "failed";
     }
     uploadListUpdateItem(it);
     uploadProgressUpdate();
@@ -1019,9 +1030,9 @@ async function startUploadFiles(files){
 
   if(state.uploadStop) return;
 
-  const uploadedCount = (state.uploadQueue || []).filter(it => it && it.state === "受信済み").length;
+  const uploadedCount = (state.uploadQueue || []).filter(it => it && uploadStateCode(it.state) === "received").length;
   if(uploadedCount <= 0){
-    if(jobBox) jobBox.innerHTML = `<div class="row"><b>画像</b><span class="mut">受信できたファイルがありません</span></div>`;
+    if(jobBox) jobBox.innerHTML = `<div class="row"><b>${escapeHtml(t("app.upload.image_label"))}</b><span class="mut">${escapeHtml(t("app.upload.no_received_files"))}</span></div>`;
     return;
   }
 
@@ -1033,11 +1044,11 @@ async function startUploadFiles(files){
       state.uploadZipJob.status = String(fin?.status || "queued");
     }
     if(jobBox){
-      jobBox.innerHTML = `<div class="row"><b>画像</b><span class="mut">受信完了・サーバー処理を開始…</span></div>`;
+      jobBox.innerHTML = `<div class="row"><b>${escapeHtml(t("app.upload.image_label"))}</b><span class="mut">${escapeHtml(t("app.upload.received_starting"))}</span></div>`;
     }
-    await _pollActiveUploadJob("画像アップロード");
+    await _pollActiveUploadJob(t("app.upload.title"));
   }catch(_e){
-    if(jobBox) jobBox.innerHTML = `<div class="row"><b>画像</b><span class="mut">処理開始に失敗</span></div>`;
+    if(jobBox) jobBox.innerHTML = `<div class="row"><b>${escapeHtml(t("app.upload.image_label"))}</b><span class="mut">${escapeHtml(t("app.upload.processing_start_failed"))}</span></div>`;
   }
 }
 
@@ -1070,7 +1081,7 @@ async function startZipUpload(zipFile){
   const jobBox = $("uploadZipJob");
   if(jobBox){
     jobBox.classList.remove("hidden");
-    jobBox.innerHTML = `<div class="row"><b>zip処理を開始…</b><span class="mut">${escapeHtml(zipFile.name)}</span></div>`;
+    jobBox.innerHTML = `<div class="row"><b>${escapeHtml(t("app.upload.zip_starting"))}</b><span class="mut">${escapeHtml(zipFile.name)}</span></div>`;
   }
 
   const setSendProgress = (loaded, total) => {
@@ -1080,9 +1091,9 @@ async function startZipUpload(zipFile){
     const l = Math.min(t || 0, Math.max(0, Number(loaded || 0)));
     const pct = t ? (l / t) * 100 : 0;
     if(fill) fill.style.width = `${pct.toFixed(1)}%`;
-    if(elText) elText.textContent = t ? `zip送信 ${pct.toFixed(1)}%（${fmtBytes(l)}/${fmtBytes(t)}）` : "zip送信";
+    if(elText) elText.textContent = t("app.upload.zip_sending_progress", { pct: pct.toFixed(1), loaded: fmtBytes(l), total: fmtBytes(t) });
     if(jobBox){
-      jobBox.innerHTML = `<div class="row"><b>zip送信中…</b><span class="mut">${escapeHtml(zipFile.name)}</span></div><div class="mut">${t ? `${pct.toFixed(1)}%（${fmtBytes(l)}/${fmtBytes(t)}）` : ""}</div>`;
+      jobBox.innerHTML = `<div class="row"><b>${escapeHtml(t("app.upload.zip_sending"))}</b><span class="mut">${escapeHtml(zipFile.name)}</span></div><div class="mut">${escapeHtml(t("app.upload.zip_ratio", { pct: pct.toFixed(1), loaded: fmtBytes(l), total: fmtBytes(t) }))}</div>`;
     }
   };
 
@@ -1134,20 +1145,20 @@ async function startZipUpload(zipFile){
   }catch(e){
     const msg = String(e && (e.message || e) || "");
     if(state.uploadStop && /cancelled/i.test(msg)){
-      if(jobBox) jobBox.innerHTML = `<div class="row"><b>zip</b><span class="mut">キャンセル</span></div>`;
+      if(jobBox) jobBox.innerHTML = `<div class="row"><b>zip</b><span class="mut">${escapeHtml(t("app.upload.cancelled"))}</span></div>`;
       const elText = $("uploadProgressText");
-      if(elText) elText.textContent = "キャンセル";
+      if(elText) elText.textContent = t("app.upload.cancelled");
       return;
     }
     throw e;
   }
 
   if(jobBox){
-    jobBox.innerHTML = `<div class="row"><b>zip送信完了</b><span class="mut">サーバ処理を開始…</span></div>`;
+    jobBox.innerHTML = `<div class="row"><b>${escapeHtml(t("app.upload.zip_sent"))}</b><span class="mut">${escapeHtml(t("app.upload.server_processing_starting"))}</span></div>`;
   }
   const jobId = data?.job_id;
   if(!jobId){
-    if(jobBox) jobBox.innerHTML = `<div class="row"><b>zip</b><span class="mut">失敗</span></div>`;
+    if(jobBox) jobBox.innerHTML = `<div class="row"><b>zip</b><span class="mut">${escapeHtml(t("app.upload.failed_short"))}</span></div>`;
     return;
   }
   state.uploadZipJob = { id: jobId, total: Number(data.total||0), done:0, failed:0, dup:0, status:"queued", source_kind: "zip", filename: zipFile.name };
@@ -1163,7 +1174,7 @@ function stopUpload(){
     apiFetch(API.uploadZipCancel(j.id), { method: "POST" }).catch(()=>{});
   }
   const elText = $("uploadProgressText");
-  if(elText) elText.textContent = "キャンセル";
+  if(elText) elText.textContent = t("status.cancelled");
 }
 
 function bindDropZone(){
@@ -1278,7 +1289,7 @@ async function refreshStatsAndPreviewAfterChange(){
 
 function fillSelect(sel, items){
   const cur = sel.value;
-  sel.innerHTML = '<option value="">(未選択)</option>';
+  sel.innerHTML = `<option value="">${escapeHtml(t("common.unset"))}</option>`;
   items.forEach(v => {
     const o = document.createElement("option");
     o.value = v;
@@ -1295,8 +1306,10 @@ function _normFacetValue(v){
 function _isPseudoAllItem(v){
   const s = _normFacetValue(v);
   if(!s) return true;
+  if(s === t("common.all")) return true;
   if(s === "すべて" || s === "全て") return true;
   if(s.toLowerCase() === "all") return true;
+  if(s === t("common.unset")) return true;
   if(s === "(未選択)") return true;
   return false;
 }
@@ -1340,11 +1353,11 @@ function renderCreatorList(creators){
       const del = document.createElement("button");
       del.className = "delBtn";
       del.textContent = "✕";
-      del.title = "削除";
+      del.title = t("common.delete");
       del.addEventListener("click", async (e) => {
         e.preventDefault();
         e.stopPropagation();
-        if(!confirm(`作者登録「${val}」を削除しますか？`)) return;
+        if(!confirm(t("app.creator.delete.confirm", { name: val }))) return;
         try{
           await apiFetch(API.creatorListDel(id), { method: "DELETE" });
           if(getCreatorFilter() === val){
@@ -1352,7 +1365,7 @@ function renderCreatorList(creators){
           }
           await refreshStatsAndPreviewAfterChange();
         }catch(_e){
-          alert("削除に失敗しました");
+          alert(t("status.delete_failed"));
         }
       });
       right.appendChild(del);
@@ -1438,7 +1451,7 @@ function renderBookmarkList(){
   };
 
   const allActive = !!state.preview.bm_any && !state.preview.bm_list_id;
-  mkItem(wrap, "すべてのブックマーク", anyCount ? anyCount.toLocaleString() : "0", allActive, async () => {
+  mkItem(wrap, t("app.bookmark.all"), anyCount ? anyCount.toLocaleString() : "0", allActive, async () => {
     if(allActive){
       state.preview.bm_any = 0;
       state.preview.bm_list_id = 0;
@@ -1494,11 +1507,11 @@ function renderBookmarkList(){
     const delBtn = document.createElement("button");
     delBtn.className = "delBtn";
     delBtn.textContent = "✕";
-    delBtn.title = "削除";
+    delBtn.title = t("common.delete");
     delBtn.addEventListener("click", async (e) => {
       e.preventDefault();
       e.stopPropagation();
-      if(!confirm(`共有ブックマーク登録「${cname}」を削除しますか？`)) return;
+      if(!confirm(t("app.shared_bookmark.delete.confirm", { name: cname }))) return;
       try{
         await apiFetch(API.bookmarkSubDel(cid), { method: "DELETE" });
         // If current filter points to a removed creator's list, clear it.
@@ -1509,7 +1522,7 @@ function renderBookmarkList(){
         await refreshBookmarkLists();
         await search();
       }catch(_e){
-        alert("削除に失敗しました");
+        alert(t("status.delete_failed"));
       }
     });
     head.appendChild(delBtn);
@@ -2335,18 +2348,18 @@ function setGalleryView(mode, silent=false){
 }
 
 function updateGalleryTitle(){
-  const t = $("galleryTitle");
+  const galleryTitleEl = $("galleryTitle");
   const hint = $("galleryHint");
   if(state.preview.mode === "page"){
     const total = Number(state.preview.total_count || 0);
-    if(t) t.textContent = `ギャラリー (${total.toLocaleString()})`;
+    if(galleryTitleEl) galleryTitleEl.textContent = t("app.gallery.title", { count: total.toLocaleString() });
     if(hint) hint.textContent = "";
     return;
   }
 
   const total = Number(state.preview.total_count || 0);
   const loaded = state.preview.items.length || 0;
-  if(t) t.textContent = `ギャラリー (${(total || loaded).toLocaleString()})`;
+  if(galleryTitleEl) galleryTitleEl.textContent = t("app.gallery.title", { count: (total || loaded).toLocaleString() });
   if(hint) hint.textContent = "";
 }
 
@@ -2470,10 +2483,10 @@ function _updateBulkActions(){
     if(b.all){
       const total = Number(state.preview.total_count || 0);
       const excl = b.deselected.size;
-      const hint = total ? `削除 (${Math.max(0, total - excl)})` : "削除 (全対象)";
+      const hint = total ? t("app.bulk.delete_count", { count: Math.max(0, total - excl) }) : t("app.bulk.delete_all");
       btnDel.textContent = hint;
     }else{
-      btnDel.textContent = `削除 (${b.selected.size})`;
+      btnDel.textContent = t("app.bulk.delete_count", { count: b.selected.size });
     }
   }
 
@@ -2489,7 +2502,7 @@ function _updateBulkActions(){
   if(state.user && String(state.user.role||"user")==="user"){
     const c = String(state.preview.creator||"");
     if(c && c !== String(state.user.username||"")){
-      _bulkStatus("自分の画像のみ選択/削除できます", "error");
+      _bulkStatus(t("app.only_own_images"), "error");
     }else if(!b.deleting){
       _bulkStatus("", null);
     }
@@ -2570,14 +2583,14 @@ async function _bulkDelete(){
     ? (() => {
         const total = Number(state.preview.total_count || 0);
         const excl = b.deselected.size;
-        return total ? String(Math.max(0, total - excl)) : "全対象";
+        return total ? String(Math.max(0, total - excl)) : t("app.all_select_short");
       })()
     : String(b.selected.size);
 
-  if(!confirm(`選択した画像(${countHint})を削除します。元に戻せません。実行しますか？`)) return;
+  if(!confirm(t("app.bulk.delete.confirm", { count: countHint }))) return;
 
   b.deleting = true;
-  _bulkStatus("削除中…", null);
+  _bulkStatus(t("app.bulk.deleting"), null);
   _updateBulkActions();
 
   try{
@@ -2588,13 +2601,13 @@ async function _bulkDelete(){
     });
     const j = await apiJson(res);
     const del = Number(j && j.deleted || 0);
-    _bulkStatus(`削除完了: ${del.toLocaleString()}件`, "ok");
+    _bulkStatus(t("app.bulk.deleted", { count: del.toLocaleString() }), "ok");
 
     // Reset selection and refresh UI lists/counts.
     _resetBulkSelection();
     await refreshStatsAndPreviewAfterChange();
   }catch(_e){
-    _bulkStatus("削除に失敗しました", "error");
+    _bulkStatus(t("status.delete_failed"), "error");
     b.deleting = false;
     _updateBulkActions();
   }
@@ -2620,11 +2633,11 @@ function makeTile(it){
           ${badges.join("")}
         </div>
         <div class="tileBadgesRight">
-          <label class="tileCheck" title="${canSel ? "選択" : "自分の画像のみ"}">
+          <label class="tileCheck" title="${canSel ? escapeHtml(t("calendar.status.selected")) : escapeHtml(t("app.only_own_images"))}">
             <input type="checkbox" class="tileChk" ${checked ? "checked" : ""} ${canSel ? "" : "disabled"}>
             <span class="tileChkBox"></span>
           </label>
-          <button class="favBtn ${it.favorite ? "on" : ""}" title="ブックマーク" aria-label="ブックマーク">${it.favorite ? "★" : "☆"}</button>
+          <button class="favBtn ${it.favorite ? "on" : ""}" title="${escapeHtml(t("common.bookmark"))}" aria-label="${escapeHtml(t("common.bookmark"))}">${it.favorite ? "★" : "☆"}</button>
         </div>
       </div>
       <div class="tileOverlay">
@@ -2682,7 +2695,7 @@ function buildDetailCompactMeta(d){
   const sampler = String(d?.sampler || '-').trim() || '-';
   const potion = typeof d?.uses_potion === 'boolean' ? (d.uses_potion ? '〇' : '×') : '-';
   const precise = typeof d?.uses_precise_reference === 'boolean' ? (d.uses_precise_reference ? '〇' : '×') : '-';
-  return `ソフト ${soft} / ポーション ${potion} / 精密参照 ${precise} / サンプラー ${sampler}`;
+  return t("app.detail.meta.full", { soft, potion, precise, sampler });
 }
 
 function renderPager(){
@@ -2858,10 +2871,10 @@ function showUiToast(message, kind = "success"){
   window.setTimeout(removeToast, UI_TOAST_VISIBLE_MS);
 }
 
-async function copyText(t, opts = {}){
-  const text = String(t || "");
+async function copyText(value, opts = {}){
+  const text = String(value || "");
   if(!text.trim()){
-    showUiToast("コピーする内容がありません", "warn");
+    showUiToast(t("app.copy.empty"), "warn");
     return false;
   }
   try{
@@ -2869,11 +2882,11 @@ async function copyText(t, opts = {}){
       throw new Error("clipboard-unavailable");
     }
     await navigator.clipboard.writeText(text);
-    showUiToast(String(opts?.message || "クリップボードにコピーしました"), "success");
+    showUiToast(String(opts?.message || t("app.copy.success")), "success");
     return true;
   }catch(err){
     console.error(err);
-    showUiToast("コピーに失敗しました", "error");
+    showUiToast(t("app.copy.failed"), "error");
     return false;
   }
 }
@@ -2884,7 +2897,7 @@ function ensureDetailPromptUI(d){
 
   const rawEntries = Array.isArray(d.character_entries) ? d.character_entries : [];
   d._ui_char_entries = rawEntries.map((e, i) => ({
-    name: String(e?.name || `不明${i+1}`),
+    name: String(e?.name || t("app.prompt.unknown_name", { index: i + 1 })),
     pos: String(e?.pos || ""),
     neg: String(e?.neg || ""),
   }));
@@ -2903,8 +2916,8 @@ function makePromptSection(title, key){
   head.innerHTML = `
     <h3>${escapeHtml(title)}</h3>
     <div class="secBtns">
-      <button class="mini" title="括弧/数値強調を保持したままコピーします" data-copyall="${escapeHtml(key)}_keep">全コピー</button>
-      <button class="mini" title="括弧/数値強調を外してコピーします" data-copyall="${escapeHtml(key)}_plain">全コピー(強調解除)</button>
+      <button class="mini" title="${escapeHtml(t("app.copy.prompt.keep"))}" data-copyall="${escapeHtml(key)}_keep">${escapeHtml(t("app.copy.all"))}</button>
+      <button class="mini" title="${escapeHtml(t("app.copy.prompt.plain"))}" data-copyall="${escapeHtml(key)}_plain">${escapeHtml(t("app.copy.all_plain"))}</button>
     </div>
   `;
   sec.appendChild(head);
@@ -2924,14 +2937,14 @@ function renderPromptSections(d){
 
   // Copy-only frames (no per-tag buttons)
   // Naming: positive prompt = pc, negative prompt = uc
-  wrap.appendChild(makePromptSection("メインpc", "promptMain"));
-  wrap.appendChild(makePromptSection("メインuc", "negMain"));
+  wrap.appendChild(makePromptSection(t("app.prompt.main_pc"), "promptMain"));
+  wrap.appendChild(makePromptSection(t("app.prompt.main_uc"), "negMain"));
 
   const entries = d._ui_char_entries || [];
   entries.forEach((e, i) => {
-    const nm = (e && e.name) ? String(e.name) : `不明${i+1}`;
-    wrap.appendChild(makePromptSection(`${nm}のpc`, `char${i}`));
-    wrap.appendChild(makePromptSection(`${nm}のuc`, `char${i}Neg`));
+    const nm = (e && e.name) ? String(e.name) : t("app.prompt.unknown_name", { index: i + 1 });
+    wrap.appendChild(makePromptSection(t("app.prompt.char_pc", { name: nm }), `char${i}`));
+    wrap.appendChild(makePromptSection(t("app.prompt.char_uc", { name: nm }), `char${i}Neg`));
   });
 }
 
@@ -3084,14 +3097,14 @@ function renderDetailTagSections(d){
     if(!arr.length){
       const empty = document.createElement("span");
       empty.className = "small";
-      empty.textContent = "(none)";
+      empty.textContent = t("common.none");
       box.appendChild(empty);
       return;
     }
     arr.forEach((t) => {
       const label = t?.text || "";
       if(!label) return;
-      box.appendChild(makeTagButton(label, () => copyText(getSingleTagCopyText(t, keepEmphasis), { message: "タグをコピーしました" })));
+      box.appendChild(makeTagButton(label, () => copyText(getSingleTagCopyText(t, keepEmphasis), { message: t("app.copy.tag") })));
     });
   };
 
@@ -3249,7 +3262,7 @@ function _renderUserPick(items){
   const kind = String(m.dataset.kind || "creators");
   list.innerHTML = "";
 
-  if(hint) hint.textContent = items.length ? "" : "候補なし";
+  if(hint) hint.textContent = items.length ? "" : t("common.no_candidates");
 
   items.forEach((u) => {
     const id = Number(u.id || 0);
@@ -3272,7 +3285,7 @@ function _renderUserPick(items){
         <div class="uAv" aria-hidden="true">${av}</div>
         <div class="uMain">
           <div class="uName">${escapeHtml(name)}</div>
-          <div class="uMeta">${kind === "bookmarks" ? "ブックマーク共有ON" : "作品共有ON"}</div>
+          <div class="uMeta">${kind === "bookmarks" ? escapeHtml(t("settings.share_bookmarks")) : escapeHtml(t("settings.share_works"))}</div>
         </div>
       </div>
       <div class="uBtns"></div>
@@ -3282,9 +3295,9 @@ function _renderUserPick(items){
     const addBtn = document.createElement("button");
     addBtn.className = "addBtn";
     // Use a widely supported glyph (some fonts miss "⊕").
-    addBtn.textContent = "＋";
-    addBtn.title = "追加";
-    addBtn.setAttribute("aria-label", "追加");
+    addBtn.textContent = t("common.add");
+    addBtn.title = t("common.add");
+    addBtn.setAttribute("aria-label", t("common.add"));
     addBtn.disabled = (kind === "creators") ? inCreator : inBm;
 
     addBtn.addEventListener("click", async (e) => {
@@ -3324,10 +3337,10 @@ async function openUserPick(kind){
   if(!m) return;
   const k = (kind === "bookmarks") ? "bookmarks" : "creators";
   m.dataset.kind = k;
-  if(title) title.textContent = (k === "creators") ? "作者を追加" : "ブックマーク作者を追加";
+  if(title) title.textContent = (k === "creators") ? t("app.user_pick.title.creators") : t("app.user_pick.title.bookmarks");
   if(sub) sub.textContent = (k === "creators")
-    ? "作品共有ONのユーザーが候補に出ます。"
-    : "作品共有ON かつ ブックマーク共有ON のユーザーが候補に出ます。";
+    ? t("app.user_pick.hint.creators")
+    : t("app.user_pick.hint.bookmarks");
   if(q) q.value = "";
 
   m.classList.remove("hidden");
@@ -3433,7 +3446,7 @@ function closeBulkBookmarkOverlay(){
 }
 
 async function _createBookmarkListInteractive(){
-  const nm0 = prompt("新しいリスト名", "");
+  const nm0 = prompt(t("settings.list.new_name"), "");
   if(nm0 === null) return null;
   const nm = String(nm0 || "").trim();
   if(!nm) return null;
@@ -3449,7 +3462,7 @@ async function _createBookmarkListInteractive(){
 
 async function _renameBookmarkListInteractive(listId, currentName){
   const cur = String(currentName || "");
-  const nxt = prompt("リスト名", cur);
+  const nxt = prompt(t("settings.list.name"), cur);
   if(nxt === null) return null;
   const nm = String(nxt || "").trim();
   if(!nm || nm === cur) return null;
@@ -3536,7 +3549,7 @@ function _bulkBookmarkRowVisuals(row, stateCtl, item){
   stateCtl.textContent = glyph;
   stateCtl.dataset.state = state;
   stateCtl.setAttribute("aria-checked", state === "some" ? "mixed" : (state === "all" ? "true" : "false"));
-  stateCtl.setAttribute("title", state === "all" ? "全件登録" : (state === "some" ? "一部登録" : "未登録"));
+  stateCtl.setAttribute("title", state === "all" ? t("app.bulk.state.all") : (state === "some" ? t("app.bulk.state.some") : t("app.bulk.state.none")));
   row.dataset.state = state;
   row.classList.toggle("mixed", state === "some");
   row.classList.toggle("all", state === "all");
@@ -3550,7 +3563,7 @@ function _renderBulkBookmarkLists(){
   box.innerHTML = "";
   const st = _bulkBmState;
   if(!st || !Array.isArray(st.lists) || !st.lists.length){
-    box.innerHTML = `<div class="small">(リストがありません)</div>`;
+    box.innerHTML = `<div class="small">${escapeHtml(t("app.bookmark.no_lists"))}</div>`;
     return;
   }
   st.lists.forEach((item) => {
@@ -3578,7 +3591,7 @@ function _renderBulkBookmarkLists(){
     if(Number(item.is_default || 0)){
       const badge = document.createElement("span");
       badge.className = "bmListBadge";
-      badge.textContent = "default";
+      badge.textContent = t("label.default");
       textWrap.appendChild(badge);
     }
 
@@ -3592,7 +3605,7 @@ function _renderBulkBookmarkLists(){
     renameBtn.type = "button";
     renameBtn.className = "mini ghostBtn";
     renameBtn.textContent = "✎";
-    renameBtn.title = "名前変更";
+    renameBtn.title = t("settings.list.rename");
     renameBtn.addEventListener("click", async (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -3600,7 +3613,7 @@ function _renderBulkBookmarkLists(){
         const data = await _renameBookmarkListInteractive(item.id, item.name);
         if(data?.lists) _syncBulkBookmarkListsMeta(data.lists);
       }catch(_e){
-        alert("名前変更に失敗しました");
+        alert(t("status.update_failed"));
       }
     });
     btns.appendChild(renameBtn);
@@ -3644,9 +3657,9 @@ async function openBulkBookmarkOverlay(){
   overlay.classList.remove("hidden");
   overlay.setAttribute("aria-hidden", "false");
   const hint = $("bulkBmOverlayHint");
-  if(hint) hint.textContent = "読み込み中…";
+  if(hint) hint.textContent = t("common.loading");
   const box = $("bulkBmOverlayLists");
-  if(box) box.innerHTML = `<div class="small">(loading…)</div>`;
+  if(box) box.innerHTML = `<div class="small">${escapeHtml(t("common.loading_placeholder"))}</div>`;
   _bulkBookmarkStatus("", null);
 
   try{
@@ -3672,14 +3685,14 @@ async function openBulkBookmarkOverlay(){
     };
     if(hint){
       const n = Number(_bulkBmState.selectedCount || 0);
-      hint.textContent = n > 0 ? `選択: ${n.toLocaleString()}件` : "選択対象がありません";
+      hint.textContent = n > 0 ? t("app.bulk.selection_count", { count: n.toLocaleString() }) : t("app.bulk.selection_empty");
     }
     _renderBulkBookmarkLists();
     _updateBulkBookmarkSaveButton();
   }catch(_e){
-    if(hint) hint.textContent = "読み込みに失敗しました";
+    if(hint) hint.textContent = t("common.loading_failed");
     if(box) box.innerHTML = "";
-    _bulkBookmarkStatus("読み込みに失敗しました", "error");
+    _bulkBookmarkStatus(t("common.loading_failed"), "error");
   }
 }
 
@@ -3700,7 +3713,7 @@ async function saveBulkBookmarkOverlay(){
   }
 
   st.saving = true;
-  _bulkBookmarkStatus("保存中…", null);
+  _bulkBookmarkStatus(t("status.updating"), null);
   _updateBulkBookmarkSaveButton();
   try{
     await apiFetch(withBookmarkContext(API.bookmarkBulkApply), {
@@ -3717,7 +3730,7 @@ async function saveBulkBookmarkOverlay(){
     await search();
   }catch(_e){
     st.saving = false;
-    _bulkBookmarkStatus("保存に失敗しました", "error");
+    _bulkBookmarkStatus(t("status.update_failed"), "error");
     _updateBulkBookmarkSaveButton();
   }
 }
@@ -3732,14 +3745,14 @@ async function openBookmarkOverlay(imageId){
   if(hint) hint.textContent = `#${iid}`;
 
   const box = $("bmOverlayLists");
-  if(box) box.innerHTML = `<div class="small">(loading…)</div>`;
+  if(box) box.innerHTML = `<div class="small">${escapeHtml(t("common.loading_placeholder"))}</div>`;
 
   try{
     const res = await apiFetch(withBookmarkContext(API.bookmarkImage(iid)));
     const data = await apiJson(res);
     renderBookmarkOverlayLists(data);
   }catch(_e){
-    if(box) box.innerHTML = `<div class="small">読み込みに失敗しました</div>`;
+    if(box) box.innerHTML = `<div class="small">${escapeHtml(t("status.load_failed"))}</div>`;
   }
 }
 
@@ -3762,7 +3775,7 @@ function _bmScheduleSave(){
     const iid = Number(_bmOverlayImageId || 0);
     if(!iid) return;
     const ids = _bmCheckedListIds();
-    _bmSetStatus("保存中…", null);
+    _bmSetStatus(t("status.updating"), null);
     try{
       const res = await apiFetch(withBookmarkContext(API.bookmarkImage(iid)), {
         method: "PUT",
@@ -3771,13 +3784,13 @@ function _bmScheduleSave(){
       });
       const j = await apiJson(res);
       _applyFavoriteState(iid, Number(j.favorite || 0));
-      _bmSetStatus("保存しました", "ok");
+      _bmSetStatus(t("status.updated"), "ok");
       await refreshBookmarkLists();
       if(state.preview.sort === "favorite" || state.preview.bm_any || state.preview.bm_list_id){
         await search();
       }
     }catch(_e){
-      _bmSetStatus("保存に失敗しました", "error");
+      _bmSetStatus(t("status.update_failed"), "error");
     }
   }, 240);
 }
@@ -3789,7 +3802,7 @@ function renderBookmarkOverlayLists(data){
 
   const lists = (data && data.lists) ? data.lists : [];
   if(!lists.length){
-    box.innerHTML = `<div class="small">(リストがありません)</div>`;
+    box.innerHTML = `<div class="small">${escapeHtml(t("app.bookmark.no_lists"))}</div>`;
     return;
   }
 
@@ -3816,7 +3829,7 @@ function renderBookmarkOverlayLists(data){
     if(Number(l.is_default || 0)){
       const badge = document.createElement("span");
       badge.className = "bmListBadge";
-      badge.textContent = "default";
+      badge.textContent = t("label.default");
       left.appendChild(badge);
     }
 
@@ -3826,12 +3839,12 @@ function renderBookmarkOverlayLists(data){
     const renameBtn = document.createElement("button");
     renameBtn.className = "mini ghostBtn";
     renameBtn.textContent = "✎";
-    renameBtn.title = "名前変更";
+    renameBtn.title = t("settings.list.rename");
     renameBtn.addEventListener("click", async (e) => {
       e.preventDefault();
       e.stopPropagation();
       const cur = String(l.name || "");
-      const nxt = prompt("リスト名", cur);
+      const nxt = prompt(t("settings.list.name"), cur);
       if(nxt === null) return;
       const nm = String(nxt || "").trim();
       if(!nm) return;
@@ -3844,31 +3857,31 @@ function renderBookmarkOverlayLists(data){
         await refreshBookmarkLists();
         await openBookmarkOverlay(_bmOverlayImageId);
       }catch(_e){
-        alert("名前変更に失敗しました");
+        alert(t("status.update_failed"));
       }
     });
 
     const delBtn = document.createElement("button");
     delBtn.className = "mini dangerBtn";
     delBtn.textContent = "🗑";
-    delBtn.title = "削除";
+    delBtn.title = t("common.delete");
     delBtn.disabled = !!Number(l.is_default || 0);
     delBtn.addEventListener("click", async (e) => {
       e.preventDefault();
       e.stopPropagation();
       if(Number(l.is_default || 0)){
-        alert("default は削除できません");
+        alert(t("settings.list.default_delete_blocked"));
         return;
       }
       const nm = String(l.name || "");
-      if(!confirm(`リスト「${nm}」を削除します。元に戻せません。よろしいですか？`)) return;
-      if(!confirm("本当に削除しますか？")) return;
+      if(!confirm(t("settings.list.delete.confirm", { name: nm }))) return;
+      if(!confirm(t("common.confirm_delete"))) return;
       try{
         await apiFetch(API.bookmarkList(l.id), { method: "DELETE" });
         await refreshBookmarkLists();
         await openBookmarkOverlay(_bmOverlayImageId);
       }catch(_e){
-        alert("削除に失敗しました");
+        alert(t("status.delete_failed"));
       }
     });
 
@@ -4064,7 +4077,7 @@ function renderDetailFull(d){
         const potion = typeof d.uses_potion === "boolean" ? (d.uses_potion ? "〇" : "×") : "-";
         const precise = typeof d.uses_precise_reference === "boolean" ? (d.uses_precise_reference ? "〇" : "×") : "-";
         const sampler = d.sampler || "-";
-        u.textContent = `ポーション ${potion} / 精密参照 ${precise} / サンプラー ${sampler}`;
+        u.textContent = t("app.detail.meta.short", { potion, precise, sampler });
       }
       imgOverlayInfo.classList.remove("hidden");
     }else{
@@ -4214,7 +4227,7 @@ function bindCopyAll(){
     if(["artist","quality","character","other"].includes(section)){
       const arr = currentDetail.tags?.[section] || [];
       const text = (mode === "keep") ? joinKeep(arr) : joinPlain(arr);
-      copyText(text, { message: "クリップボードにコピーしました" });
+      copyText(text, { message: t("app.copy.success") });
       return;
     }
 
@@ -4222,7 +4235,7 @@ function bindCopyAll(){
       ensureDetailPromptUI(currentDetail);
       const arr = (currentDetail._ui_uc_tags && Array.isArray(currentDetail._ui_uc_tags)) ? currentDetail._ui_uc_tags : [];
       const text = (mode === "keep") ? joinKeep(arr) : joinPlain(arr);
-      copyText(text, { message: "クリップボードにコピーしました" });
+      copyText(text, { message: t("app.copy.success") });
       return;
     }
 
@@ -4232,13 +4245,13 @@ function bindCopyAll(){
     if(section === "promptMain"){
       const src = currentDetail.prompt_positive_raw || "";
       const text = (mode === "keep") ? promptTextForCopyKeep(src) : promptTextForCopyPlain(src);
-      copyText(text, { message: "クリップボードにコピーしました" });
+      copyText(text, { message: t("app.copy.success") });
       return;
     }
     if(section === "negMain"){
       const arr = (currentDetail._ui_uc_tags && Array.isArray(currentDetail._ui_uc_tags)) ? currentDetail._ui_uc_tags : [];
       const text = (mode === "keep") ? joinKeep(arr) : joinPlain(arr);
-      copyText(text, { message: "クリップボードにコピーしました" });
+      copyText(text, { message: t("app.copy.success") });
       return;
     }
 
@@ -4250,7 +4263,7 @@ function bindCopyAll(){
       const entry = (currentDetail._ui_char_entries || [])[ci];
       const src = entry ? (isNeg ? (entry.neg || "") : (entry.pos || "")) : "";
       const text = (mode === "keep") ? promptTextForCopyKeep(src) : promptTextForCopyPlain(src);
-      copyText(text, { message: "クリップボードにコピーしました" });
+      copyText(text, { message: t("app.copy.success") });
     }
   });
 }
@@ -4319,7 +4332,7 @@ function updateChips(){
   const addChip = (tag, kind) => {
     const chip = document.createElement("div");
     chip.className = `chip ${kind}`;
-    const kindLabel = (kind === "exclude") ? "除" : "絞";
+    const kindLabel = (kind === "exclude") ? t("tag.kind.exclude") : t("tag.kind.include");
     chip.innerHTML = `<span class="kind">${kindLabel}</span><span>${escapeHtml(tag)}</span>`;
     const x = document.createElement("button");
     x.textContent = "×";
@@ -4393,7 +4406,7 @@ async function onTagInput(){
       empty.className = "sItem";
       empty.style.cursor = "default";
       empty.style.opacity = "0.7";
-      empty.textContent = "候補なし";
+      empty.textContent = t("common.no_candidates");
       box.appendChild(empty);
     }
 
@@ -4407,11 +4420,11 @@ async function onTagInput(){
       div.innerHTML = `
         <div class="sMain">
           <div class="sTag">${escapeHtml(tag)}</div>
-          <div class="sMeta"><span>${c.toLocaleString()}件</span></div>
+          <div class="sMeta"><span>${t("count.items", { count: c.toLocaleString() })}</span></div>
         </div>
         <div class="sActions">
-          <button type="button" class="sBtn include">絞り込み</button>
-          <button type="button" class="sBtn exclude">除外</button>
+          <button type="button" class="sBtn include">${escapeHtml(t("tag.action.include"))}</button>
+          <button type="button" class="sBtn exclude">${escapeHtml(t("tag.action.exclude"))}</button>
         </div>
       `;
 
@@ -4767,13 +4780,13 @@ function clearCalendar(){
 }
 
 function formatCalendarRangeLabel(from, to){
-  if(!from && !to) return { val: "—", sum: 0, status: "未選択" };
+  if(!from && !to) return { val: "—", sum: 0, status: t("common.no_selection") };
   if(from && (!to || from === to)){
     const d = parseInt(String(from).slice(-2), 10);
     return {
       val: String(d).padStart(2, "0"),
       sum: Number(state.calendar.counts.get(from) || 0),
-      status: "選択",
+      status: t("calendar.status.selected"),
     };
   }
 
@@ -4790,14 +4803,14 @@ function formatCalendarRangeLabel(from, to){
   }
 
   if(!sameMonth){
-    return { val, sum: 0, status: "範囲" };
+    return { val, sum: 0, status: t("calendar.status.range") };
   }
 
   let sum = 0;
   for(const [k, v] of state.calendar.counts.entries()){
     if(k >= from && k <= to) sum += Number(v || 0);
   }
-  return { val, sum, status: "範囲" };
+  return { val, sum, status: t("calendar.status.range") };
 }
 
 function setCalendarSelectionRange(from, to){
@@ -4886,11 +4899,11 @@ function renderCalendar(){
     return z;
   };
 
-  zones.appendChild(mkZone('yr','YEAR', y, fmtCount(yearCount), state.calendar.zone==='yr'));
+  zones.appendChild(mkZone('yr', t('calendar.zone.year'), y, fmtCount(yearCount), state.calendar.zone==='yr'));
   zones.appendChild(document.createElement('div')).className = 'czDiv';
-  zones.appendChild(mkZone('mo','MONTH', mm, fmtCount(monthCount), state.calendar.zone==='mo'));
+  zones.appendChild(mkZone('mo', t('calendar.zone.month'), mm, fmtCount(monthCount), state.calendar.zone==='mo'));
   zones.appendChild(document.createElement('div')).className = 'czDiv';
-  zones.appendChild(mkZone('dy','DAY', rangeLabel.val, (rangeLabel.sum ? fmtCount(rangeLabel.sum) : ''), state.calendar.zone==='dy'));
+  zones.appendChild(mkZone('dy', t('calendar.zone.day'), rangeLabel.val, (rangeLabel.sum ? fmtCount(rangeLabel.sum) : ''), state.calendar.zone==='dy'));
   wrap.appendChild(zones);
 
   // --- panels ---
@@ -4931,9 +4944,9 @@ function renderCalendar(){
   const yrNav = document.createElement('div');
   yrNav.className = 'calYrNav';
   yrNav.innerHTML = `
-    <button type="button" class="calNav" data-d="-8" aria-label="prev years">◀◀</button>
+    <button type="button" class="calNav" data-d="-8" aria-label="${escapeHtml(t('calendar.prev_years'))}">◀◀</button>
     <div class="calYrRange">${yrs[0]}–${yrs[yrs.length-1]}</div>
-    <button type="button" class="calNav" data-d="8" aria-label="next years">▶▶</button>
+    <button type="button" class="calNav" data-d="8" aria-label="${escapeHtml(t('calendar.next_years'))}">▶▶</button>
   `;
   yrNav.querySelectorAll('.calNav').forEach(btn => {
     btn.addEventListener('click', (e) => {
@@ -4973,17 +4986,17 @@ function renderCalendar(){
   const dyHead = document.createElement('div');
   dyHead.className = 'calDyHead';
   dyHead.innerHTML = `
-    <div class="calDyTitle">${y}年 ${md.getMonth()+1}月</div>
+    <div class="calDyTitle">${escapeHtml(t("calendar.month_title", { year: y, month: md.getMonth()+1 }))}</div>
     <div class="calDyNavs">
-      <button type="button" class="calNav" id="calPrev" aria-label="prev">◀</button>
-      <button type="button" class="calNav" id="calNext" aria-label="next">▶</button>
+      <button type="button" class="calNav" id="calPrev" aria-label="${escapeHtml(t('calendar.prev'))}">◀</button>
+      <button type="button" class="calNav" id="calNext" aria-label="${escapeHtml(t('calendar.next'))}">▶</button>
     </div>
   `;
   pDy.appendChild(dyHead);
 
   const dowRow = document.createElement('div');
   dowRow.className = 'calDow';
-  ['月','火','水','木','金','土','日'].forEach((x, i) => {
+  [t("calendar.weekday.mon"),t("calendar.weekday.tue"),t("calendar.weekday.wed"),t("calendar.weekday.thu"),t("calendar.weekday.fri"),t("calendar.weekday.sat"),t("calendar.weekday.sun")].forEach((x, i) => {
     const s = document.createElement('div');
     s.className = 'calDowCell' + (i===5 ? ' sat' : i===6 ? ' sun' : '');
     s.textContent = x;
@@ -5058,12 +5071,12 @@ function renderCalendar(){
   foot.className = 'calFoot';
   const f = state.calendar.from;
   const t = state.calendar.to;
-  const txt = (!f && !t) ? '未選択' : (f && (!t || f===t)) ? f : `${f} 〜 ${t}`;
+  const txt = (!f && !t) ? t("common.no_selection") : (f && (!t || f===t)) ? f : `${f} 〜 ${t}`;
   foot.innerHTML = `
     <div class="calSel">${escapeHtml(txt)}</div>
     <div class="calFootBtns">
-      <button type="button" class="calFootBtn" id="calToday">今日</button>
-      <button type="button" class="calFootBtn" id="calClear">クリア</button>
+      <button type="button" class="calFootBtn" id="calToday">${escapeHtml(t("calendar.today"))}</button>
+      <button type="button" class="calFootBtn" id="calClear">${escapeHtml(t("common.clear"))}</button>
     </div>
   `;
   pDy.appendChild(foot);
@@ -5317,7 +5330,7 @@ $("bulkBmCreateListBtn")?.addEventListener("click", async (e) => {
     const data = await _createBookmarkListInteractive();
     if(data?.lists) _syncBulkBookmarkListsMeta(data.lists);
   }catch(_e){
-    alert("作成に失敗しました");
+    alert(t("status.create_failed"));
   }
 });
 $("bulkBmSaveBtn")?.addEventListener("click", async (e) => { e.preventDefault(); await saveBulkBookmarkOverlay(); });
@@ -5332,7 +5345,7 @@ $("bookmarkListAddBtn")?.addEventListener("click", async (e) => {
     await _createBookmarkListInteractive();
     await refreshBookmarkLists();
   }catch(_e){
-    alert("作成に失敗しました");
+    alert(t("status.create_failed"));
   }
 });
 $("addCreatorFromDetailBtn")?.addEventListener("click", (e) => { e.preventDefault(); addCreatorFromDetail(); });
@@ -5343,7 +5356,7 @@ $("bmCreateListBtn")?.addEventListener("click", async (e) => {
     const data = await _createBookmarkListInteractive();
     if(data && _bmOverlayImageId) await openBookmarkOverlay(_bmOverlayImageId);
   }catch(_e){
-    alert("作成に失敗しました");
+    alert(t("status.create_failed"));
   }
 });
 
@@ -5361,7 +5374,7 @@ $("bmClearThisBtn")?.addEventListener("click", async (e) => {
       await search();
     }
   }catch(_e){
-    alert("解除に失敗しました");
+    alert(t("status.delete_failed"));
   }
 });
 

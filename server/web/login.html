@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Login - NIM</title>
+  <title data-i18n="page.login.title">Login - NIM</title>
   <link rel="stylesheet" href="/styles.css?v=41" />
 </head>
 <body class="loginPage">
@@ -12,10 +12,7 @@
     <div class="card loginCard">
       <div class="loginBrandRow">
         <div class="loginMark">
-          <svg class="logo" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M12 2c3.2 0 5.9 1.8 7.2 4.4.4.8 0 1.7-.9 2.1l-2.6 1.2c-.8.4-1.7 0-2.1-.9C13 7.8 12.1 7.2 12 7.2c-1.5 0-2.8 1.3-2.8 2.8v1.2h1.6c.9 0 1.6.7 1.6 1.6v2.4c0 .9-.7 1.6-1.6 1.6H9.2V20c0 1.1-.9 2-2 2H6c-1.1 0-2-.9-2-2v-6.4c0-3.8 0-4.1.1-4.6C4.6 5.1 8 2 12 2Z" fill="currentColor" opacity=".92"/>
-            <path d="M20 12.2v6.2c0 1.1-.9 2-2 2h-6.1c-.9 0-1.6-.7-1.6-1.6v-2.4c0-.9.7-1.6 1.6-1.6h3.2v-2.6c0-.9.7-1.6 1.6-1.6h1.7c.9 0 1.6.7 1.6 1.6Z" fill="currentColor" opacity=".65"/>
-          </svg>
+          <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2c3.2 0 5.9 1.8 7.2 4.4.4.8 0 1.7-.9 2.1l-2.6 1.2c-.8.4-1.7 0-2.1-.9C13 7.8 12.1 7.2 12 7.2c-1.5 0-2.8 1.3-2.8 2.8v1.2h1.6c.9 0 1.6.7 1.6 1.6v2.4c0 .9-.7 1.6-1.6 1.6H9.2V20c0 1.1-.9 2-2 2H6c-1.1 0-2-.9-2-2v-6.4c0-3.8 0-4.1.1-4.6C4.6 5.1 8 2 12 2Z" fill="currentColor" opacity=".92"/><path d="M20 12.2v6.2c0 1.1-.9 2-2 2h-6.1c-.9 0-1.6-.7-1.6-1.6v-2.4c0-.9.7-1.6 1.6-1.6h3.2v-2.6c0-.9.7-1.6 1.6-1.6h1.7c.9 0 1.6.7 1.6 1.6Z" fill="currentColor" opacity=".65"/></svg>
         </div>
         <div class="loginBrandTxt">
           <div class="loginTitle">NIM</div>
@@ -23,37 +20,37 @@
         </div>
       </div>
 
-      <h2 class="loginH">ログイン</h2>
-      <div id="loginHint" class="loginHint">ローカルで安全に画像を管理します。</div>
+      <h2 class="loginH" data-i18n="login.heading">ログイン</h2>
+      <div id="loginHint" class="loginHint" data-i18n="login.hint">ローカルで安全に画像を管理します。</div>
 
       <div id="embedLoginBox" class="embedLoginBox hidden">
-        <div class="embedLoginHead">オーバーレイ用ログイン</div>
-        <div id="embedLoginText" class="embedLoginText">別タブの NIM で先にログインしてください。</div>
+        <div class="embedLoginHead" data-i18n="login.embed.heading">オーバーレイ用ログイン</div>
+        <div id="embedLoginText" class="embedLoginText" data-i18n="login.embed.initial">別タブの NIM で先にログインしてください。</div>
         <div class="row embedLoginActions">
-          <button id="embedOpenTopLogin" class="primaryBtn" type="button">別タブでログイン</button>
-          <button id="embedGrantAccess" class="secondaryBtn" type="button">アクセスを許可して再読込</button>
-          <button id="embedRetry" class="secondaryBtn" type="button">再確認</button>
+          <button id="embedOpenTopLogin" class="primaryBtn" type="button" data-i18n="login.embed.open_top">別タブでログイン</button>
+          <button id="embedGrantAccess" class="secondaryBtn" type="button" data-i18n="login.embed.grant_access">アクセスを許可して再読込</button>
+          <button id="embedRetry" class="secondaryBtn" type="button" data-i18n="login.embed.retry">再確認</button>
         </div>
       </div>
 
       <div id="loginFormArea">
-      <div class="field">
-        <label>ユーザー名</label>
-        <input id="loginUser" autocomplete="username" placeholder="username" />
-      </div>
-      <div class="field">
-        <label>パスワード</label>
-        <input id="loginPass" type="password" autocomplete="current-password" placeholder="password" />
-      </div>
-
-      <div class="row" style="align-items:center; justify-content:space-between; gap:10px">
-        <button id="loginBtn" class="primaryBtn" style="min-width:140px">ログイン</button>
-        <span id="loginErr" class="err"></span>
-      </div>
+        <div class="field">
+          <label data-i18n="common.username">ユーザー名</label>
+          <input id="loginUser" autocomplete="username" data-i18n-placeholder="common.username_placeholder" />
+        </div>
+        <div class="field">
+          <label data-i18n="common.password">パスワード</label>
+          <input id="loginPass" type="password" autocomplete="current-password" data-i18n-placeholder="common.password_placeholder" />
+        </div>
+        <div class="row" style="align-items:center; justify-content:space-between; gap:10px">
+          <button id="loginBtn" class="primaryBtn" style="min-width:140px" data-i18n="login.action">ログイン</button>
+          <span id="loginErr" class="err"></span>
+        </div>
       </div>
     </div>
   </div>
 
-  <script src="/login.js"></script>
+  <script type="module" src="/lib/page-i18n.js"></script>
+  <script type="module" src="/login.js"></script>
 </body>
 </html>

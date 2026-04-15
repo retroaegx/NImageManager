@@ -647,8 +647,38 @@ def migrate_db(conn: sqlite3.Connection) -> None:
     _ensure_index("idx_bookmarks_image", "bookmarks", ["image_id"])
 
     # ---- per-user visibility/share + lists ----
+    _ensure_col("user_settings", "ui_language", "ui_language TEXT NOT NULL DEFAULT 'auto'")
+    try:
+        conn.execute("UPDATE user_settings SET ui_language='auto' WHERE COALESCE(TRIM(ui_language),'')=''")
+        # The initial i18n rollout forced 'ja' for existing users. That broke browser-language detection.
+        # Existing 'ja' values are normalized back to 'auto' once here so the browser locale is respected.
+        conn.execute("UPDATE user_settings SET ui_language='auto' WHERE ui_language='ja'")
+    except Exception:
+        pass
+
+    # ---- migrate language-dependent upload item states to stable codes ----
+    try:
+        conn.execute(
+            """
+            UPDATE upload_zip_items
+            SET state = CASE state
+              WHEN '待機' THEN 'pending'
+              WHEN '受信済み' THEN 'received'
+              WHEN '処理中' THEN 'processing'
+              WHEN '完了' THEN 'done'
+              WHEN '重複' THEN 'duplicate'
+              WHEN '失敗' THEN 'failed'
+              ELSE state
+            END
+            WHERE state IN ('待機','受信済み','処理中','完了','重複','失敗')
+            """
+        )
+    except Exception:
+        pass
+
     _ensure_index("idx_user_settings_share_works", "user_settings", ["share_works"])
     _ensure_index("idx_user_settings_share_bookmarks", "user_settings", ["share_bookmarks"])
+    _ensure_index("idx_user_settings_ui_language", "user_settings", ["ui_language"])
     _ensure_index("idx_user_creators_user", "user_creators", ["user_id"])
     _ensure_index("idx_user_creators_creator", "user_creators", ["creator_user_id"])
     _ensure_index("idx_user_bm_creators_user", "user_bookmark_creators", ["user_id"])
@@ -1173,6 +1203,7 @@ CREATE TABLE IF NOT EXISTS user_settings (
   user_id         INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   share_works     INTEGER NOT NULL DEFAULT 0,
   share_bookmarks INTEGER NOT NULL DEFAULT 0,
+  ui_language     TEXT NOT NULL DEFAULT 'auto',
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

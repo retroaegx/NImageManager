@@ -1,7 +1,9 @@
-import { $ } from "./lib/dom.js?v=20260307_01";
-import { apiFetch, apiJson, safeJson } from "./lib/http.js?v=20260307_01";
-import { bindUserMenu } from "./lib/userMenu.js?v=20260312_02";
-import { loadCurrentUser, logoutAndRedirect, isAdminRole } from "./lib/session.js?v=20260307_01";
+import { $ } from "./lib/dom.js";
+import { apiFetch, apiJson, safeJson } from "./lib/http.js";
+import { bindUserMenu } from "./lib/userMenu.js";
+import { loadCurrentUser, logoutAndRedirect, isAdminRole } from "./lib/session.js";
+import { t } from "./lib/i18n.js";
+
 
 const API = {
   me: "/api/me",
@@ -18,8 +20,8 @@ let ME = null;
 
 function confirmAccountDelete(username){
   const name = String(username || "").trim();
-  if(!confirm(`アカウント「${name}」を削除します。\n作品、ブックマーク、作者登録、共有ブックマーク登録、関連データも削除します。元に戻せません。`)) return false;
-  return confirm("本当に削除しますか？");
+  if(!confirm(t("admin.account.delete.first_confirm", { name }))) return false;
+  return confirm(t("common.confirm_delete"));
 }
 
 async function loadMe(){
@@ -123,7 +125,7 @@ function renderUsers(users){
     // status
     const tdStatus = document.createElement("td");
     if(u.must_set_password){
-      tdStatus.textContent = "未設定";
+      tdStatus.textContent = t("common.unset");
     }else{
       tdStatus.textContent = "OK";
     }
@@ -155,7 +157,7 @@ function renderUsers(users){
 
     const btnUrl = document.createElement("button");
     btnUrl.className = "ghostBtn smallBtn";
-    btnUrl.textContent = "URL発行";
+    btnUrl.textContent = t("admin.issue_url");
     // Allow self always. For others, enforce admin/master rules on server; disable in UI for clarity.
     const canIssueUrl = isSelf || isAdminRole(me.role);
     btnUrl.disabled = !canIssueUrl || (u.role === "master" && !isSelf);
@@ -163,7 +165,7 @@ function renderUsers(users){
       const r = await apiFetch(API.issuePwLink(u.id), { method: "POST" });
       if(!r.ok){
         const j = await safeJson(r);
-        alert(j.detail || "発行に失敗しました");
+        alert(j.detail || t("admin.issue_url_failed"));
         return;
       }
       const j = await apiJson(r);
@@ -172,15 +174,15 @@ function renderUsers(users){
 
     const btnDel = document.createElement("button");
     btnDel.className = "ghostBtn smallBtn";
-    btnDel.textContent = "削除";
+    btnDel.textContent = t("common.delete");
     const canDelete = !isSelf && u.role !== "master" && (u.role === "user" || (u.role === "admin" && me.role === "master"));
     btnDel.disabled = !canDelete;
     btnDel.addEventListener("click", async () => {
-      if(!confirm(`削除しますか？\n${u.username}`)) return;
+      if(!confirm(t("admin.account.delete.first_confirm", { name: u.username }))) return;
       const r = await apiFetch(API.deleteUser(u.id), { method: "DELETE" });
       if(!r.ok){
         const j = await safeJson(r);
-        alert(j.detail || "削除に失敗しました");
+        alert(j.detail || t("status.delete_failed"));
         return;
       }
       await loadUsers();
@@ -207,7 +209,7 @@ async function updateUser(id, patch){
   });
   if(!res.ok){
     const j = await safeJson(res);
-    alert(j.detail || "更新に失敗しました");
+    alert(j.detail || t("status.update_failed"));
   }
 }
 
@@ -216,7 +218,7 @@ async function createUser(){
   const username = $("newUserName").value.trim();
   const role = $("newUserRole").value;
   if(!username){
-    $("createErr").textContent = "未入力";
+    $("createErr").textContent = t("common.required");
     return;
   }
   const res = await apiFetch(API.createUser, {
@@ -224,12 +226,12 @@ async function createUser(){
     body: JSON.stringify({ username, role }),
   });
   if(res.status === 409){
-    $("createErr").textContent = "既に存在";
+    $("createErr").textContent = t("common.already_exists");
     return;
   }
   if(!res.ok){
     const j = await safeJson(res);
-    $("createErr").textContent = j.detail || "失敗";
+    $("createErr").textContent = j.detail || t("common.failed");
     return;
   }
   const j = await apiJson(res);

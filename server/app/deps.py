@@ -29,17 +29,35 @@ def get_user_optional(
     user_id = int(data.get("sub"))
     conn = get_conn()
     try:
-        row = conn.execute(
-            """
-            SELECT u.id, u.username, u.role, u.disabled,
-                   COALESCE(us.share_works,0) AS share_works,
-                   COALESCE(us.share_bookmarks,0) AS share_bookmarks
-            FROM users u
-            LEFT JOIN user_settings us ON us.user_id = u.id
-            WHERE u.id=?
-            """,
-            (user_id,),
-        ).fetchone()
+        try:
+            row = conn.execute(
+                """
+                SELECT u.id, u.username, u.role, u.disabled,
+                       COALESCE(us.share_works,0) AS share_works,
+                       COALESCE(us.share_bookmarks,0) AS share_bookmarks,
+                       COALESCE(NULLIF(TRIM(us.ui_language),''),'auto') AS ui_language
+                FROM users u
+                LEFT JOIN user_settings us ON us.user_id = u.id
+                WHERE u.id=?
+                """,
+                (user_id,),
+            ).fetchone()
+            ui_language = str(row["ui_language"] or "auto") if row else "auto"
+        except Exception as exc:
+            if "ui_language" not in str(exc):
+                raise
+            row = conn.execute(
+                """
+                SELECT u.id, u.username, u.role, u.disabled,
+                       COALESCE(us.share_works,0) AS share_works,
+                       COALESCE(us.share_bookmarks,0) AS share_bookmarks
+                FROM users u
+                LEFT JOIN user_settings us ON us.user_id = u.id
+                WHERE u.id=?
+                """,
+                (user_id,),
+            ).fetchone()
+            ui_language = "auto"
         if not row or int(row["disabled"]) == 1:
             return None
         return {
@@ -48,6 +66,7 @@ def get_user_optional(
             "role": row["role"],
             "share_works": int(row["share_works"] or 0),
             "share_bookmarks": int(row["share_bookmarks"] or 0),
+            "ui_language": ui_language,
         }
     finally:
         conn.close()

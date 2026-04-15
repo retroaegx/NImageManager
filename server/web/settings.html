@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Settings - NIM</title>
+  <title data-i18n="page.settings.title">Settings - NIM</title>
   <link rel="stylesheet" href="/styles.css?v=44" />
 </head>
 <body class="pageSettings">
@@ -23,8 +23,8 @@
         </div>
 
         <nav class="menu" aria-label="main">
-          <button class="tab" onclick="location.assign('/')"><span>戻る</span><i class="tabGlow"></i></button>
-          <button class="tab active"><span>個人設定</span><i class="tabGlow"></i></button>
+          <button class="tab" onclick="location.assign('/')"><span data-i18n="common.back">戻る</span><i class="tabGlow"></i></button>
+          <button class="tab active"><span data-i18n="menu.settings">個人設定</span><i class="tabGlow"></i></button>
         </nav>
 
         <div class="right">
@@ -32,16 +32,16 @@
             <span id="meLabel" class="me"></span>
           </div>
 
-          <button id="hamburger" class="iconBtn" title="メニュー" aria-label="メニュー">
+          <button id="hamburger" class="iconBtn" data-i18n-title="menu.title" data-i18n-aria-label="menu.title">
             <span class="icon">☰</span>
           </button>
 
-          <div id="userMenu" class="menuPopup hidden" role="menu" aria-label="ユーザーメニュー">
-            <button id="menuAdmin" class="menuItem hidden" role="menuitem">アカウント管理</button>
-            <button id="menuMaintenance" class="menuItem hidden" role="menuitem">メンテナンス</button>
-            <button id="menuSettings" class="menuItem" role="menuitem">個人設定</button>
-            <button id="menuPwLink" class="menuItem" role="menuitem">パスワード変更</button>
-            <button id="menuLogout" class="menuItem" role="menuitem">ログアウト</button>
+          <div id="userMenu" class="menuPopup hidden" role="menu" data-i18n-aria-label="menu.user">
+            <button id="menuAdmin" class="menuItem hidden" role="menuitem" data-i18n="menu.admin">アカウント管理</button>
+            <button id="menuMaintenance" class="menuItem hidden" role="menuitem" data-i18n="menu.maintenance">メンテナンス</button>
+            <button id="menuSettings" class="menuItem" role="menuitem" data-i18n="menu.settings">個人設定</button>
+            <button id="menuPwLink" class="menuItem" role="menuitem" data-i18n="menu.password">パスワード変更</button>
+            <button id="menuLogout" class="menuItem" role="menuitem" data-i18n="menu.logout">ログアウト</button>
           </div>
         </div>
       </div>
@@ -51,28 +51,39 @@
       <section class="panel">
         <div class="card">
           <div class="panelTitleRow">
-            <h2>個人設定</h2>
-            <div class="small">共有設定、ブックマークリスト、アカウント削除を管理します。</div>
+            <h2 data-i18n="menu.settings">個人設定</h2>
+            <div class="small" data-i18n="settings.description">共有設定、ブックマークリスト、アカウント削除を管理します。</div>
           </div>
 
           <div class="row" style="margin-top:10px; gap:14px; flex-wrap:wrap">
             <div class="toolItem" style="min-width:220px">
-              <label>個人作品の共有</label>
+              <label data-i18n="settings.share_works">個人作品の共有</label>
               <div class="toggleRow">
                 <button id="toggleShareWorks" class="toggle off" type="button">OFF</button>
               </div>
             </div>
             <div class="toolItem" style="min-width:220px">
-              <label>ブックマークの共有</label>
+              <label data-i18n="settings.share_bookmarks">ブックマークの共有</label>
               <div class="toggleRow">
                 <button id="toggleShareBookmarks" class="toggle off" type="button">OFF</button>
+              </div>
+            </div>
+          
+            <div class="toolItem" style="min-width:220px">
+              <label data-i18n="settings.language">表示言語</label>
+              <div class="toggleRow">
+                <select id="uiLanguage" class="miniSelect">
+                  <option value="auto" data-i18n="settings.language.auto">ブラウザ設定に従う</option>
+                  <option value="ja" data-i18n="settings.language.ja">日本語</option>
+                  <option value="en" data-i18n="settings.language.en">English</option>
+                </select>
               </div>
             </div>
           </div>
 
           <div class="row" style="margin-top:10px; flex-wrap:wrap">
-            <input id="newListName" class="search" placeholder="新しいリスト名" style="flex:1 1 220px" />
-            <button id="createListBtn" class="primaryBtn">作成</button>
+            <input id="newListName" class="search" data-i18n-placeholder="settings.list.new_name" style="flex:1 1 220px" />
+            <button id="createListBtn" class="primaryBtn" data-i18n="common.create">作成</button>
           </div>
 
           <div id="settingsStatus" class="small" style="margin-top:8px"></div>
@@ -80,10 +91,10 @@
           <div id="bmManageList" class="bmManageList"></div>
 
           <div class="accountDangerBox">
-            <div class="accountDangerTitle">アカウント削除</div>
-            <div id="accountDeleteNote" class="small">作品、ブックマーク、関連データも削除します。</div>
+            <div class="accountDangerTitle" data-i18n="settings.account.delete.title">アカウント削除</div>
+            <div id="accountDeleteNote" class="small" data-i18n="settings.account.delete.note">作品、ブックマーク、関連データも削除します。</div>
             <div class="row" style="margin-top:10px; justify-content:flex-end">
-              <button id="deleteMyAccountBtn" class="dangerBtn" type="button">自分のアカウントを削除</button>
+              <button id="deleteMyAccountBtn" class="dangerBtn" type="button" data-i18n="settings.account.delete.action">自分のアカウントを削除</button>
             </div>
           </div>
         </div>
@@ -91,6 +102,7 @@
     </main>
   </div>
 
-  <script type="module" src="/settings.js?v=44"></script>
+  <script type="module" src="/lib/page-i18n.js"></script>
+  <script type="module" src="/settings.js"></script>
 </body>
 </html>

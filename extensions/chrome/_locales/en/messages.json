@@ -1,0 +1,251 @@
+{
+  "extName": {
+    "message": "NIM Transfer"
+  },
+  "extDescription": {
+    "message": "Transfers images to NIM and shows the overlay on NovelAI."
+  },
+  "extActionTitle": {
+    "message": "NIM Transfer"
+  },
+  "optionsPageTitle": {
+    "message": "NIM Extension Settings"
+  },
+  "optionsHeading": {
+    "message": "NIM Extension Settings"
+  },
+  "optionsNote": {
+    "message": "Settings used by both transfer and overlay on NovelAI."
+  },
+  "domainLabel": {
+    "message": "Domain"
+  },
+  "domainPlaceholder": {
+    "message": "https://nim.example.com"
+  },
+  "domainHelp": {
+    "message": "NIM domain only. API path is not required."
+  },
+  "saveSettings": {
+    "message": "Save settings"
+  },
+  "checkSession": {
+    "message": "Check session"
+  },
+  "openLoginPage": {
+    "message": "Open login page"
+  },
+  "openNim": {
+    "message": "Open NIM"
+  },
+  "loginSection": {
+    "message": "Login"
+  },
+  "usernameLabel": {
+    "message": "Username"
+  },
+  "passwordLabel": {
+    "message": "Password"
+  },
+  "loginButton": {
+    "message": "Login"
+  },
+  "logoutButton": {
+    "message": "Logout"
+  },
+  "statusSection": {
+    "message": "Status"
+  },
+  "settingsStatusLabel": {
+    "message": "Settings"
+  },
+  "overlayStatusLabel": {
+    "message": "Overlay"
+  },
+  "loginStatusLabel": {
+    "message": "Login"
+  },
+  "status_saved": {
+    "message": "Saved"
+  },
+  "status_not_saved": {
+    "message": "Not saved"
+  },
+  "status_ready": {
+    "message": "Ready"
+  },
+  "status_not_configured": {
+    "message": "Not configured"
+  },
+  "status_logged_in": {
+    "message": "Logged in"
+  },
+  "status_not_logged_in": {
+    "message": "Not logged in"
+  },
+  "status_login_ok": {
+    "message": "Login OK"
+  },
+  "status_logged_out": {
+    "message": "Logged out"
+  },
+  "status_login_required": {
+    "message": "Login required"
+  },
+  "status_check_failed": {
+    "message": "Check failed"
+  },
+  "status_load_failed": {
+    "message": "Load failed"
+  },
+  "status_save_failed": {
+    "message": "Save failed"
+  },
+  "status_logout_failed": {
+    "message": "Logout failed"
+  },
+  "transferToNim": {
+    "message": "Transfer to NIM"
+  },
+  "transferring": {
+    "message": "Transferring..."
+  },
+  "transferSuccess": {
+    "message": "Transferred"
+  },
+  "overlayLoading": {
+    "message": "Loading NIM..."
+  },
+  "overlayMenu": {
+    "message": "NIM menu"
+  },
+  "overlayTitle": {
+    "message": "NIM Overlay"
+  },
+  "error_RUNTIME_ERROR": {
+    "message": "Extension runtime error."
+  },
+  "error_DOMAIN_REQUIRED": {
+    "message": "Domain is required."
+  },
+  "error_CONFIG_REQUIRED": {
+    "message": "Open extension settings and save the domain first."
+  },
+  "error_AUTH_REQUIRED": {
+    "message": "Login required."
+  },
+  "error_LOGIN_FAILED": {
+    "message": "Login failed."
+  },
+  "error_SESSION_CHECK_FAILED": {
+    "message": "Failed to check session."
+  },
+  "error_UPLOAD_FAILED": {
+    "message": "Upload failed."
+  },
+  "error_OPEN_FAILED": {
+    "message": "Failed to open."
+  },
+  "error_URL_REQUIRED": {
+    "message": "URL is required."
+  },
+  "error_OPEN_TAB_FAILED": {
+    "message": "Failed to open tab."
+  },
+  "error_CANVAS_TO_BLOB_FAILED": {
+    "message": "Failed to convert canvas to image."
+  },
+  "error_PAGE_RESPONSE_TIMEOUT": {
+    "message": "NovelAI page response timed out."
+  },
+  "error_PAGE_IMAGE_DATA_UNAVAILABLE": {
+    "message": "Failed to read image data from the page."
+  },
+  "error_IMAGE_URL_NOT_FOUND": {
+    "message": "Image URL was not found."
+  },
+  "error_VISIBLE_IMAGE_NOT_FOUND": {
+    "message": "No visible image was found."
+  },
+  "error_NIM_OPEN_FAILED": {
+    "message": "Could not open NIM."
+  },
+  "error_LOGIN_URL_NOT_CONFIGURED": {
+    "message": "Login URL is not configured."
+  },
+  "error_LOGIN_PAGE_OPEN_FAILED": {
+    "message": "Could not open the login page."
+  },
+  "error_RELOAD_FAILED": {
+    "message": "Could not reload."
+  },
+  "error_OVERLAY_URL_NOT_CONFIGURED": {
+    "message": "Overlay URL is not configured."
+  },
+  "error_OPEN_NEW_TAB_FAILED": {
+    "message": "Could not open a new tab."
+  },
+  "error_GET_CONFIG_FAILED": {
+    "message": "Failed to load extension settings."
+  },
+  "error_INVALID_OVERLAY_URL": {
+    "message": "Overlay URL is invalid."
+  },
+  "toast_login_in_other_tab": {
+    "message": "Please sign in to NIM in another tab first, then press Reload."
+  },
+  "toast_save_domain_first": {
+    "message": "Save the NIM URL in extension settings first."
+  },
+  "overlayClose": {
+    "message": "Close"
+  },
+  "overlayReload": {
+    "message": "Reload"
+  },
+  "overlayLogin": {
+    "message": "Login"
+  },
+  "overlaySettings": {
+    "message": "Settings"
+  },
+  "overlayNewTab": {
+    "message": "New tab"
+  },
+  "firefoxOverlayLoginRequired": {
+    "message": "In Firefox, sign in from extension settings before using the overlay."
+  },
+  "error_UNKNOWN": {
+    "message": "An unexpected error occurred."
+  },
+  "error_UNKNOWN_MESSAGE": {
+    "message": "Unknown message."
+  },
+  "error_UNEXPECTED_ERROR": {
+    "message": "An unexpected error occurred."
+  },
+  "behaviorSection": {
+    "message": "Behavior"
+  },
+  "showNovelAiMenuLabel": {
+    "message": "Show NIM menu on NovelAI"
+  },
+  "showNovelAiMenuHelp": {
+    "message": "When enabled, show the NIM launcher button at the top left of NovelAI."
+  },
+  "autoTransferLabel": {
+    "message": "Auto transfer"
+  },
+  "autoTransferHelp": {
+    "message": "When enabled, generated images are transferred to NIM automatically without pressing the button."
+  },
+  "behaviorAutoSaveNote": {
+    "message": "Changes in this section are saved immediately."
+  },
+  "status_saving": {
+    "message": "Saving..."
+  },
+  "status_ready_to_save": {
+    "message": "Ready"
+  }
+}

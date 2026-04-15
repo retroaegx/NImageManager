@@ -1,3 +1,5 @@
+import { initI18n, t } from "./lib/i18n.js";
+
 const API = {
   status: "/api/auth/setup_status",
   setup: "/api/auth/setup_master",
@@ -14,10 +16,7 @@ async function checkStatus(){
       return false;
     }
     return true;
-  }catch(_e){
-    // If API is unreachable, stay here and show errors on submit.
-    return true;
-  }
+  }catch{ return true; }
 }
 
 async function doSetup(){
@@ -25,40 +24,23 @@ async function doSetup(){
   const password = $("setupPass").value;
   const password2 = $("setupPass2").value;
   $("setupErr").textContent = "";
-
-  if(!username || !password || !password2){
-    $("setupErr").textContent = "未入力";
-    return;
-  }
-  if(password !== password2){
-    $("setupErr").textContent = "確認が一致しません";
-    return;
-  }
-
+  if(!username || !password || !password2){ $("setupErr").textContent = t("common.required"); return; }
+  if(password !== password2){ $("setupErr").textContent = t("common.confirmation_mismatch"); return; }
   try{
-    const r = await fetch(API.setup, {
-      method: "POST",
-      headers: {"Content-Type":"application/json"},
-      credentials: "include",
-      body: JSON.stringify({ username, password, password2 }),
-    });
-    if(r.status === 409){
-      location.replace("/login.html");
-      return;
-    }
+    const r = await fetch(API.setup, { method: "POST", headers: {"Content-Type":"application/json"}, credentials: "include", body: JSON.stringify({ username, password, password2 }) });
+    if(r.status === 409){ location.replace("/login.html"); return; }
     if(!r.ok){
-      let msg = "作成に失敗しました";
-      try{ const j = await r.json(); msg = j.detail || msg; }catch(_e){}
+      let msg = t("setup.failed");
+      try{ const j = await r.json(); msg = j.detail || msg; }catch{}
       $("setupErr").textContent = msg;
       return;
     }
     location.replace("/");
-  }catch(_e){
-    $("setupErr").textContent = "接続できません";
-  }
+  }catch{ $("setupErr").textContent = t("common.connection_failed"); }
 }
 
 async function init(){
+  await initI18n("auto");
   await checkStatus();
   $("setupBtn").addEventListener("click", doSetup);
   $("setupPass2").addEventListener("keydown", (e)=>{ if(e.key === "Enter") doSetup(); });
