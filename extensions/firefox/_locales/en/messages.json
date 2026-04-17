@@ -234,15 +234,15 @@
     "message": "OFF"
   },
   "autoTransferCompactOnTitle": {
-    "message": "NIM auto transfer is ON. Click OFF to disable."
+    "message": "Disable NIM Auto-forward"
   },
   "autoTransferCompactOffTitle": {
-    "message": "NIM auto transfer is OFF. Click ON to enable."
+    "message": "Enable NIM Auto-forward"
   },
   "autoTransferEnabledToast": {
-    "message": "NIM auto transfer enabled."
+    "message": "NIM Auto-forward enabled."
   },
   "autoTransferDisabledToast": {
-    "message": "NIM auto transfer disabled."
+    "message": "NIM Auto-forward disabled."
   }
 }

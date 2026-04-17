@@ -36,9 +36,9 @@ const FALLBACK_MESSAGES = {
   overlayLogin: 'Login',
   overlaySettings: 'Settings',
   overlayNewTab: 'Open in new tab',
-  autoTransferCompactLabel: 'NIM Auto',
-  autoTransferCompactOnTitle: 'Disable NIM Auto transfer',
-  autoTransferCompactOffTitle: 'Enable NIM Auto transfer',
+  autoTransferCompactLabel: 'NIM Auto-forward',
+  autoTransferCompactOnTitle: 'Disable NIM Auto-forward',
+  autoTransferCompactOffTitle: 'Enable NIM Auto-forward',
   autoTransferEnabledToast: 'Auto transfer enabled',
   autoTransferDisabledToast: 'Auto transfer disabled',
   error_UNKNOWN: 'Unexpected error',
@@ -149,6 +149,42 @@ function showToast(message, kind = 'info') {
     toast.remove();
     if (!container.childElementCount) container.remove();
   }, kind === 'error' ? 5200 : 3600);
+}
+
+function createStyleNode(cssText) {
+  const style = document.createElement('style');
+  style.textContent = String(cssText || '');
+  return style;
+}
+
+function createElement(tagName, options = {}) {
+  const element = document.createElement(tagName);
+  const {
+    className,
+    text,
+    attrs = null,
+    dataset = null,
+    style = null,
+  } = options;
+
+  if (className) element.className = className;
+  if (text != null) element.textContent = String(text);
+  if (attrs && typeof attrs === 'object') {
+    for (const [name, value] of Object.entries(attrs)) {
+      if (value == null) continue;
+      element.setAttribute(name, String(value));
+    }
+  }
+  if (dataset && typeof dataset === 'object') {
+    for (const [name, value] of Object.entries(dataset)) {
+      if (value == null) continue;
+      element.dataset[name] = String(value);
+    }
+  }
+  if (style && typeof style === 'object') {
+    Object.assign(element.style, style);
+  }
+  return element;
 }
 
 async function canvasToBlob(canvas) {
@@ -487,7 +523,6 @@ function isElementVisibleForAnchoring(element) {
   return true;
 }
 
-
 function scoreTopbarMenuButton(button) {
   if (!(button instanceof HTMLButtonElement)) return -1;
   if (button.id === AUTO_TRANSFER_TOPBAR_HOST_ID || button.closest(`#${AUTO_TRANSFER_TOPBAR_HOST_ID}`)) return -1;
@@ -495,17 +530,41 @@ function scoreTopbarMenuButton(button) {
   if (!isElementVisibleForAnchoring(button)) return -1;
 
   const rect = button.getBoundingClientRect();
-  if (rect.top > 160) return -1;
+  if (rect.top > 180) return -1;
 
   const text = normalizeNodeText(button.textContent);
-  const aria = String(button.getAttribute('aria-label') || button.title || '').trim();
+  const aria = normalizeNodeText(button.getAttribute('aria-label') || button.title);
 
   let score = 0;
-  if (/menu|メニュー/i.test(aria)) score += 800;
-  if (/^(☰|≡|⋯|…)$/.test(text)) score += 700;
-  if (rect.width >= 24 && rect.width <= 84 && rect.height >= 24 && rect.height <= 84) score += 120;
-  score += Math.max(0, 400 - rect.top * 3);
-  score += Math.max(0, 600 - (window.innerWidth - rect.right));
+  if (/menu|メニュー/i.test(aria)) score += 1000;
+  if (/^(☰|≡|⋯|…)$/.test(text)) score += 900;
+  if (button.querySelector('svg')) score += 120;
+  if (rect.width >= 24 && rect.width <= 96 && rect.height >= 24 && rect.height <= 96) score += 160;
+  score += Math.max(0, 600 - rect.top * 3);
+  score += Math.max(0, rect.right);
+  return score;
+}
+
+function scoreTopbarPlusButton(button) {
+  if (!(button instanceof HTMLButtonElement)) return -1;
+  if (button.id === AUTO_TRANSFER_TOPBAR_HOST_ID || button.closest(`#${AUTO_TRANSFER_TOPBAR_HOST_ID}`)) return -1;
+  if (button.hasAttribute(BUTTON_FLAG)) return -1;
+  if (!isElementVisibleForAnchoring(button)) return -1;
+
+  const rect = button.getBoundingClientRect();
+  if (rect.top > 180) return -1;
+
+  const text = normalizeNodeText(button.textContent);
+  const aria = normalizeNodeText(button.getAttribute('aria-label') || button.title);
+  const source = `${text} ${aria}`.trim();
+
+  let score = 0;
+  if (/^\+$/.test(text)) score += 2500;
+  if (/add|new|create|another|generate|追加|作成|新規|生成/i.test(source)) score += 600;
+  if (button.querySelector('svg')) score += 100;
+  if (rect.width >= 24 && rect.width <= 96 && rect.height >= 24 && rect.height <= 96) score += 140;
+  score += Math.max(0, 500 - rect.top * 3);
+  score += Math.max(0, 500 - rect.left);
   return score;
 }
 
@@ -515,7 +574,7 @@ function findBestButton(container, scorer) {
   let best = null;
   let bestScore = -1;
   for (const button of Array.from(container.querySelectorAll('button'))) {
-    const score = scorer(button, container);
+    const score = scorer(button);
     if (score > bestScore) {
       best = button;
       bestScore = score;
@@ -524,17 +583,13 @@ function findBestButton(container, scorer) {
   return best;
 }
 
-function findTopbarMenuButtonInContainer(container) {
-  return findBestButton(container, (button) => scoreTopbarMenuButton(button));
-}
-
 function isInlineRowContainer(element) {
   if (!(element instanceof HTMLElement)) return false;
   const style = window.getComputedStyle(element);
   if (!style.display.includes('flex')) return false;
   if (style.flexDirection.startsWith('column')) return false;
   const rect = element.getBoundingClientRect();
-  if (rect.width <= 0 || rect.height <= 0 || rect.top > 180) return false;
+  if (rect.width <= 0 || rect.height <= 0 || rect.top > 200) return false;
   return true;
 }
 
@@ -545,6 +600,8 @@ const topbarAnchorState = {
   anchor: null,
   menuButton: null,
   plusButton: null,
+  beforeNode: null,
+  placement: '',
 };
 
 function unwrapDirectChildInContainer(node, container) {
@@ -555,46 +612,15 @@ function unwrapDirectChildInContainer(node, container) {
   return current instanceof HTMLElement ? current : null;
 }
 
-function scoreTopbarPlusButton(button, rowContainer) {
-  if (!(button instanceof HTMLButtonElement)) return -1;
-  if (button.id === AUTO_TRANSFER_TOPBAR_HOST_ID || button.closest(`#${AUTO_TRANSFER_TOPBAR_HOST_ID}`)) return -1;
-  if (button.hasAttribute(BUTTON_FLAG)) return -1;
-  if (!isElementVisibleForAnchoring(button)) return -1;
-
-  const rect = button.getBoundingClientRect();
-  if (rect.top > 160) return -1;
-
-  const text = normalizeNodeText(button.textContent);
-  const aria = String(button.getAttribute('aria-label') || button.title || '').trim();
-  const source = `${text} ${aria}`.trim();
-
-  let score = 0;
-  if (/^\+$/.test(text)) score += 2500;
-  if (/add|new|create|another|generate|追加|作成|新規|生成/i.test(source)) score += 500;
-  if (button.querySelector('svg')) score += 60;
-  if (rect.width >= 24 && rect.width <= 96 && rect.height >= 24 && rect.height <= 96) score += 180;
-  score += Math.max(0, 600 - rect.top * 3);
-
-  const directChild = rowContainer instanceof HTMLElement ? unwrapDirectChildInContainer(button, rowContainer) : null;
-  const directRect = directChild?.getBoundingClientRect?.() || rect;
-  score += Math.max(0, 800 - directRect.left * 1.5);
-  return score;
-}
-
-function findTopbarPlusButtonInContainer(container) {
-  return findBestButton(container, scoreTopbarPlusButton);
-}
-
 function getStableTopbarTargetSnapshot() {
-  const { navbar, row, container, anchor, menuButton, plusButton } = topbarAnchorState;
+  const { navbar, row, container, anchor, beforeNode, menuButton, plusButton, placement } = topbarAnchorState;
   if (
     navbar instanceof HTMLElement && navbar.isConnected &&
     row instanceof HTMLElement && row.isConnected &&
     container instanceof HTMLElement && container.isConnected &&
-    anchor instanceof HTMLElement && anchor.isConnected &&
-    plusButton instanceof HTMLButtonElement && plusButton.isConnected
+    anchor instanceof HTMLElement && anchor.isConnected
   ) {
-    return { navbar, row, container, anchor, menuButton, plusButton };
+    return { navbar, row, container, anchor, beforeNode, menuButton, plusButton, placement: placement || '' };
   }
   return null;
 }
@@ -608,6 +634,13 @@ function getTopbarRowFromNavbar(navbar) {
   return isInlineRowContainer(navbar) ? navbar : null;
 }
 
+function findNearestInlineRowAncestor(node) {
+  for (let current = node instanceof HTMLElement ? node : null; current && current !== document.body; current = current.parentElement) {
+    if (isInlineRowContainer(current)) return current;
+  }
+  return null;
+}
+
 function findTopbarNavbarRoot() {
   const explicit = Array.from(document.querySelectorAll('.image-gen-navbar')).filter((node) => node instanceof HTMLElement && isElementVisibleForAnchoring(node));
   if (explicit.length) {
@@ -615,62 +648,55 @@ function findTopbarNavbarRoot() {
     return explicit[0];
   }
 
-  const row = findTopbarRowContainerFallback();
-  return row instanceof HTMLElement ? row : null;
-}
-
-function findTopbarRowContainerFallback() {
-  for (const button of Array.from(document.querySelectorAll('button'))) {
-    const score = scoreTopbarPlusButton(button, null);
-    if (score < 0) continue;
-    for (let node = button.parentElement; node && node !== document.body; node = node.parentElement) {
-      if (isInlineRowContainer(node)) return node;
-    }
-  }
-  return null;
-}
-
-function getInsertionContainerForPlusButton(plusButton, row) {
-  if (!(plusButton instanceof HTMLButtonElement) || !(row instanceof HTMLElement)) return null;
-  const parent = plusButton.parentElement;
-  if (
-    parent instanceof HTMLElement &&
-    parent !== row &&
-    parent.parentElement instanceof HTMLElement &&
-    row.contains(parent) &&
-    isInlineRowContainer(parent)
-  ) {
-    return parent;
-  }
-  return row;
+  const menuButton = findBestButton(document.body, scoreTopbarMenuButton);
+  const plusButton = findBestButton(document.body, scoreTopbarPlusButton);
+  return findNearestInlineRowAncestor(menuButton) || findNearestInlineRowAncestor(plusButton);
 }
 
 function findTopbarInsertionTarget() {
   const navbar = findTopbarNavbarRoot();
-  if (!(navbar instanceof HTMLElement)) return getStableTopbarTargetSnapshot();
-
-  const row = getTopbarRowFromNavbar(navbar);
+  const row = getTopbarRowFromNavbar(navbar) || (navbar instanceof HTMLElement ? navbar : null);
   if (!(row instanceof HTMLElement)) return getStableTopbarTargetSnapshot();
 
-  const plusButton = findTopbarPlusButtonInContainer(row);
-  if (!(plusButton instanceof HTMLButtonElement)) return getStableTopbarTargetSnapshot();
+  const menuButton = findBestButton(row, scoreTopbarMenuButton);
+  const plusButton = findBestButton(row, scoreTopbarPlusButton);
+  const menuNode = unwrapDirectChildInContainer(menuButton, row);
+  const plusNode = unwrapDirectChildInContainer(plusButton, row);
 
-  const menuButton = findTopbarMenuButtonInContainer(row);
-  const container = getInsertionContainerForPlusButton(plusButton, row);
-  if (!(container instanceof HTMLElement)) return getStableTopbarTargetSnapshot();
+  let anchor = null;
+  let beforeNode = null;
+  let placement = '';
 
-  const anchor = container === row
-    ? unwrapDirectChildInContainer(plusButton, row)
-    : plusButton;
+  if (menuNode instanceof HTMLElement) {
+    anchor = plusNode instanceof HTMLElement ? plusNode : menuNode;
+    beforeNode = menuNode;
+    placement = 'beforeMenu';
+  } else if (plusNode instanceof HTMLElement) {
+    anchor = plusNode;
+    beforeNode = plusNode.nextSibling;
+    placement = 'afterPlus';
+  }
+
   if (!(anchor instanceof HTMLElement)) return getStableTopbarTargetSnapshot();
 
-  topbarAnchorState.navbar = navbar;
+  topbarAnchorState.navbar = navbar instanceof HTMLElement ? navbar : row;
   topbarAnchorState.row = row;
-  topbarAnchorState.container = container;
+  topbarAnchorState.container = row;
   topbarAnchorState.anchor = anchor;
-  topbarAnchorState.menuButton = menuButton;
-  topbarAnchorState.plusButton = plusButton;
-  return { navbar, row, container, anchor, menuButton, plusButton };
+  topbarAnchorState.menuButton = menuButton instanceof HTMLButtonElement ? menuButton : null;
+  topbarAnchorState.plusButton = plusButton instanceof HTMLButtonElement ? plusButton : null;
+  topbarAnchorState.beforeNode = beforeNode instanceof Node ? beforeNode : null;
+  topbarAnchorState.placement = placement;
+  return {
+    navbar: navbar instanceof HTMLElement ? navbar : row,
+    row,
+    container: row,
+    anchor,
+    beforeNode: beforeNode instanceof Node ? beforeNode : null,
+    menuButton: menuButton instanceof HTMLButtonElement ? menuButton : null,
+    plusButton: plusButton instanceof HTMLButtonElement ? plusButton : null,
+    placement,
+  };
 }
 
 function createAutoTransferTopbarHost() {
@@ -686,105 +712,117 @@ function createAutoTransferTopbarHost() {
   });
 
   const shadowRoot = host.attachShadow({ mode: 'open' });
-  shadowRoot.innerHTML = `
-    <style>
-      :host {
-        display: inline-flex;
-        align-items: center;
-        flex: 0 0 auto;
-        white-space: nowrap;
-        pointer-events: auto;
-      }
-      .autoTransferWrap {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-      }
-      .autoTransferLabel {
-        color: #e2e8f0;
-        font-size: 11px;
-        font-weight: 800;
-        line-height: 1;
-        white-space: nowrap;
-        user-select: none;
-        text-shadow: 0 1px 1px rgba(0,0,0,0.28);
-      }
-      .autoTransferToggle {
-        pointer-events: auto;
-        position: relative;
-        display: inline-flex;
-        align-items: center;
-        justify-content: flex-start;
-        width: 52px;
-        height: 30px;
-        padding: 0;
-        border: 1px solid rgba(148, 163, 184, 0.34);
-        border-radius: 999px;
-        background: rgba(30, 41, 59, 0.82);
-        backdrop-filter: blur(10px);
-        -webkit-backdrop-filter: blur(10px);
-        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.24);
-        cursor: pointer;
-        transition: background 140ms ease, border-color 140ms ease, opacity 120ms ease, transform 120ms ease;
-      }
-      .autoTransferToggle:hover { transform: translateY(-1px); }
-      .autoTransferToggle[data-state="1"] {
-        border-color: rgba(125, 211, 252, 0.42);
-        background: rgba(8, 47, 73, 0.88);
-      }
-      .autoTransferToggle[data-busy="1"] {
-        opacity: 0.72;
-        cursor: wait;
-      }
-      .autoTransferToggle:focus-visible {
-        outline: 2px solid rgba(125, 211, 252, 0.65);
-        outline-offset: 2px;
-      }
-      .autoTransferThumb {
-        position: absolute;
-        top: 3px;
-        left: 3px;
-        width: 22px;
-        height: 22px;
-        border-radius: 50%;
-        background: #e5e7eb;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
-        transition: transform 140ms ease, background 140ms ease;
-      }
-      .autoTransferToggle[data-state="1"] .autoTransferThumb {
-        transform: translateX(22px);
-        background: #7dd3fc;
-      }
-      :host([data-mode="compact"]) .autoTransferLabel {
-        font-size: 10px;
-      }
-      :host([data-mode="toggleOnly"]) .autoTransferLabel {
-        display: none;
-      }
-      :host([data-mode="toggleOnly"]) .autoTransferWrap {
-        gap: 0;
-      }
-      :host([data-mode="toggleOnly"]) .autoTransferToggle {
-        width: 46px;
-        height: 28px;
-      }
-      :host([data-mode="toggleOnly"]) .autoTransferThumb {
-        top: 3px;
-        left: 3px;
-        width: 20px;
-        height: 20px;
-      }
-      :host([data-mode="toggleOnly"]) .autoTransferToggle[data-state="1"] .autoTransferThumb {
-        transform: translateX(18px);
-      }
-    </style>
-    <div class="autoTransferWrap">
-      <span class="autoTransferLabel"></span>
-      <button type="button" class="autoTransferToggle" data-state="0" data-busy="0" aria-pressed="false">
-        <span class="autoTransferThumb"></span>
-      </button>
-    </div>
-  `;
+  shadowRoot.appendChild(createStyleNode(`
+    :host {
+      display: inline-flex;
+      align-items: center;
+      flex: 0 0 auto;
+      white-space: nowrap;
+      pointer-events: auto;
+    }
+    .autoTransferWrap {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .autoTransferLabel {
+      color: #e2e8f0;
+      font-size: 11px;
+      text-align: right;
+      font-weight: 800;
+      line-height: 1;
+      white-space: nowrap;
+      user-select: none;
+      text-shadow: 0 1px 1px rgba(0,0,0,0.28);
+    }
+    .autoTransferToggle {
+      pointer-events: auto;
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      justify-content: flex-start;
+      width: 52px;
+      height: 30px;
+      padding: 0;
+      border: 1px solid rgba(148, 163, 184, 0.34);
+      border-radius: 999px;
+      background: rgba(30, 41, 59, 0.82);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.24);
+      cursor: pointer;
+      transition: background 140ms ease, border-color 140ms ease, opacity 120ms ease, transform 120ms ease;
+    }
+    .autoTransferToggle:hover { transform: translateY(-1px); }
+    .autoTransferToggle[data-state="1"] {
+      border-color: rgba(125, 211, 252, 0.42);
+      background: rgba(8, 47, 73, 0.88);
+    }
+    .autoTransferToggle[data-busy="1"] {
+      opacity: 0.72;
+      cursor: wait;
+    }
+    .autoTransferToggle:focus-visible {
+      outline: 2px solid rgba(125, 211, 252, 0.65);
+      outline-offset: 2px;
+    }
+    .autoTransferThumb {
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: #e5e7eb;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
+      transition: transform 140ms ease, background 140ms ease;
+    }
+    .autoTransferToggle[data-state="1"] .autoTransferThumb {
+      transform: translateX(22px);
+      background: #7dd3fc;
+    }
+    :host([data-mode="compact"]) .autoTransferLabel {
+      font-size: 10px;
+    }
+    :host([data-mode="toggleOnly"]) .autoTransferLabel {
+      display: none;
+    }
+    :host([data-mode="toggleOnly"]) .autoTransferWrap {
+      gap: 0;
+    }
+    :host([data-mode="toggleOnly"]) .autoTransferToggle {
+      width: 46px;
+      height: 28px;
+    }
+    :host([data-mode="toggleOnly"]) .autoTransferThumb {
+      top: 3px;
+      left: 3px;
+      width: 20px;
+      height: 20px;
+    }
+    :host([data-mode="toggleOnly"]) .autoTransferToggle[data-state="1"] .autoTransferThumb {
+      transform: translateX(18px);
+    }
+  `));
+
+  const wrap = createElement('div', { className: 'autoTransferWrap' });
+  const label = createElement('span', { className: 'autoTransferLabel' });
+  const toggle = createElement('button', {
+    className: 'autoTransferToggle',
+    attrs: {
+      type: 'button',
+      'aria-pressed': 'false',
+    },
+    dataset: {
+      state: '0',
+      busy: '0',
+    },
+  });
+  const thumb = createElement('span', { className: 'autoTransferThumb' });
+
+  toggle.appendChild(thumb);
+  wrap.append(label, toggle);
+  shadowRoot.appendChild(wrap);
 
   return host;
 }
@@ -797,9 +835,9 @@ function ensureAutoTransferTopbarHost() {
 
   const target = findTopbarInsertionTarget();
   if (target?.container && target.anchor) {
-    const afterNode = target.anchor.nextSibling;
-    if (host.parentElement !== target.container || host.previousSibling !== target.anchor) {
-      target.container.insertBefore(host, afterNode || null);
+    const beforeNode = target.beforeNode instanceof Node ? target.beforeNode : target.anchor.nextSibling;
+    if (host.parentElement !== target.container || host.nextSibling !== beforeNode) {
+      target.container.insertBefore(host, beforeNode || null);
     }
   }
 
@@ -833,27 +871,26 @@ function positionAutoTransferTopbarHost() {
     if (host.isConnected) {
       host.hidden = false;
       host.dataset.mode = 'toggleOnly';
-      host.style.margin = '0 0 0 8px';
+      host.style.margin = '0 8px 0 auto';
       return host;
     }
     host.hidden = true;
     return host;
   }
 
-  const anchorRect = (target.plusButton || target.anchor).getBoundingClientRect();
+  const plusRect = target.plusButton?.getBoundingClientRect?.() || target.anchor.getBoundingClientRect();
   const rowRect = target.row?.getBoundingClientRect?.() || target.container.getBoundingClientRect();
   const menuRect = target.menuButton?.getBoundingClientRect?.();
   const rightLimit = menuRect ? menuRect.left : rowRect.right;
-  const availableWidth = Math.max(0, rightLimit - anchorRect.right - 12);
+  const availableWidth = Math.max(0, rightLimit - plusRect.right - 12);
 
   host.hidden = false;
-  const desktopWide = window.innerWidth >= 1100;
   const desktop = window.innerWidth >= 900;
-  host.dataset.mode = 'compact';
-  if (availableWidth >= 168 || desktopWide) host.dataset.mode = 'full';
-  else if (availableWidth >= 108 || desktop) host.dataset.mode = 'compact';
+  if (availableWidth >= 210 || desktop) host.dataset.mode = 'full';
+  else if (availableWidth >= 132) host.dataset.mode = 'compact';
   else host.dataset.mode = 'toggleOnly';
-  host.style.margin = host.dataset.mode === 'toggleOnly' ? '0 0 0 6px' : '0 0 0 8px';
+
+  host.style.margin = '0 8px 0 8px';
   return host;
 }
 
@@ -1011,183 +1048,243 @@ function ensureOverlayHost() {
 
   const shadowRoot = host.shadowRoot || host.attachShadow({ mode: 'open' });
   if (!shadowRoot.childNodes.length) {
-    shadowRoot.innerHTML = `
-      <style>
-        :host {
-          all: initial;
-        }
-        .nim-ui {
-          position: fixed;
-          inset: 0;
-          z-index: 2147483646;
-          pointer-events: none;
-          font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-          color: #e5eefb;
-        }
-        .launcher {
-          position: fixed;
-          top: calc(env(safe-area-inset-top, 0px) + 12px);
-          left: calc(env(safe-area-inset-left, 0px) + 12px);
-          pointer-events: auto;
-          display: inline-flex;
-          align-items: center;
-          gap: 8px;
-          min-height: 36px;
-          padding: 0 12px;
-          border: 1px solid rgba(255,255,255,0.18);
-          border-radius: 999px;
-          background: rgba(15, 23, 42, 0.72);
-          color: #f8fafc;
-          backdrop-filter: blur(10px);
-          -webkit-backdrop-filter: blur(10px);
-          box-shadow: 0 12px 28px rgba(15, 23, 42, 0.35);
-          cursor: pointer;
-          font-size: 12px;
-          font-weight: 700;
-          transition: transform 120ms ease, background 120ms ease, opacity 120ms ease;
-        }
-        .launcher:hover {
-          background: rgba(15, 23, 42, 0.82);
-          transform: translateY(-1px);
-        }
-        .launcher[hidden] {
-          display: none;
-        }
-        .overlay {
-          position: fixed;
-          inset: 0;
-          display: none;
-          pointer-events: auto;
-          background: rgba(2, 6, 23, 0.58);
-          backdrop-filter: blur(2px);
-          -webkit-backdrop-filter: blur(2px);
-        }
-        .overlay[data-open="1"] {
-          display: block;
-        }
-        .frame {
-          position: absolute;
-          inset: 0;
-          width: 100%;
-          height: 100%;
-          border: 0;
-          background: #050b17;
-        }
-        .toolbar {
-          position: absolute;
-          top: 12px;
-          left: 12px;
-          z-index: 2;
-          display: flex;
-          align-items: flex-start;
-          gap: 8px;
-          pointer-events: auto;
-        }
-        .toolbarLeft {
-          position: relative;
-          display: flex;
-          align-items: flex-start;
-          gap: 8px;
-        }
-        .toolbarButton,
-        .toolbarLink {
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          min-height: 36px;
-          padding: 0 12px;
-          border-radius: 999px;
-          border: 1px solid rgba(255,255,255,0.18);
-          background: rgba(15, 23, 42, 0.76);
-          color: #f8fafc;
-          text-decoration: none;
-          cursor: pointer;
-          box-shadow: 0 10px 24px rgba(15, 23, 42, 0.25);
-          font-size: 12px;
-          font-weight: 700;
-          backdrop-filter: blur(10px);
-          -webkit-backdrop-filter: blur(10px);
-          white-space: nowrap;
-        }
-        .toolbarButton:hover,
-        .toolbarLink:hover {
-          background: rgba(15, 23, 42, 0.88);
-        }
-        .toolbarButton[data-action="close"] {
-          min-width: 72px;
-        }
-        .toolbarButton[data-action="reload"],
-        .toolbarButton[data-action="toggle-menu"] {
-          min-width: 36px;
-          width: 36px;
-          padding: 0;
-          font-size: 16px;
-          line-height: 1;
-        }
-        .toolbarMenu {
-          position: absolute;
-          top: 44px;
-          right: 0;
-          display: none;
-          flex-direction: column;
-          gap: 8px;
-          width: max-content;
-          min-width: 112px;
-          padding: 8px;
-          border: 1px solid rgba(255,255,255,0.14);
-          border-radius: 16px;
-          background: rgba(15, 23, 42, 0.86);
-          box-shadow: 0 18px 36px rgba(15, 23, 42, 0.34);
-          backdrop-filter: blur(12px);
-          -webkit-backdrop-filter: blur(12px);
-        }
-        .toolbarMenu[data-open="1"] {
-          display: flex;
-        }
-        .toolbarMenu .toolbarButton {
-          width: 100%;
-          justify-content: flex-start;
-        }
-        .toolbarTitle {
-          display: none;
-        }
-        .loading {
-          position: absolute;
-          inset: 0;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          z-index: 1;
-          background: linear-gradient(180deg, rgba(2,6,23,0.42), rgba(2,6,23,0.2));
-          color: #e2e8f0;
-          font-size: 14px;
-          letter-spacing: 0.01em;
-          pointer-events: none;
-        }
-        .loading[hidden] {
-          display: none;
-        }
-      </style>
-      <div class="nim-ui">
-        <button type="button" class="launcher" aria-label="${msg('openNim')}">NIM</button>
-        <div class="overlay" data-open="0" aria-hidden="true">
-          <iframe class="frame" referrerpolicy="strict-origin-when-cross-origin" allow="storage-access"></iframe>
-          <div class="loading">${msg('overlayLoading')}</div>
-          <div class="toolbar">
-            <div class="toolbarLeft">
-              <button type="button" class="toolbarButton" data-action="close">${msg('overlayClose')}</button>
-              <button type="button" class="toolbarButton" data-action="reload" aria-label="${msg('overlayReload')}" title="${msg('overlayReload')}">⟳</button>
-              <button type="button" class="toolbarButton" data-action="toggle-menu" aria-label="${msg('overlayMenu')}" aria-expanded="false">⋯</button>
-              <div class="toolbarMenu" data-open="0">
-                <button type="button" class="toolbarButton" data-action="login">${msg('overlayLogin')}</button>
-                <button type="button" class="toolbarButton" data-action="settings">${msg('overlaySettings')}</button>
-                <button type="button" class="toolbarButton" data-action="newtab">${msg('overlayNewTab')}</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    `;
+    shadowRoot.appendChild(createStyleNode(`
+      :host {
+        all: initial;
+      }
+      .nim-ui {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483646;
+        pointer-events: none;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #e5eefb;
+      }
+      .launcher {
+        position: fixed;
+        top: calc(env(safe-area-inset-top, 0px) + 12px);
+        left: calc(env(safe-area-inset-left, 0px) + 12px);
+        pointer-events: auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 36px;
+        padding: 0 12px;
+        border: 1px solid rgba(255,255,255,0.18);
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.72);
+        color: #f8fafc;
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        box-shadow: 0 12px 28px rgba(15, 23, 42, 0.35);
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 700;
+        transition: transform 120ms ease, background 120ms ease, opacity 120ms ease;
+      }
+      .launcher:hover {
+        background: rgba(15, 23, 42, 0.82);
+        transform: translateY(-1px);
+      }
+      .launcher[hidden] {
+        display: none;
+      }
+      .overlay {
+        position: fixed;
+        inset: 0;
+        display: none;
+        pointer-events: auto;
+        background: rgba(2, 6, 23, 0.58);
+        backdrop-filter: blur(2px);
+        -webkit-backdrop-filter: blur(2px);
+      }
+      .overlay[data-open="1"] {
+        display: block;
+      }
+      .frame {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        border: 0;
+        background: #050b17;
+      }
+      .toolbar {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 2;
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        pointer-events: auto;
+      }
+      .toolbarLeft {
+        position: relative;
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+      }
+      .toolbarButton,
+      .toolbarLink {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 36px;
+        padding: 0 12px;
+        border-radius: 999px;
+        border: 1px solid rgba(255,255,255,0.18);
+        background: rgba(15, 23, 42, 0.76);
+        color: #f8fafc;
+        text-decoration: none;
+        cursor: pointer;
+        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.25);
+        font-size: 12px;
+        font-weight: 700;
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        white-space: nowrap;
+      }
+      .toolbarButton:hover,
+      .toolbarLink:hover {
+        background: rgba(15, 23, 42, 0.88);
+      }
+      .toolbarButton[data-action="close"] {
+        min-width: 72px;
+      }
+      .toolbarButton[data-action="reload"],
+      .toolbarButton[data-action="toggle-menu"] {
+        min-width: 36px;
+        width: 36px;
+        padding: 0;
+        font-size: 16px;
+        line-height: 1;
+      }
+      .toolbarMenu {
+        position: absolute;
+        top: 44px;
+        right: 0;
+        display: none;
+        flex-direction: column;
+        gap: 8px;
+        width: max-content;
+        min-width: 112px;
+        padding: 8px;
+        border: 1px solid rgba(255,255,255,0.14);
+        border-radius: 16px;
+        background: rgba(15, 23, 42, 0.86);
+        box-shadow: 0 18px 36px rgba(15, 23, 42, 0.34);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+      }
+      .toolbarMenu[data-open="1"] {
+        display: flex;
+      }
+      .toolbarMenu .toolbarButton {
+        width: 100%;
+        justify-content: flex-start;
+      }
+      .toolbarTitle {
+        display: none;
+      }
+      .loading {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 1;
+        background: linear-gradient(180deg, rgba(2,6,23,0.42), rgba(2,6,23,0.2));
+        color: #e2e8f0;
+        font-size: 14px;
+        letter-spacing: 0.01em;
+        pointer-events: none;
+      }
+      .loading[hidden] {
+        display: none;
+      }
+    `));
+
+    const ui = createElement('div', { className: 'nim-ui' });
+    const launcherButton = createElement('button', {
+      className: 'launcher',
+      text: 'NIM',
+      attrs: {
+        type: 'button',
+        'aria-label': msg('openNim'),
+      },
+    });
+    const overlay = createElement('div', {
+      className: 'overlay',
+      attrs: {
+        'data-open': '0',
+        'aria-hidden': 'true',
+      },
+    });
+    const frame = createElement('iframe', {
+      className: 'frame',
+      attrs: {
+        referrerpolicy: 'strict-origin-when-cross-origin',
+        allow: 'storage-access',
+      },
+    });
+    const loading = createElement('div', {
+      className: 'loading',
+      text: msg('overlayLoading'),
+    });
+    const toolbar = createElement('div', { className: 'toolbar' });
+    const toolbarLeft = createElement('div', { className: 'toolbarLeft' });
+    const closeButton = createElement('button', {
+      className: 'toolbarButton',
+      text: msg('overlayClose'),
+      attrs: { type: 'button', 'data-action': 'close' },
+    });
+    const reloadButton = createElement('button', {
+      className: 'toolbarButton',
+      text: '⟳',
+      attrs: {
+        type: 'button',
+        'data-action': 'reload',
+        'aria-label': msg('overlayReload'),
+        title: msg('overlayReload'),
+      },
+    });
+    const toggleMenuButton = createElement('button', {
+      className: 'toolbarButton',
+      text: '⋯',
+      attrs: {
+        type: 'button',
+        'data-action': 'toggle-menu',
+        'aria-label': msg('overlayMenu'),
+        'aria-expanded': 'false',
+      },
+    });
+    const toolbarMenu = createElement('div', {
+      className: 'toolbarMenu',
+      attrs: { 'data-open': '0' },
+    });
+    const loginButton = createElement('button', {
+      className: 'toolbarButton',
+      text: msg('overlayLogin'),
+      attrs: { type: 'button', 'data-action': 'login' },
+    });
+    const settingsButton = createElement('button', {
+      className: 'toolbarButton',
+      text: msg('overlaySettings'),
+      attrs: { type: 'button', 'data-action': 'settings' },
+    });
+    const newTabButton = createElement('button', {
+      className: 'toolbarButton',
+      text: msg('overlayNewTab'),
+      attrs: { type: 'button', 'data-action': 'newtab' },
+    });
+
+    toolbarMenu.append(loginButton, settingsButton, newTabButton);
+    toolbarLeft.append(closeButton, reloadButton, toggleMenuButton, toolbarMenu);
+    toolbar.appendChild(toolbarLeft);
+    overlay.append(frame, loading, toolbar);
+    ui.append(launcherButton, overlay);
+    shadowRoot.appendChild(ui);
   }
 
   overlayState.host = host;
