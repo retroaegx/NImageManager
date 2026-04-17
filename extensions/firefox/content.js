@@ -1,8 +1,57 @@
 const ext = globalThis.browser ?? globalThis.chrome;
 
+function getExtApi() {
+  try {
+    return globalThis.browser ?? globalThis.chrome ?? ext ?? null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function hasRuntimeId(api) {
+  try {
+    return Boolean(api?.runtime?.id);
+  } catch (_) {
+    return false;
+  }
+}
+
+function isExtensionContextAlive() {
+  return hasRuntimeId(getExtApi());
+}
+
+function normalizeNodeText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+const FALLBACK_MESSAGES = {
+  transferToNim: 'Transfer to NIM',
+  transferring: 'Transferring...',
+  transferSuccess: 'Transferred',
+  openNim: 'Open NIM',
+  overlayLoading: 'Loading NIM...',
+  overlayClose: 'Close',
+  overlayReload: 'Reload',
+  overlayMenu: 'Menu',
+  overlayLogin: 'Login',
+  overlaySettings: 'Settings',
+  overlayNewTab: 'Open in new tab',
+  autoTransferCompactLabel: 'NIM Auto',
+  autoTransferCompactOnTitle: 'Disable NIM Auto transfer',
+  autoTransferCompactOffTitle: 'Enable NIM Auto transfer',
+  autoTransferEnabledToast: 'Auto transfer enabled',
+  autoTransferDisabledToast: 'Auto transfer disabled',
+  error_UNKNOWN: 'Unexpected error',
+};
+
 function msg(key, substitutions) {
-  const value = ext.i18n?.getMessage(key, substitutions);
-  return value || key;
+  if (!isExtensionContextAlive()) return FALLBACK_MESSAGES[key] || key;
+  try {
+    const api = getExtApi();
+    const value = api?.i18n?.getMessage?.(key, substitutions);
+    if (value) return value;
+  } catch (_) {}
+  return FALLBACK_MESSAGES[key] || key;
 }
 
 function errorText(code, fallbackKey = 'error_UNKNOWN') {
@@ -21,6 +70,7 @@ const BRIDGE_RESPONSE_TYPE = 'NIM_TRANSFER_FETCH_BLOB_RESPONSE';
 const BRIDGE_READY_TYPE = 'NIM_TRANSFER_BRIDGE_READY';
 const BRIDGE_SCRIPT_ID = 'nim-transfer-page-bridge';
 const OVERLAY_HOST_ID = 'nim-overlay-extension-host';
+const AUTO_TRANSFER_TOPBAR_HOST_ID = 'nim-auto-transfer-topbar-host';
 const CONFIG_STORAGE_KEYS = {
   showNovelAiMenu: 'nim.show_novelai_menu',
   autoTransfer: 'nim.auto_transfer',
@@ -39,16 +89,20 @@ function warn(...args) {
 
 function messageRuntime(payload) {
   return new Promise((resolve) => {
+    const api = getExtApi();
+    if (!api || !hasRuntimeId(api)) {
+      resolve({ ok: false, code: 'RUNTIME_ERROR' });
+      return;
+    }
     try {
-      ext.runtime.sendMessage(payload, (response) => {
-        const runtimeError = ext.runtime?.lastError;
-        if (runtimeError) {
+      api.runtime.sendMessage(payload, (response) => {
+        if (api.runtime?.lastError) {
           resolve({ ok: false, code: 'RUNTIME_ERROR' });
           return;
         }
         resolve(response);
       });
-    } catch (error) {
+    } catch (_) {
       resolve({ ok: false, code: 'RUNTIME_ERROR' });
     }
   });
@@ -134,14 +188,14 @@ function getSeedButton(toolbar) {
   if (!(toolbar instanceof HTMLElement)) return null;
   const buttons = Array.from(toolbar.querySelectorAll('button'));
   return buttons.find((button) => {
-    const text = (button.textContent || '').replace(/\s+/g, ' ').trim();
+    const text = normalizeNodeText(button.textContent);
     return /\b\d{6,}\b/.test(text) && /(シード値をコピー|Copy seed)/i.test(text);
-  }) || buttons.find((button) => /\b\d{6,}\b/.test((button.textContent || '').replace(/\s+/g, ' ').trim())) || null;
+  }) || buttons.find((button) => /\b\d{6,}\b/.test(normalizeNodeText(button.textContent))) || null;
 }
 
 function inferSeedText() {
   const seedButton = getSeedButton(getBottomToolbar());
-  const text = String(seedButton?.textContent || '').replace(/\s+/g, ' ').trim();
+  const text = normalizeNodeText(seedButton?.textContent);
   const match = text.match(/\b(\d{6,})\b/);
   return match ? match[1] : '';
 }
@@ -155,9 +209,17 @@ function inferFilenameFromPage(mimeType) {
 
 function injectBridgeScript() {
   if (document.getElementById(BRIDGE_SCRIPT_ID)) return;
+  const api = getExtApi();
+  let scriptUrl = '';
+  try {
+    scriptUrl = String(api?.runtime?.getURL?.('page-bridge.js') || '');
+  } catch (_) {
+    scriptUrl = '';
+  }
+  if (!scriptUrl) return;
   const script = document.createElement('script');
   script.id = BRIDGE_SCRIPT_ID;
-  script.src = ext.runtime.getURL('page-bridge.js');
+  script.src = scriptUrl;
   script.async = false;
   (document.head || document.documentElement).appendChild(script);
 }
@@ -351,29 +413,27 @@ async function handleTransferClick(button) {
   await transferCurrentImage({ button, showProgressToast: true, showSuccessToast: true });
 }
 
-function createOverlayState() {
-  return {
-    host: null,
-    shadowRoot: null,
-    launcherButton: null,
-    overlay: null,
-    overlayToolbar: null,
-    overlayMenuButton: null,
-    overlayMenu: null,
-    overlayTitle: null,
-    iframe: null,
-    loading: null,
-    currentUrl: '',
-    currentOrigin: '',
-    loginUrl: '',
-    autoLoginHintShown: false,
-    isMenuOpen: false,
-    isOpen: false,
-    isReady: false,
-  };
-}
-
-const overlayState = createOverlayState();
+const overlayState = {
+  host: null,
+  shadowRoot: null,
+  launcherButton: null,
+  autoTransferTopbarHost: null,
+  autoTransferToggleLabel: null,
+  autoTransferToggleButton: null,
+  overlay: null,
+  overlayMenuButton: null,
+  overlayMenu: null,
+  overlayTitle: null,
+  iframe: null,
+  loading: null,
+  currentUrl: '',
+  currentOrigin: '',
+  loginUrl: '',
+  autoLoginHintShown: false,
+  isMenuOpen: false,
+  isOpen: false,
+  isReady: false,
+};
 
 const extensionConfig = {
   showNovelAiMenu: true,
@@ -397,7 +457,8 @@ function rememberAttemptedSignature(signature) {
 function applyExtensionConfig(config) {
   extensionConfig.showNovelAiMenu = config?.showNovelAiMenu !== false;
   extensionConfig.autoTransfer = config?.autoTransfer === true;
-  updateLauncherVisibility();
+  updateFloatingControlsVisibility();
+  updateAutoTransferToggleButton();
 }
 
 async function refreshExtensionConfig() {
@@ -408,9 +469,446 @@ async function refreshExtensionConfig() {
   return config;
 }
 
-function updateLauncherVisibility() {
-  if (!overlayState.launcherButton) return;
-  overlayState.launcherButton.hidden = overlayState.isOpen || !extensionConfig.showNovelAiMenu;
+function isLikelyImageGenerationPage() {
+  if (/(^|\/)(image|image-generation)(?:\/|$)/i.test(String(location.pathname || ''))) return true;
+  if (/Image Generation|画像生成/i.test(String(document.title || ''))) return true;
+  if (document.querySelector(MAIN_IMAGE_SELECTOR) || document.querySelector(MAIN_CANVAS_SELECTOR)) return true;
+  if (getBottomToolbar()) return true;
+  return false;
+}
+
+function isElementVisibleForAnchoring(element) {
+  if (!(element instanceof HTMLElement)) return false;
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return false;
+  if (rect.bottom <= 0 || rect.top >= window.innerHeight) return false;
+  const style = window.getComputedStyle(element);
+  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+  return true;
+}
+
+
+function scoreTopbarMenuButton(button) {
+  if (!(button instanceof HTMLButtonElement)) return -1;
+  if (button.id === AUTO_TRANSFER_TOPBAR_HOST_ID || button.closest(`#${AUTO_TRANSFER_TOPBAR_HOST_ID}`)) return -1;
+  if (button.hasAttribute(BUTTON_FLAG)) return -1;
+  if (!isElementVisibleForAnchoring(button)) return -1;
+
+  const rect = button.getBoundingClientRect();
+  if (rect.top > 160) return -1;
+
+  const text = normalizeNodeText(button.textContent);
+  const aria = String(button.getAttribute('aria-label') || button.title || '').trim();
+
+  let score = 0;
+  if (/menu|メニュー/i.test(aria)) score += 800;
+  if (/^(☰|≡|⋯|…)$/.test(text)) score += 700;
+  if (rect.width >= 24 && rect.width <= 84 && rect.height >= 24 && rect.height <= 84) score += 120;
+  score += Math.max(0, 400 - rect.top * 3);
+  score += Math.max(0, 600 - (window.innerWidth - rect.right));
+  return score;
+}
+
+function findBestButton(container, scorer) {
+  if (!(container instanceof HTMLElement)) return null;
+
+  let best = null;
+  let bestScore = -1;
+  for (const button of Array.from(container.querySelectorAll('button'))) {
+    const score = scorer(button, container);
+    if (score > bestScore) {
+      best = button;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+function findTopbarMenuButtonInContainer(container) {
+  return findBestButton(container, (button) => scoreTopbarMenuButton(button));
+}
+
+function isInlineRowContainer(element) {
+  if (!(element instanceof HTMLElement)) return false;
+  const style = window.getComputedStyle(element);
+  if (!style.display.includes('flex')) return false;
+  if (style.flexDirection.startsWith('column')) return false;
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0 || rect.top > 180) return false;
+  return true;
+}
+
+const topbarAnchorState = {
+  navbar: null,
+  row: null,
+  container: null,
+  anchor: null,
+  menuButton: null,
+  plusButton: null,
+};
+
+function unwrapDirectChildInContainer(node, container) {
+  let current = node instanceof HTMLElement ? node : null;
+  while (current && current.parentElement && current.parentElement !== container) {
+    current = current.parentElement;
+  }
+  return current instanceof HTMLElement ? current : null;
+}
+
+function scoreTopbarPlusButton(button, rowContainer) {
+  if (!(button instanceof HTMLButtonElement)) return -1;
+  if (button.id === AUTO_TRANSFER_TOPBAR_HOST_ID || button.closest(`#${AUTO_TRANSFER_TOPBAR_HOST_ID}`)) return -1;
+  if (button.hasAttribute(BUTTON_FLAG)) return -1;
+  if (!isElementVisibleForAnchoring(button)) return -1;
+
+  const rect = button.getBoundingClientRect();
+  if (rect.top > 160) return -1;
+
+  const text = normalizeNodeText(button.textContent);
+  const aria = String(button.getAttribute('aria-label') || button.title || '').trim();
+  const source = `${text} ${aria}`.trim();
+
+  let score = 0;
+  if (/^\+$/.test(text)) score += 2500;
+  if (/add|new|create|another|generate|追加|作成|新規|生成/i.test(source)) score += 500;
+  if (button.querySelector('svg')) score += 60;
+  if (rect.width >= 24 && rect.width <= 96 && rect.height >= 24 && rect.height <= 96) score += 180;
+  score += Math.max(0, 600 - rect.top * 3);
+
+  const directChild = rowContainer instanceof HTMLElement ? unwrapDirectChildInContainer(button, rowContainer) : null;
+  const directRect = directChild?.getBoundingClientRect?.() || rect;
+  score += Math.max(0, 800 - directRect.left * 1.5);
+  return score;
+}
+
+function findTopbarPlusButtonInContainer(container) {
+  return findBestButton(container, scoreTopbarPlusButton);
+}
+
+function getStableTopbarTargetSnapshot() {
+  const { navbar, row, container, anchor, menuButton, plusButton } = topbarAnchorState;
+  if (
+    navbar instanceof HTMLElement && navbar.isConnected &&
+    row instanceof HTMLElement && row.isConnected &&
+    container instanceof HTMLElement && container.isConnected &&
+    anchor instanceof HTMLElement && anchor.isConnected &&
+    plusButton instanceof HTMLButtonElement && plusButton.isConnected
+  ) {
+    return { navbar, row, container, anchor, menuButton, plusButton };
+  }
+  return null;
+}
+
+function getTopbarRowFromNavbar(navbar) {
+  if (!(navbar instanceof HTMLElement)) return null;
+  const children = Array.from(navbar.children).filter((child) => child instanceof HTMLElement);
+  for (const child of children) {
+    if (isInlineRowContainer(child)) return child;
+  }
+  return isInlineRowContainer(navbar) ? navbar : null;
+}
+
+function findTopbarNavbarRoot() {
+  const explicit = Array.from(document.querySelectorAll('.image-gen-navbar')).filter((node) => node instanceof HTMLElement && isElementVisibleForAnchoring(node));
+  if (explicit.length) {
+    explicit.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+    return explicit[0];
+  }
+
+  const row = findTopbarRowContainerFallback();
+  return row instanceof HTMLElement ? row : null;
+}
+
+function findTopbarRowContainerFallback() {
+  for (const button of Array.from(document.querySelectorAll('button'))) {
+    const score = scoreTopbarPlusButton(button, null);
+    if (score < 0) continue;
+    for (let node = button.parentElement; node && node !== document.body; node = node.parentElement) {
+      if (isInlineRowContainer(node)) return node;
+    }
+  }
+  return null;
+}
+
+function getInsertionContainerForPlusButton(plusButton, row) {
+  if (!(plusButton instanceof HTMLButtonElement) || !(row instanceof HTMLElement)) return null;
+  const parent = plusButton.parentElement;
+  if (
+    parent instanceof HTMLElement &&
+    parent !== row &&
+    parent.parentElement instanceof HTMLElement &&
+    row.contains(parent) &&
+    isInlineRowContainer(parent)
+  ) {
+    return parent;
+  }
+  return row;
+}
+
+function findTopbarInsertionTarget() {
+  const navbar = findTopbarNavbarRoot();
+  if (!(navbar instanceof HTMLElement)) return getStableTopbarTargetSnapshot();
+
+  const row = getTopbarRowFromNavbar(navbar);
+  if (!(row instanceof HTMLElement)) return getStableTopbarTargetSnapshot();
+
+  const plusButton = findTopbarPlusButtonInContainer(row);
+  if (!(plusButton instanceof HTMLButtonElement)) return getStableTopbarTargetSnapshot();
+
+  const menuButton = findTopbarMenuButtonInContainer(row);
+  const container = getInsertionContainerForPlusButton(plusButton, row);
+  if (!(container instanceof HTMLElement)) return getStableTopbarTargetSnapshot();
+
+  const anchor = container === row
+    ? unwrapDirectChildInContainer(plusButton, row)
+    : plusButton;
+  if (!(anchor instanceof HTMLElement)) return getStableTopbarTargetSnapshot();
+
+  topbarAnchorState.navbar = navbar;
+  topbarAnchorState.row = row;
+  topbarAnchorState.container = container;
+  topbarAnchorState.anchor = anchor;
+  topbarAnchorState.menuButton = menuButton;
+  topbarAnchorState.plusButton = plusButton;
+  return { navbar, row, container, anchor, menuButton, plusButton };
+}
+
+function createAutoTransferTopbarHost() {
+  const host = document.createElement('div');
+  host.id = AUTO_TRANSFER_TOPBAR_HOST_ID;
+  Object.assign(host.style, {
+    display: 'inline-flex',
+    alignItems: 'center',
+    flex: '0 0 auto',
+    pointerEvents: 'auto',
+    margin: '0 0 0 8px',
+    whiteSpace: 'nowrap',
+  });
+
+  const shadowRoot = host.attachShadow({ mode: 'open' });
+  shadowRoot.innerHTML = `
+    <style>
+      :host {
+        display: inline-flex;
+        align-items: center;
+        flex: 0 0 auto;
+        white-space: nowrap;
+        pointer-events: auto;
+      }
+      .autoTransferWrap {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .autoTransferLabel {
+        color: #e2e8f0;
+        font-size: 11px;
+        font-weight: 800;
+        line-height: 1;
+        white-space: nowrap;
+        user-select: none;
+        text-shadow: 0 1px 1px rgba(0,0,0,0.28);
+      }
+      .autoTransferToggle {
+        pointer-events: auto;
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        justify-content: flex-start;
+        width: 52px;
+        height: 30px;
+        padding: 0;
+        border: 1px solid rgba(148, 163, 184, 0.34);
+        border-radius: 999px;
+        background: rgba(30, 41, 59, 0.82);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.24);
+        cursor: pointer;
+        transition: background 140ms ease, border-color 140ms ease, opacity 120ms ease, transform 120ms ease;
+      }
+      .autoTransferToggle:hover { transform: translateY(-1px); }
+      .autoTransferToggle[data-state="1"] {
+        border-color: rgba(125, 211, 252, 0.42);
+        background: rgba(8, 47, 73, 0.88);
+      }
+      .autoTransferToggle[data-busy="1"] {
+        opacity: 0.72;
+        cursor: wait;
+      }
+      .autoTransferToggle:focus-visible {
+        outline: 2px solid rgba(125, 211, 252, 0.65);
+        outline-offset: 2px;
+      }
+      .autoTransferThumb {
+        position: absolute;
+        top: 3px;
+        left: 3px;
+        width: 22px;
+        height: 22px;
+        border-radius: 50%;
+        background: #e5e7eb;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
+        transition: transform 140ms ease, background 140ms ease;
+      }
+      .autoTransferToggle[data-state="1"] .autoTransferThumb {
+        transform: translateX(22px);
+        background: #7dd3fc;
+      }
+      :host([data-mode="compact"]) .autoTransferLabel {
+        font-size: 10px;
+      }
+      :host([data-mode="toggleOnly"]) .autoTransferLabel {
+        display: none;
+      }
+      :host([data-mode="toggleOnly"]) .autoTransferWrap {
+        gap: 0;
+      }
+      :host([data-mode="toggleOnly"]) .autoTransferToggle {
+        width: 46px;
+        height: 28px;
+      }
+      :host([data-mode="toggleOnly"]) .autoTransferThumb {
+        top: 3px;
+        left: 3px;
+        width: 20px;
+        height: 20px;
+      }
+      :host([data-mode="toggleOnly"]) .autoTransferToggle[data-state="1"] .autoTransferThumb {
+        transform: translateX(18px);
+      }
+    </style>
+    <div class="autoTransferWrap">
+      <span class="autoTransferLabel"></span>
+      <button type="button" class="autoTransferToggle" data-state="0" data-busy="0" aria-pressed="false">
+        <span class="autoTransferThumb"></span>
+      </button>
+    </div>
+  `;
+
+  return host;
+}
+
+function ensureAutoTransferTopbarHost() {
+  let host = document.getElementById(AUTO_TRANSFER_TOPBAR_HOST_ID);
+  if (!host) {
+    host = createAutoTransferTopbarHost();
+  }
+
+  const target = findTopbarInsertionTarget();
+  if (target?.container && target.anchor) {
+    const afterNode = target.anchor.nextSibling;
+    if (host.parentElement !== target.container || host.previousSibling !== target.anchor) {
+      target.container.insertBefore(host, afterNode || null);
+    }
+  }
+
+  overlayState.autoTransferTopbarHost = host;
+  overlayState.autoTransferToggleLabel = host.shadowRoot?.querySelector('.autoTransferLabel') || null;
+  overlayState.autoTransferToggleButton = host.shadowRoot?.querySelector('.autoTransferToggle') || null;
+  if (overlayState.autoTransferToggleButton && !overlayState.autoTransferToggleButton.dataset.bound) {
+    overlayState.autoTransferToggleButton.dataset.bound = '1';
+    overlayState.autoTransferToggleButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleAutoTransferFromPage().catch((error) => {
+        warn('auto transfer toggle failed', error);
+      });
+    });
+  }
+  return host;
+}
+
+function positionAutoTransferTopbarHost() {
+  const host = ensureAutoTransferTopbarHost();
+  const target = findTopbarInsertionTarget();
+  const isVisible = isLikelyImageGenerationPage() && !overlayState.isOpen;
+
+  if (!isVisible) {
+    host.hidden = true;
+    return host;
+  }
+
+  if (!target?.container || !target?.anchor) {
+    if (host.isConnected) {
+      host.hidden = false;
+      host.dataset.mode = 'toggleOnly';
+      host.style.margin = '0 0 0 8px';
+      return host;
+    }
+    host.hidden = true;
+    return host;
+  }
+
+  const anchorRect = (target.plusButton || target.anchor).getBoundingClientRect();
+  const rowRect = target.row?.getBoundingClientRect?.() || target.container.getBoundingClientRect();
+  const menuRect = target.menuButton?.getBoundingClientRect?.();
+  const rightLimit = menuRect ? menuRect.left : rowRect.right;
+  const availableWidth = Math.max(0, rightLimit - anchorRect.right - 12);
+
+  host.hidden = false;
+  const desktopWide = window.innerWidth >= 1100;
+  const desktop = window.innerWidth >= 900;
+  host.dataset.mode = 'compact';
+  if (availableWidth >= 168 || desktopWide) host.dataset.mode = 'full';
+  else if (availableWidth >= 108 || desktop) host.dataset.mode = 'compact';
+  else host.dataset.mode = 'toggleOnly';
+  host.style.margin = host.dataset.mode === 'toggleOnly' ? '0 0 0 6px' : '0 0 0 8px';
+  return host;
+}
+
+function updateFloatingControlsVisibility() {
+  const isVisible = isLikelyImageGenerationPage() && !overlayState.isOpen;
+  if (overlayState.launcherButton) {
+    overlayState.launcherButton.hidden = !isVisible || !extensionConfig.showNovelAiMenu;
+  }
+  const host = positionAutoTransferTopbarHost();
+  if (host && !isVisible) {
+    host.hidden = true;
+  }
+}
+
+function updateAutoTransferToggleButton() {
+  positionAutoTransferTopbarHost();
+  const button = overlayState.autoTransferToggleButton;
+  if (!(button instanceof HTMLButtonElement)) return;
+  const enabled = extensionConfig.autoTransfer === true;
+  if (overlayState.autoTransferToggleLabel instanceof HTMLElement) {
+    overlayState.autoTransferToggleLabel.textContent = msg('autoTransferCompactLabel');
+  }
+  button.dataset.state = enabled ? '1' : '0';
+  const title = enabled ? msg('autoTransferCompactOnTitle') : msg('autoTransferCompactOffTitle');
+  button.title = title;
+  button.setAttribute('aria-label', title);
+  button.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+}
+
+async function toggleAutoTransferFromPage() {
+  ensureAutoTransferTopbarHost();
+  const button = overlayState.autoTransferToggleButton;
+  if (!(button instanceof HTMLButtonElement)) return;
+  if (button.dataset.busy === '1') return;
+  const nextValue = !extensionConfig.autoTransfer;
+  button.dataset.busy = '1';
+  button.disabled = true;
+  try {
+    const response = await messageRuntime({ type: 'nim-save-config', autoTransfer: nextValue });
+    if (!response?.ok) throw new Error(errorText(response?.code || 'SAVE_FAILED'));
+    applyExtensionConfig(response.config || { autoTransfer: nextValue, showNovelAiMenu: extensionConfig.showNovelAiMenu });
+    if (nextValue) {
+      scheduleAutoTransfer();
+      showToast(msg('autoTransferEnabledToast'), 'success');
+    } else {
+      showToast(msg('autoTransferDisabledToast'), 'info');
+    }
+  } catch (error) {
+    warn('auto transfer toggle save failed', error);
+    showToast(String(error?.message || error || errorText('SAVE_FAILED')), 'error');
+    updateAutoTransferToggleButton();
+  } finally {
+    button.dataset.busy = '0';
+    button.disabled = false;
+  }
 }
 
 function getCurrentImageSignature() {
@@ -528,8 +1026,8 @@ function ensureOverlayHost() {
         }
         .launcher {
           position: fixed;
-          top: 12px;
-          left: 12px;
+          top: calc(env(safe-area-inset-top, 0px) + 12px);
+          left: calc(env(safe-area-inset-left, 0px) + 12px);
           pointer-events: auto;
           display: inline-flex;
           align-items: center;
@@ -673,7 +1171,7 @@ function ensureOverlayHost() {
       <div class="nim-ui">
         <button type="button" class="launcher" aria-label="${msg('openNim')}">NIM</button>
         <div class="overlay" data-open="0" aria-hidden="true">
-          <iframe class="frame" referrerpolicy="strict-origin-when-cross-origin"></iframe>
+          <iframe class="frame" referrerpolicy="strict-origin-when-cross-origin" allow="storage-access"></iframe>
           <div class="loading">${msg('overlayLoading')}</div>
           <div class="toolbar">
             <div class="toolbarLeft">
@@ -695,8 +1193,9 @@ function ensureOverlayHost() {
   overlayState.host = host;
   overlayState.shadowRoot = shadowRoot;
   overlayState.launcherButton = shadowRoot.querySelector('.launcher');
+  overlayState.autoTransferToggleLabel = shadowRoot.querySelector('.autoTransferLabel');
+  overlayState.autoTransferToggleButton = shadowRoot.querySelector('.autoTransferToggle');
   overlayState.overlay = shadowRoot.querySelector('.overlay');
-  overlayState.overlayToolbar = shadowRoot.querySelector('.toolbar');
   overlayState.overlayMenuButton = shadowRoot.querySelector('[data-action="toggle-menu"]');
   overlayState.overlayMenu = shadowRoot.querySelector('.toolbarMenu');
   overlayState.overlayTitle = shadowRoot.querySelector('.toolbarTitle');
@@ -711,6 +1210,16 @@ function ensureOverlayHost() {
     if (overlayState.overlayMenuButton) {
       overlayState.overlayMenuButton.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
     }
+  }
+
+  if (overlayState.autoTransferToggleButton && !overlayState.autoTransferToggleButton.dataset.bound) {
+    overlayState.autoTransferToggleButton.dataset.bound = '1';
+    overlayState.autoTransferToggleButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      toggleAutoTransferFromPage().catch((error) => {
+        warn('auto transfer toggle failed', error);
+      });
+    });
   }
 
   if (!overlayState.launcherButton.dataset.bound) {
@@ -828,6 +1337,8 @@ function ensureOverlayHost() {
   }
 
   overlayState.isReady = true;
+  updateAutoTransferToggleButton();
+  updateFloatingControlsVisibility();
   return overlayState;
 }
 
@@ -843,7 +1354,9 @@ function setOverlayOpen(isOpen) {
     overlayState.overlayMenuButton?.setAttribute('aria-expanded', 'false');
   }
   overlayState.overlay?.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
-  updateLauncherVisibility();
+  updateFloatingControlsVisibility();
+  updateFloatingControlsVisibility();
+  updateAutoTransferToggleButton();
 }
 
 function closeOverlay() {
@@ -886,18 +1399,6 @@ async function openOverlay() {
     return;
   }
 
-  const session = await messageRuntime({ type: 'nim-check-session' }).catch(() => null);
-  if (!session?.ok) {
-    if (String(session?.code || '') === 'AUTH_REQUIRED') {
-      showToast(msg('firefoxOverlayLoginRequired'), 'error');
-      await messageRuntime({ type: 'nim-open-options' }).catch(() => {});
-      return;
-    }
-    if (session?.message) {
-      throw new Error(String(session.message));
-    }
-  }
-
   let nextOrigin = '';
   try {
     nextOrigin = new URL(overlayUrl).origin;
@@ -924,10 +1425,34 @@ async function openOverlay() {
 
 function installOverlay() {
   ensureOverlayHost();
-  updateLauncherVisibility();
+  updateFloatingControlsVisibility();
+  updateAutoTransferToggleButton();
+}
+
+let floatingControlsSyncInstalled = false;
+let floatingControlsSyncFrame = 0;
+
+function scheduleFloatingControlsSync() {
+  if (floatingControlsSyncFrame) return;
+  floatingControlsSyncFrame = window.requestAnimationFrame(() => {
+    floatingControlsSyncFrame = 0;
+    try {
+      updateFloatingControlsVisibility();
+    } catch (_) {}
+  });
+}
+
+function installFloatingControlsSync() {
+  if (floatingControlsSyncInstalled) return;
+  floatingControlsSyncInstalled = true;
+
+  window.addEventListener('resize', scheduleFloatingControlsSync, { passive: true });
+  window.addEventListener('orientationchange', scheduleFloatingControlsSync, { passive: true });
+  window.addEventListener('scroll', scheduleFloatingControlsSync, { passive: true, capture: true });
 }
 
 function installObservers() {
+  installFloatingControlsSync();
   injectBridgeScript();
   installOverlay();
   refreshExtensionConfig().catch(() => {});
@@ -942,17 +1467,21 @@ function installObservers() {
     const status = `${result.ok ? 'ok' : 'ng'}:${result.reason}`;
     if (status === lastStatus) return;
     lastStatus = status;
-    if (result.reason === 'attached') {
-      log('transfer button attached to display-grid-bottom');
-      return;
-    }
-    if (result.reason === 'existing') return;
-    if (result.reason === 'no-seed-button') {
-      warn('seed button not found in display-grid-bottom');
-      return;
-    }
-    if (result.reason === 'no-actions-group') {
-      warn('seed button parent not found');
+
+    switch (result.reason) {
+      case 'attached':
+        log('transfer button attached to display-grid-bottom');
+        return;
+      case 'existing':
+        return;
+      case 'no-seed-button':
+        warn('seed button not found in display-grid-bottom');
+        return;
+      case 'no-actions-group':
+        warn('seed button parent not found');
+        return;
+      default:
+        return;
     }
   };
 
@@ -977,9 +1506,10 @@ function installObservers() {
       }
       retryCount = 0;
       installOverlay();
+      scheduleFloatingControlsSync();
       runAttach();
       scheduleAutoTransfer();
-    }, 50);
+    }, 120);
   };
 
   const observer = new MutationObserver(() => {
@@ -995,8 +1525,9 @@ function installObservers() {
     }
   }, true);
 
-  if (ext.storage?.onChanged) {
-    ext.storage.onChanged.addListener((changes, areaName) => {
+  const storageApi = getExtApi()?.storage;
+  if (storageApi?.onChanged) {
+    storageApi.onChanged.addListener((changes, areaName) => {
       if (areaName !== 'local') return;
       if (!changes[CONFIG_STORAGE_KEYS.showNovelAiMenu] && !changes[CONFIG_STORAGE_KEYS.autoTransfer]) return;
       refreshExtensionConfig().catch(() => {});

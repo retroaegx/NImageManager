@@ -224,28 +224,25 @@
   "error_UNEXPECTED_ERROR": {
     "message": "An unexpected error occurred."
   },
-  "behaviorSection": {
-    "message": "Behavior"
+  "autoTransferCompactLabel": {
+    "message": "NIM Auto-forward"
   },
-  "showNovelAiMenuLabel": {
-    "message": "Show NIM menu on NovelAI"
+  "toggleOnShort": {
+    "message": "ON"
   },
-  "showNovelAiMenuHelp": {
-    "message": "When enabled, show the NIM launcher button at the top left of NovelAI."
+  "toggleOffShort": {
+    "message": "OFF"
   },
-  "autoTransferLabel": {
-    "message": "Auto transfer"
+  "autoTransferCompactOnTitle": {
+    "message": "NIM auto transfer is ON. Click OFF to disable."
   },
-  "autoTransferHelp": {
-    "message": "When enabled, generated images are transferred to NIM automatically without pressing the button."
+  "autoTransferCompactOffTitle": {
+    "message": "NIM auto transfer is OFF. Click ON to enable."
   },
-  "behaviorAutoSaveNote": {
-    "message": "Changes in this section are saved immediately."
+  "autoTransferEnabledToast": {
+    "message": "NIM auto transfer enabled."
   },
-  "status_saving": {
-    "message": "Saving..."
-  },
-  "status_ready_to_save": {
-    "message": "Ready"
+  "autoTransferDisabledToast": {
+    "message": "NIM auto transfer disabled."
   }
 }

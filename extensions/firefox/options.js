@@ -47,7 +47,7 @@ function setPill(id, textKey, kind) {
 }
 
 function setBehaviorControlsDisabled(disabled) {
-  ['showNovelAiMenu', 'autoTransfer'].forEach((id) => {
+  ['showNovelAiMenu'].forEach((id) => {
     const input = $(id);
     const label = input?.closest('.toggleField');
     if (input) input.disabled = disabled;
@@ -82,7 +82,6 @@ function showBehaviorFeedback(textKey, kind, { autoHideMs = 0 } = {}) {
 function applyConfig(config) {
   $('baseUrl').value = config.baseUrl || '';
   $('showNovelAiMenu').checked = config.showNovelAiMenu !== false;
-  $('autoTransfer').checked = config.autoTransfer === true;
   setPill('saveState', config.baseUrl ? 'status_saved' : 'status_not_saved', config.baseUrl ? 'success' : 'idle');
   setPill('overlayState', config.baseUrl ? 'status_ready' : 'status_not_configured', config.baseUrl ? 'success' : 'idle');
   setPill('loginState', config.token ? 'status_logged_in' : 'status_not_logged_in', config.token ? 'success' : 'idle');
@@ -105,7 +104,6 @@ async function saveConfig() {
     type: 'nim-save-config',
     baseUrl: $('baseUrl').value,
     showNovelAiMenu: $('showNovelAiMenu').checked,
-    autoTransfer: $('autoTransfer').checked,
   });
   if (!response?.ok) {
     setPill('saveState', 'status_save_failed', 'error');
@@ -122,7 +120,6 @@ async function saveBehaviorConfig(previous) {
   const response = await runtimeMessage({
     type: 'nim-save-config',
     showNovelAiMenu: $('showNovelAiMenu').checked,
-    autoTransfer: $('autoTransfer').checked,
   });
   if (token !== behaviorSaveToken) {
     return;
@@ -130,7 +127,6 @@ async function saveBehaviorConfig(previous) {
   behaviorSaving = false;
   if (!response?.ok) {
     $('showNovelAiMenu').checked = previous.showNovelAiMenu;
-    $('autoTransfer').checked = previous.autoTransfer;
     setBehaviorControlsDisabled(false);
     showBehaviorFeedback('status_save_failed', 'error', { autoHideMs: 3000 });
     throw new Error(response?.code || 'RUNTIME_ERROR');
@@ -144,12 +140,9 @@ function bindBehaviorToggle(id) {
     if (behaviorSaving) return;
     const previous = {
       showNovelAiMenu: !$('showNovelAiMenu').checked,
-      autoTransfer: !$('autoTransfer').checked,
     };
     if (id === 'showNovelAiMenu') previous.showNovelAiMenu = !$('showNovelAiMenu').checked;
     else previous.showNovelAiMenu = $('showNovelAiMenu').checked;
-    if (id === 'autoTransfer') previous.autoTransfer = !$('autoTransfer').checked;
-    else previous.autoTransfer = $('autoTransfer').checked;
     try {
       await saveBehaviorConfig(previous);
     } catch (_) {}
@@ -233,7 +226,6 @@ document.addEventListener('DOMContentLoaded', () => {
   bindAction('openLoginPage', openLoginPage, () => setPill('loginState', 'status_check_failed', 'error'));
   bindAction('openOverlayPage', openOverlayPage, () => setPill('overlayState', 'status_check_failed', 'error'));
   bindBehaviorToggle('showNovelAiMenu');
-  bindBehaviorToggle('autoTransfer');
 
   loadConfig().catch(() => {
     setPill('saveState', 'status_load_failed', 'error');

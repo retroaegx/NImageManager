@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "NIM Transfer",
-  "version": "0.2.3",
-  "description": "NovelAI 上で NIM 転送とオーバーレイ表示を行います。",
+  "name": "__MSG_extName__",
+  "version": "0.2.23",
+  "description": "__MSG_extDescription__",
   "permissions": [
     "storage"
   ],
@@ -26,7 +26,7 @@
   ],
   "options_page": "options.html",
   "action": {
-    "default_title": "NIM Transfer"
+    "default_title": "__MSG_extActionTitle__"
   },
   "web_accessible_resources": [
     {
@@ -38,5 +38,6 @@
         "https://*.novelai.net/*"
       ]
     }
-  ]
+  ],
+  "default_locale": "en"
 }

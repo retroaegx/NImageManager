@@ -224,28 +224,25 @@
   "error_UNEXPECTED_ERROR": {
     "message": "予期しないエラーが発生しました。"
   },
-  "behaviorSection": {
-    "message": "動作設定"
+  "autoTransferCompactLabel": {
+    "message": "NIM自動転送"
   },
-  "showNovelAiMenuLabel": {
-    "message": "NovelAI に NIM メニューを表示する"
+  "toggleOnShort": {
+    "message": "ON"
   },
-  "showNovelAiMenuHelp": {
-    "message": "有効時のみ、NovelAI の左上に NIM 起動ボタンを表示します。"
+  "toggleOffShort": {
+    "message": "OFF"
   },
-  "autoTransferLabel": {
-    "message": "自動転送"
+  "autoTransferCompactOnTitle": {
+    "message": "NIM自動転送はONです。OFFで無効化します。"
   },
-  "autoTransferHelp": {
-    "message": "有効時は、生成画像をボタンを押さずに自動で NIM へ転送します。"
+  "autoTransferCompactOffTitle": {
+    "message": "NIM自動転送はOFFです。ONで有効化します。"
   },
-  "behaviorAutoSaveNote": {
-    "message": "このセクションの変更は切り替え時にすぐ保存されます。"
+  "autoTransferEnabledToast": {
+    "message": "NIM自動転送を有効にしました。"
   },
-  "status_saving": {
-    "message": "保存中…"
-  },
-  "status_ready_to_save": {
-    "message": "準備完了"
+  "autoTransferDisabledToast": {
+    "message": "NIM自動転送を無効にしました。"
   }
 }

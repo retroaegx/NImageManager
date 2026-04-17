@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NIM Extension Settings</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <main class="page">
+    <section class="card">
+      <h1>NIM Extension Settings</h1>
+      <p class="note">NovelAI 上の拡張から、NIM 転送とオーバーレイ表示の両方で使う設定です。</p>
+
+      <label class="field">
+        <span>Domain</span>
+        <input id="baseUrl" type="text" placeholder="https://nim.example.com">
+        <small>NIM のドメイン。API パスは不要です。</small>
+      </label>
+
+      <div class="row">
+        <button id="saveConfig" type="button">設定を保存</button>
+        <button id="checkSession" type="button" class="secondary">セッション確認</button>
+        <button id="openLoginPage" type="button" class="secondary">ログインページを開く</button>
+        <button id="openOverlayPage" type="button" class="secondary">NIM を開く</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Login</h2>
+      <label class="field">
+        <span>Username</span>
+        <input id="username" type="text" autocomplete="username">
+      </label>
+      <label class="field">
+        <span>Password</span>
+        <input id="password" type="password" autocomplete="current-password">
+      </label>
+      <div class="row">
+        <button id="login" type="button">Login</button>
+        <button id="logout" type="button" class="secondary">Logout</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Status</h2>
+      <div class="statusList">
+        <div class="statusRow">
+          <span>Settings</span>
+          <strong id="saveState" class="statusPill idle">Not saved</strong>
+        </div>
+        <div class="statusRow">
+          <span>Overlay</span>
+          <strong id="overlayState" class="statusPill idle">Not configured</strong>
+        </div>
+        <div class="statusRow">
+          <span>Login</span>
+          <strong id="loginState" class="statusPill idle">Not logged in</strong>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="options.js"></script>
+</body>
+</html>
