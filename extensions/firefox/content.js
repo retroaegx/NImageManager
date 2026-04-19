@@ -36,7 +36,7 @@ const FALLBACK_MESSAGES = {
   overlayLogin: 'Login',
   overlaySettings: 'Settings',
   overlayNewTab: 'Open in new tab',
-  autoTransferCompactLabel: 'NIM Auto-forward',
+  autoTransferCompactLabel: 'NIM AF',
   autoTransferCompactOnTitle: 'Disable NIM Auto-forward',
   autoTransferCompactOffTitle: 'Enable NIM Auto-forward',
   autoTransferEnabledToast: 'Auto transfer enabled',
@@ -727,7 +727,7 @@ function createAutoTransferTopbarHost() {
     }
     .autoTransferLabel {
       color: #e2e8f0;
-      font-size: 11px;
+      font-size: 10px;
       text-align: right;
       font-weight: 800;
       line-height: 1;
@@ -782,7 +782,7 @@ function createAutoTransferTopbarHost() {
       background: #7dd3fc;
     }
     :host([data-mode="compact"]) .autoTransferLabel {
-      font-size: 10px;
+      font-size: 9px;
     }
     :host([data-mode="toggleOnly"]) .autoTransferLabel {
       display: none;

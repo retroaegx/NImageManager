@@ -225,7 +225,7 @@
     "message": "予期しないエラーが発生しました。"
   },
   "autoTransferCompactLabel": {
-    "message": "NIM自動転送"
+    "message": "NIM自送"
   },
   "toggleOnShort": {
     "message": "ON"

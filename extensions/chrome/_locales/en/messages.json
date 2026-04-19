@@ -225,7 +225,7 @@
     "message": "An unexpected error occurred."
   },
   "autoTransferCompactLabel": {
-    "message": "NIM Auto-forward"
+    "message": "NIM AF"
   },
   "toggleOnShort": {
     "message": "ON"

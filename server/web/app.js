@@ -3154,10 +3154,10 @@ function renderDetailTagSections(d){
       box.appendChild(empty);
       return;
     }
-    arr.forEach((t) => {
-      const label = t?.text || "";
+    arr.forEach((tagObj) => {
+      const label = tagObj?.text || "";
       if(!label) return;
-      box.appendChild(makeTagButton(label, () => copyText(getSingleTagCopyText(t, keepEmphasis), { message: t("app.copy.tag") })));
+      box.appendChild(makeTagButton(label, () => copyText(getSingleTagCopyText(tagObj, keepEmphasis), { message: t("app.copy.tag") })));
     });
   };
 
@@ -4119,18 +4119,18 @@ function renderDetailFull(d){
   const imgOverlayInfo = $("imgOverlayInfo");
   if(imgOverlayInfo){
     if(mobile){
-      const t = $("ioTitle"); if(t) t.textContent = d.filename || `#${d.id}`;
-      const s = $("ioSub"); if(s) s.textContent = `${d.w}x${d.h}  ${fmtMtime(d.mtime)}`;
-      const m = $("ioMeta"); if(m){
+      const ioTitle = $("ioTitle"); if(ioTitle) ioTitle.textContent = d.filename || `#${d.id}`;
+      const ioSub = $("ioSub"); if(ioSub) ioSub.textContent = `${d.w}x${d.h}  ${fmtMtime(d.mtime)}`;
+      const ioMeta = $("ioMeta"); if(ioMeta){
         const src = d.software || "";
         const by = d.creator ? `by ${d.creator}` : "";
-        m.textContent = (src && by) ? `${src}  ${by}` : (src || by);
+        ioMeta.textContent = (src && by) ? `${src}  ${by}` : (src || by);
       }
-      const u = $("ioUsage"); if(u){
+      const ioUsage = $("ioUsage"); if(ioUsage){
         const potion = typeof d.uses_potion === "boolean" ? (d.uses_potion ? "〇" : "×") : "-";
         const precise = typeof d.uses_precise_reference === "boolean" ? (d.uses_precise_reference ? "〇" : "×") : "-";
         const sampler = d.sampler || "-";
-        u.textContent = t("app.detail.meta.short", { potion, precise, sampler });
+        ioUsage.textContent = t("app.detail.meta.short", { potion, precise, sampler });
       }
       imgOverlayInfo.classList.remove("hidden");
     }else{
@@ -5346,10 +5346,19 @@ function bindUI(){
   $("bulkBookmarkBtn")?.addEventListener("click", async (e) => { e.preventDefault(); await openBulkBookmarkOverlay(); });
   $("bulkDeleteBtn")?.addEventListener("click", async (e) => { e.preventDefault(); await _bulkDelete(); });
 
-  // Detail overlay close (be robust against partial merges / timing issues)
-  document.querySelectorAll('#overlay button[aria-label="閉じる"]').forEach((btn) => {
-    btn.addEventListener("click", closeDetail);
-  });
+  // Detail overlay close
+  const bindDetailClose = (btn) => {
+    if(!btn || btn.dataset.nimCloseBound === "1") return;
+    btn.dataset.nimCloseBound = "1";
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      closeDetail();
+    });
+  };
+  bindDetailClose($("closeOverlay"));
+  bindDetailClose($("closeOverlayFixed"));
+  document.querySelectorAll('#overlay button[aria-label="閉じる"]').forEach(bindDetailClose);
   const bg = $("overlayBg") || document.querySelector("#overlay .overlayBg") || document.querySelector(".overlayBg");
   bg?.addEventListener("click", closeDetail);
   // Prevent touch-scrolling on the dark backdrop.
