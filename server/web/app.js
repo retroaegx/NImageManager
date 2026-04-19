@@ -89,7 +89,9 @@ function xhrPostBinary(url, body, contentType, onProgress){
         }catch(_e){}
       };
     }
+    xhr.timeout = 120000;
     xhr.onerror = () => reject(new TypeError("Failed to fetch"));
+    xhr.ontimeout = () => reject(new Error("timeout"));
     xhr.onload = () => {
       if(xhr.status === 401){
         location.replace("/login.html");
@@ -147,7 +149,7 @@ const state = {
     // scroll mode fetch size (mobile-first). PC uses page-based (limit=16).
     limit: 30,
     loading: false,
-    mode: "scroll", // "scroll" (mobile) / "page" (PC)
+    mode: ((typeof window !== "undefined" && window.matchMedia && window.matchMedia("(max-width: 1024px)").matches) || ((window.innerWidth || 0) <= 1024)) ? "scroll" : "page", // "scroll" (mobile) / "page" (PC)
     page: 1,
     total_pages: 0,
     total_count: 0,
@@ -368,8 +370,12 @@ function _getFreshScrollPrefetch(key){
 let _previewSearchKey = "";
 
 const BP_MOBILE = 1024; // unified breakpoint (matches styles.css @media (max-width: 1024px))
+const _previewModeMedia = (typeof window !== "undefined" && window.matchMedia)
+  ? window.matchMedia(`(max-width: ${BP_MOBILE}px)`)
+  : null;
 
 function isMobile(){
+  if(_previewModeMedia) return !!_previewModeMedia.matches;
   return (window.innerWidth || 0) <= BP_MOBILE;
 }
 
@@ -377,9 +383,23 @@ function isDesktop(){
   return !isMobile();
 }
 
+function currentResponsivePreviewMode(){
+  return isDesktop() ? "page" : "scroll";
+}
+
+function syncResponsivePreviewMode(){
+  const nextMode = currentResponsivePreviewMode();
+  state.preview.mode = nextMode;
+  setPagingUI();
+  return nextMode;
+}
+
 
 let _activeView = "preview";
 let _previewInited = false;
+let _previewInitPromise = null;
+let _previewNeedsRefresh = false;
+let _previewRefreshPromise = null;
 
 function isPreviewVisible(){
   const panel = $("viewPreview");
@@ -1087,13 +1107,13 @@ async function startZipUpload(zipFile){
   const setSendProgress = (loaded, total) => {
     const elText = $("uploadProgressText");
     const fill = $("uploadProgressBar");
-    const t = Number(total || zipFile.size || 0);
-    const l = Math.min(t || 0, Math.max(0, Number(loaded || 0)));
-    const pct = t ? (l / t) * 100 : 0;
+    const totalBytes = Number(total || zipFile.size || 0);
+    const loadedBytes = Math.min(totalBytes || 0, Math.max(0, Number(loaded || 0)));
+    const pct = totalBytes ? (loadedBytes / totalBytes) * 100 : 0;
     if(fill) fill.style.width = `${pct.toFixed(1)}%`;
-    if(elText) elText.textContent = t("app.upload.zip_sending_progress", { pct: pct.toFixed(1), loaded: fmtBytes(l), total: fmtBytes(t) });
+    if(elText) elText.textContent = t("app.upload.zip_sending_progress", { pct: pct.toFixed(1), loaded: fmtBytes(loadedBytes), total: fmtBytes(totalBytes) });
     if(jobBox){
-      jobBox.innerHTML = `<div class="row"><b>${escapeHtml(t("app.upload.zip_sending"))}</b><span class="mut">${escapeHtml(zipFile.name)}</span></div><div class="mut">${escapeHtml(t("app.upload.zip_ratio", { pct: pct.toFixed(1), loaded: fmtBytes(l), total: fmtBytes(t) }))}</div>`;
+      jobBox.innerHTML = `<div class="row"><b>${escapeHtml(t("app.upload.zip_sending"))}</b><span class="mut">${escapeHtml(zipFile.name)}</span></div><div class="mut">${escapeHtml(t("app.upload.zip_ratio", { pct: pct.toFixed(1), loaded: fmtBytes(loadedBytes), total: fmtBytes(totalBytes) }))}</div>`;
     }
   };
 
@@ -1268,23 +1288,56 @@ async function refreshFacets(){
 }
 
 
+async function refreshVisiblePreviewAfterChange(page=1){
+  if(!isPreviewVisible() || !_previewInited){
+    _previewNeedsRefresh = true;
+    invalidatePreviewCaches();
+    return;
+  }
+  if(_previewRefreshPromise){
+    _previewNeedsRefresh = true;
+    return await _previewRefreshPromise;
+  }
+
+  _previewRefreshPromise = (async () => {
+    do{
+      _previewNeedsRefresh = false;
+      _suspendPreviewWarmup = true;
+      invalidatePreviewCaches();
+      resetGrid();
+      syncResponsivePreviewMode();
+      try{
+        const facetsPromise = refreshFacets();
+        const calendarPromise = (async () => {
+          await loadYearCounts();
+          await loadYearMonthCounts(state.calendar.month.getFullYear());
+          await loadMonthCounts(state.calendar.month);
+        })();
+        await search(page);
+        await Promise.all([facetsPromise, calendarPromise]);
+        renderCalendar();
+      }finally{
+        _suspendPreviewWarmup = false;
+      }
+    }while(_previewNeedsRefresh && isPreviewVisible());
+  })();
+
+  try{
+    return await _previewRefreshPromise;
+  }finally{
+    _previewRefreshPromise = null;
+  }
+}
+
 async function refreshStatsAndPreviewAfterChange(){
   // Used when the underlying dataset changes (e.g. upload / bulk delete / zip completion).
   // Important: paging caches must be invalidated even when filter key stays the same.
-  _suspendPreviewWarmup = true;
-  _abortPreviewRequests();
-  invalidatePreviewCaches();
-  resetGrid();
-  try{
-    await refreshFacets();
-    await search(1);
-    await loadYearCounts();
-    await loadYearMonthCounts(state.calendar.month.getFullYear());
-    await loadMonthCounts(state.calendar.month);
-    renderCalendar();
-  }finally{
-    _suspendPreviewWarmup = false;
+  if(!isPreviewVisible() || !_previewInited){
+    _previewNeedsRefresh = true;
+    invalidatePreviewCaches();
+    return;
   }
+  await refreshVisiblePreviewAfterChange(1);
 }
 
 function fillSelect(sel, items){
@@ -2133,7 +2186,7 @@ async function search(page=1){
   // Keep state in sync with UI controls (some actions modify selects directly).
   state.preview.creator = getCreatorFilter();
   state.preview.software = getSoftwareFilter();
-  state.preview.mode = isDesktop() ? "page" : "scroll";
+  syncResponsivePreviewMode();
   // scroll mode: fetch in smaller chunks to reduce initial load on mobile.
   // (page mode uses a fixed limit=16 in buildPageQuery)
   if(state.preview.mode === "scroll") state.preview.limit = 30;
@@ -5160,35 +5213,55 @@ function closeFilterOverlay(){
 
 async function initPreview(){
   if(_previewInited) return;
-  await refreshFacets();
-  setCreatorFilter($("filterCreator").value);
-  setSoftwareFilter($("filterSoftware").value);
-  state.preview.date_from = $("dateFrom").value;
-  state.preview.date_to = $("dateTo").value;
+  if(_previewInitPromise) return await _previewInitPromise;
 
-  await loadYearCounts();
-  await loadYearMonthCounts(state.calendar.month.getFullYear());
-  await loadMonthCounts(state.calendar.month);
-  renderCalendar();
+  _previewInitPromise = (async () => {
+    syncResponsivePreviewMode();
+    setCreatorFilter($("filterCreator").value);
+    setSoftwareFilter($("filterSoftware").value);
+    state.preview.date_from = $("dateFrom").value;
+    state.preview.date_to = $("dateTo").value;
 
-  // restore controls
-  const sortSel = $("sortBy");
-  if(sortSel) sortSel.value = state.preview.sort || "newest";
-  setGalleryView(state.preview.view || "grid", true);
-  if(!isDesktop()) setGalleryView("grid", true);
-  syncGalleryControls();
-  await search();
+    // restore controls immediately so desktop/mobile layout is fixed before network completes.
+    const sortSel = $("sortBy");
+    if(sortSel) sortSel.value = state.preview.sort || "newest";
+    setGalleryView(state.preview.view || "grid", true);
+    if(!isDesktop()) setGalleryView("grid", true);
+    syncGalleryControls();
 
-  _previewInited = true;
+    const facetsPromise = refreshFacets();
+    const calendarPromise = (async () => {
+      await loadYearCounts();
+      await loadYearMonthCounts(state.calendar.month.getFullYear());
+      await loadMonthCounts(state.calendar.month);
+    })();
+
+    await search();
+    await Promise.all([facetsPromise, calendarPromise]);
+    renderCalendar();
+
+    _previewInited = true;
+    _previewNeedsRefresh = false;
+  })();
+
+  try{
+    return await _previewInitPromise;
+  }finally{
+    _previewInitPromise = null;
+  }
 }
 
 function bindUI(){
   $("navUpload").addEventListener("click", () => setView("upload"));
   $("navPreview").addEventListener("click", async () => {
     setView("preview");
+    syncResponsivePreviewMode();
     if(!_previewInited){
       await initPreview();
-      _previewInited = true;
+      return;
+    }
+    if(_previewNeedsRefresh){
+      await refreshVisiblePreviewAfterChange(1);
     }
   });
 
@@ -5419,10 +5492,11 @@ async function boot(){
   if(viewParam === "upload" || viewParam === "preview") view = viewParam;
 
   setView(view, { pushState: false });
+  syncResponsivePreviewMode();
   if(view === "preview"){
     await initPreview();
   }else{
-    await refreshFacets();
+    _previewNeedsRefresh = true;
   }
 }
 
@@ -5431,8 +5505,13 @@ window.addEventListener("popstate", () => {
   const hashView = (location.hash || "").replace("#", "").toLowerCase();
   const view = (hashView === "upload" || hashView === "preview") ? hashView : "preview";
   setView(view, { pushState: false });
-  if(view === "preview" && !_previewInited){
-    initPreview().catch(()=>{});
+  syncResponsivePreviewMode();
+  if(view === "preview") {
+    if(!_previewInited){
+      initPreview().catch(()=>{});
+    }else if(_previewNeedsRefresh){
+      refreshVisiblePreviewAfterChange(1).catch(()=>{});
+    }
   }
 });
 
@@ -5440,12 +5519,14 @@ window.addEventListener("popstate", () => {
 let _resizeTimer = null;
 window.addEventListener("resize", () => {
   if(!isMobile()) closeFilterOverlay();
+  const prevMode = state.preview.mode;
+  syncResponsivePreviewMode();
   if(_resizeTimer) clearTimeout(_resizeTimer);
   _resizeTimer = setTimeout(async () => {
     const previewVisible = (_activeView === "preview");
-    if(!previewVisible) return;
-    const nextMode = isDesktop() ? "page" : "scroll";
-    if(nextMode === state.preview.mode) return;
+    if(!previewVisible || !_previewInited) return;
+    const nextMode = currentResponsivePreviewMode();
+    if(nextMode === prevMode) return;
     // Re-run search in the new mode (keeps current filters).
     await search(1);
   }, 160);
@@ -5453,6 +5534,17 @@ window.addEventListener("resize", () => {
 
 updateViewportHeightVar();
 window.addEventListener("resize", updateViewportHeightVar, { passive: true });
+if(_previewModeMedia){
+  const onPreviewModeMediaChange = () => {
+    syncResponsivePreviewMode();
+  };
+  try{
+    _previewModeMedia.addEventListener("change", onPreviewModeMediaChange);
+  }catch(_e){
+    try{ _previewModeMedia.addListener(onPreviewModeMediaChange); }catch(_e2){}
+  }
+}
+
 window.addEventListener("orientationchange", updateViewportHeightVar, { passive: true });
 if(window.visualViewport){
   window.visualViewport.addEventListener("resize", updateViewportHeightVar, { passive: true });

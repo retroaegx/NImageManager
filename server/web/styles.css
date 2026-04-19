@@ -7,6 +7,7 @@
 /* build: 2026-03-05 preview-grid-v5 (single breakpoint: desktop vs mobile) */
 
 :root{
+  --nim-preview-mode: page;
   --bg0:#050713;
   --bg1:#070a18;
   --bg2:#0b1430;
@@ -1388,6 +1389,9 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
 }
 
 @media (max-width: 1024px){
+  :root{
+    --nim-preview-mode: scroll;
+  }
   .mobileOnly{ display:inline-flex; }
   .desktopOnly{ display:none; }
 
