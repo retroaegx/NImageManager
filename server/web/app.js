@@ -5249,9 +5249,13 @@ function renderCalendar(){
   // footer
   const foot = document.createElement('div');
   foot.className = 'calFoot';
-  const f = state.calendar.from;
-  const t = state.calendar.to;
-  const txt = (!f && !t) ? t("common.no_selection") : (f && (!t || f===t)) ? f : `${f} 〜 ${t}`;
+  const fromDate = state.calendar.from;
+  const toDate = state.calendar.to;
+  const txt = (!fromDate && !toDate)
+    ? t("common.no_selection")
+    : (fromDate && (!toDate || fromDate===toDate))
+      ? fromDate
+      : `${fromDate} 〜 ${toDate}`;
   foot.innerHTML = `
     <div class="calSel">${escapeHtml(txt)}</div>
     <div class="calFootBtns">
