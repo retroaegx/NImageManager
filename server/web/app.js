@@ -391,7 +391,131 @@ function syncResponsivePreviewMode(){
   const nextMode = currentResponsivePreviewMode();
   state.preview.mode = nextMode;
   setPagingUI();
+  scheduleGalleryActionLabelFit();
   return nextMode;
+}
+
+let _galleryActionFitTimer = 0;
+let _galleryActionResizeObserver = null;
+let _galleryActionMutationObserver = null;
+
+function galleryActionButtons(){
+  return [
+    $("mobileFilterBtn"),
+    $("allSelectBtn"),
+    $("bulkBookmarkBtn"),
+    $("bulkDeleteBtn"),
+  ].filter(Boolean);
+}
+
+function resetGalleryActionLabelFitButton(btn){
+  if(!btn) return;
+  const label = btn.querySelector?.(".label");
+  const target = label || btn;
+  target.style.fontSize = "";
+  target.style.letterSpacing = "";
+  target.style.maxWidth = "";
+}
+
+function fitGalleryActionLabelTarget(target, available, maxPx, minPx){
+  if(!target) return;
+  const safeAvailable = Math.max(available, 12);
+  target.style.maxWidth = `${Math.floor(safeAvailable)}px`;
+  target.style.fontSize = `${maxPx}px`;
+  target.style.letterSpacing = "";
+  if(target.scrollWidth <= safeAvailable + 0.5) return;
+
+  let lo = minPx;
+  let hi = maxPx;
+  let best = minPx;
+  for(let i = 0; i < 10; i += 1){
+    const mid = (lo + hi) / 2;
+    target.style.fontSize = `${mid}px`;
+    if(target.scrollWidth <= safeAvailable + 0.5){
+      best = mid;
+      lo = mid;
+    }else{
+      hi = mid;
+    }
+  }
+  const fitted = Math.max(minPx, Math.floor(best * 10) / 10);
+  target.style.fontSize = `${fitted}px`;
+  target.style.letterSpacing = fitted <= 9 ? "-0.02em" : (fitted <= 10 ? "-0.01em" : "");
+}
+
+function fitGalleryActionButton(btn){
+  if(!btn) return;
+  const label = btn.querySelector?.(".label");
+  const target = label || btn;
+  if(!target) return;
+
+  resetGalleryActionLabelFitButton(btn);
+  const btnWidth = btn.clientWidth;
+  if(!(btnWidth > 0)) return;
+
+  const style = getComputedStyle(btn);
+  const paddingX = (parseFloat(style.paddingLeft || "0") || 0) + (parseFloat(style.paddingRight || "0") || 0);
+  const gap = parseFloat(style.columnGap || style.gap || "0") || 0;
+  const icon = label ? btn.querySelector?.(".icon") : null;
+  const iconWidth = icon ? Math.ceil(icon.getBoundingClientRect().width) : 0;
+  const available = btnWidth - paddingX - (iconWidth > 0 ? iconWidth + gap : 0);
+  const maxPx = label ? 11 : 11;
+  const minPx = label ? 7.5 : 7.5;
+  fitGalleryActionLabelTarget(target, available, maxPx, minPx);
+}
+
+function runGalleryActionLabelFit(){
+  const preview = $("viewPreview");
+  if(!preview || preview.classList.contains("hidden")){
+    galleryActionButtons().forEach(resetGalleryActionLabelFitButton);
+    return;
+  }
+  if(!isMobile()){
+    galleryActionButtons().forEach(resetGalleryActionLabelFitButton);
+    return;
+  }
+  galleryActionButtons().forEach(fitGalleryActionButton);
+}
+
+function scheduleGalleryActionLabelFit(){
+  if(_galleryActionFitTimer){
+    cancelAnimationFrame(_galleryActionFitTimer);
+  }
+  _galleryActionFitTimer = requestAnimationFrame(() => {
+    _galleryActionFitTimer = 0;
+    runGalleryActionLabelFit();
+  });
+}
+
+function setButtonLabel(btn, text){
+  if(!btn) return;
+  const label = btn.querySelector?.(".label");
+  if(label){
+    label.textContent = text || "";
+  }else{
+    btn.textContent = text || "";
+  }
+  scheduleGalleryActionLabelFit();
+}
+
+function initGalleryActionLabelFit(){
+  if(_galleryActionMutationObserver) return;
+  const root = document.querySelector(".galleryActions");
+  if(!root) return;
+  if(typeof ResizeObserver !== "undefined"){{
+    _galleryActionResizeObserver = new ResizeObserver(() => scheduleGalleryActionLabelFit());
+    _galleryActionResizeObserver.observe(root);
+    galleryActionButtons().forEach((btn) => _galleryActionResizeObserver.observe(btn));
+  }}
+  _galleryActionMutationObserver = new MutationObserver(() => scheduleGalleryActionLabelFit());
+  _galleryActionMutationObserver.observe(root, {
+    subtree: true,
+    childList: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: ["class", "disabled"],
+  });
+  scheduleGalleryActionLabelFit();
 }
 
 
@@ -867,14 +991,17 @@ function _renderUploadJobStatus(jobLabel, job){
   const fill = $("uploadProgressBar");
   const elText = $("uploadProgressText");
   if(!job) return;
-  const doneAll = Number(job.done || 0) + Number(job.failed || 0) + Number(job.dup || 0);
+  const okCount = Number(job.done || 0);
+  const failedCount = Number(job.failed || 0);
+  const duplicateCount = Number(job.dup || 0);
+  const processedCount = okCount + failedCount;
   const total = Number(job.total || 0);
   const label = job.source_kind === "direct" ? t("app.upload.image_label") : "zip";
   const name = escapeHtml(jobLabel || job.filename || "");
   if(jobBox){
     const progText = (total > 0)
-      ? t("app.upload.job.progress.running", { doneAll, total, ok: job.done || 0, dup: job.dup || 0, failed: job.failed || 0 })
-      : t("app.upload.job.progress.scanning", { ok: job.done || 0, dup: job.dup || 0, failed: job.failed || 0 });
+      ? t("app.upload.job.progress.running", { doneAll: processedCount, total, ok: okCount, dup: duplicateCount, failed: failedCount })
+      : t("app.upload.job.progress.scanning", { ok: okCount, dup: duplicateCount, failed: failedCount });
     jobBox.classList.remove("hidden");
     jobBox.innerHTML = `
       <div class="row"><b>${label}</b><span class="mut">${name}</span></div>
@@ -882,12 +1009,12 @@ function _renderUploadJobStatus(jobLabel, job){
     `;
   }
   if(fill){
-    const pct = total > 0 ? Math.min(100, Math.max(0, (doneAll / total) * 100)) : 2;
+    const pct = total > 0 ? Math.min(100, Math.max(0, (processedCount / total) * 100)) : 2;
     fill.style.width = `${pct.toFixed(1)}%`;
   }
   if(elText){
     elText.textContent = total > 0
-      ? t("app.upload.job.progress.label", { label, doneAll, total })
+      ? t("app.upload.job.progress.label", { label, doneAll: processedCount, total })
       : t("app.upload.job.progress.simple", { label });
   }
 }
@@ -2537,9 +2664,9 @@ function _updateBulkActions(){
       const total = Number(state.preview.total_count || 0);
       const excl = b.deselected.size;
       const hint = total ? t("app.bulk.delete_count", { count: Math.max(0, total - excl) }) : t("app.bulk.delete_all");
-      btnDel.textContent = hint;
+      setButtonLabel(btnDel, hint);
     }else{
-      btnDel.textContent = t("app.bulk.delete_count", { count: b.selected.size });
+      setButtonLabel(btnDel, t("app.bulk.delete_count", { count: b.selected.size }));
     }
   }
 
@@ -5263,6 +5390,7 @@ function bindUI(){
     if(_previewNeedsRefresh){
       await refreshVisiblePreviewAfterChange(1);
     }
+    scheduleGalleryActionLabelFit();
   });
 
   bindMobileSwipe();
@@ -5479,6 +5607,7 @@ $("bmClearThisBtn")?.addEventListener("click", async (e) => {
 
 async function boot(){
   bindUI();
+  initGalleryActionLabelFit();
   await ensureThumbPreferredFormat();
   // Ensure overlay uses animated open/close (do not rely on display:none).
   const _ov = $("overlay");
@@ -5528,6 +5657,7 @@ window.addEventListener("popstate", () => {
 let _resizeTimer = null;
 window.addEventListener("resize", () => {
   if(!isMobile()) closeFilterOverlay();
+  scheduleGalleryActionLabelFit();
   const prevMode = state.preview.mode;
   syncResponsivePreviewMode();
   if(_resizeTimer) clearTimeout(_resizeTimer);
@@ -5555,6 +5685,8 @@ if(_previewModeMedia){
 }
 
 window.addEventListener("orientationchange", updateViewportHeightVar, { passive: true });
+window.addEventListener("orientationchange", scheduleGalleryActionLabelFit, { passive: true });
+window.addEventListener("load", scheduleGalleryActionLabelFit, { passive: true });
 if(window.visualViewport){
   window.visualViewport.addEventListener("resize", updateViewportHeightVar, { passive: true });
   window.visualViewport.addEventListener("scroll", updateViewportHeightVar, { passive: true });

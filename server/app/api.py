@@ -586,6 +586,11 @@ def _register_direct_upload_item(job_id: int, seq_i: int, filename: str, staged_
             staged_path=str(staged_path),
             mtime_iso=_staged_direct_item_mtime_iso(Path(staged_path)),
         )
+        queue_state_row = conn.execute(
+            "SELECT state FROM upload_zip_items WHERE id=?",
+            (int(item_id),),
+        ).fetchone()
+        queue_state = str(queue_state_row["state"] or "") if queue_state_row else ""
         total_items = int(conn.execute("SELECT COUNT(*) AS n FROM upload_zip_items WHERE job_id=?", (int(job_id),)).fetchone()[0])
         conn.execute(
             "UPDATE upload_zip_jobs SET total=?, updated_at_utc=datetime('now') WHERE id=?",
@@ -612,6 +617,8 @@ def _register_direct_upload_item(job_id: int, seq_i: int, filename: str, staged_
         conn.close()
 
     if item_id is None:
+        return
+    if queue_state not in {"pending", "received"}:
         return
     try:
         _queue_upload_item_request(int(item_id), source="direct_append", trace_id=trace_id)
@@ -671,7 +678,13 @@ def _sync_direct_upload_items(conn: sqlite3.Connection, job_id: int, staging_dir
             staged_path=str(path_text),
             mtime_iso=str(mtime_iso),
         )
-        item_ids.append(int(item_id))
+        state_row = conn.execute(
+            "SELECT state FROM upload_zip_items WHERE id=?",
+            (int(item_id),),
+        ).fetchone()
+        state_txt = str(state_row["state"] or "") if state_row else ""
+        if state_txt in {"pending", "received"}:
+            item_ids.append(int(item_id))
     conn.execute(
         "UPDATE upload_zip_jobs SET total=?, updated_at_utc=datetime('now') WHERE id=?",
         (int(len(rows)), int(job_id)),
@@ -6274,7 +6287,7 @@ async def upload_batch_append(
     except Exception:
         pass
 
-    _spawn_direct_upload_item_registration(
+    _register_direct_upload_item(
         int(job_id),
         int(seq_i),
         str(safe_name),

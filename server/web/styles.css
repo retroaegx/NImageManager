@@ -344,7 +344,20 @@ input:focus, select:focus{
   background: linear-gradient(180deg, rgba(113,236,196,0.28), rgba(28,145,118,0.24));
   box-shadow: 0 0 0 1px rgba(113,236,196,0.16) inset, 0 14px 34px rgba(0,0,0,0.46);
 }
-.iconBtn .label{ font-size: 12px; font-weight: 900; letter-spacing: 0.1px; white-space: nowrap; }
+.iconBtn .label{
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.1px;
+  line-height: 1;
+  white-space: nowrap;
+  text-align: center;
+}
+.selectAllIcon{
+  width: 16px;
+  height: 16px;
+  display: block;
+}
 
 .primaryBtn{
   border:none;
@@ -1497,10 +1510,11 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
   #galleryHint{ font-size: 11px; }
   .galleryActions{
     display:grid;
-    grid-template-columns: auto auto auto auto 1fr auto;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     grid-template-areas:
-      "filter allsel bulkbm delete status status"
-      "sort   sort   sort   sort   sort   view";
+      "filter allsel bulkbm delete"
+      "sort sort sort view"
+      "status status status status";
     gap: 6px;
     justify-content: stretch;
     align-items: center;
@@ -1508,23 +1522,51 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
   .galleryActions > *{ min-width: 0; }
   .galleryActions .iconBtn,
   .galleryActions .dangerBtn{
+    width: 100%;
+    min-width: 0;
     min-height: 36px;
-    padding: 7px 10px;
+    padding: 7px 8px;
     border-radius: 12px;
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    gap: 5px;
   }
-  .galleryActions .iconBtn .label{ font-size: 11px; }
+  .galleryActions .iconBtn .icon,
+  .galleryActions .dangerBtn .icon{
+    flex: 0 0 auto;
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    width: 14px;
+    min-width: 14px;
+  }
+  .galleryActions .iconBtn .iconSvg{
+    width: 15px;
+    min-width: 15px;
+  }
+  .galleryActions .iconBtn .label,
+  .galleryActions .dangerBtn .label{
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 11px;
+    line-height: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: clip;
+    text-align: center;
+  }
   #mobileFilterBtn{ grid-area: filter; }
   #allSelectBtn{ grid-area: allsel; }
   #bulkBookmarkBtn{ grid-area: bulkbm; }
   #bulkDeleteBtn{
     grid-area: delete;
     white-space: nowrap;
-    display:inline-flex;
-    align-items:center;
-    justify-content:center;
-    min-width: 84px;
     line-height: 1;
-    padding-inline: 12px;
+    padding-inline: 8px;
+  }
+  #bulkDeleteBtn .label{
+    font-size: 11px;
   }
   #bulkStatus{
     grid-area: status;
@@ -1536,11 +1578,14 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
     text-overflow: ellipsis;
     font-size: 11px;
   }
+  #bulkStatus:empty{
+    display: none;
+  }
   .sortRow{
     grid-area: sort;
     min-width: 0;
-    width: auto;
-    justify-self: start;
+    width: 100%;
+    justify-self: stretch;
     display: inline-flex;
     flex-wrap: nowrap;
     gap: 6px;
@@ -1550,9 +1595,10 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
     font-size: 11px;
   }
   .sortRow .miniSelect{
+    flex: 1 1 auto;
     width: auto;
-    min-width: 112px;
-    max-width: min(44vw, 180px);
+    min-width: 0;
+    max-width: none;
   }
   .viewBtns{
     grid-area: view;
