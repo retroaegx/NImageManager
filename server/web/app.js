@@ -4134,12 +4134,12 @@ function renderDetailLoading(id){
   const imgOverlayInfo = $("imgOverlayInfo");
   if(imgOverlayInfo){
     if(mobile){
-      const t = $("ioTitle"); if(t) t.textContent = titleText;
-      const s = $("ioSub"); if(s) s.textContent = `${it.w||""}x${it.h||""}  ${fmtMtime(it.mtime)}`.trim();
-      const m = $("ioMeta"); if(m){
+      const titleEl = $("ioTitle"); if(titleEl) titleEl.textContent = titleText;
+      const subEl = $("ioSub"); if(subEl) subEl.textContent = `${it.w||""}x${it.h||""}  ${fmtMtime(it.mtime)}`.trim();
+      const metaEl = $("ioMeta"); if(metaEl){
         const src = it.software || "";
         const by = it.creator ? `by ${it.creator}` : "";
-        m.textContent = (src && by) ? `${src}  ${by}` : (src || by);
+        metaEl.textContent = (src && by) ? `${src}  ${by}` : (src || by);
       }
       imgOverlayInfo.classList.remove("hidden");
     }else{
@@ -4520,9 +4520,9 @@ function updateChips(){
       e.preventDefault();
       e.stopPropagation();
       if(kind === "exclude"){
-        state.preview.tags_not = (state.preview.tags_not || []).filter(t => t !== tag);
+        state.preview.tags_not = (state.preview.tags_not || []).filter(tagValue => tagValue !== tag);
       }else{
-        state.preview.tags = (state.preview.tags || []).filter(t => t !== tag);
+        state.preview.tags = (state.preview.tags || []).filter(tagValue => tagValue !== tag);
       }
       updateChips();
     });
@@ -4547,18 +4547,18 @@ async function onTagInput(){
     };
 
     const addTag = (tag, mode) => {
-      const t = String(tag || "").trim();
-      if(!t) return;
+      const tagText = String(tag || "").trim();
+      if(!tagText) return;
       if(mode === "exclude"){
         // ensure mutually exclusive
-        state.preview.tags = (state.preview.tags || []).filter(x => x !== t);
-        if(!(state.preview.tags_not || []).includes(t)){
-          state.preview.tags_not = (state.preview.tags_not || []).concat([t]);
+        state.preview.tags = (state.preview.tags || []).filter(x => x !== tagText);
+        if(!(state.preview.tags_not || []).includes(tagText)){
+          state.preview.tags_not = (state.preview.tags_not || []).concat([tagText]);
         }
       }else{
-        state.preview.tags_not = (state.preview.tags_not || []).filter(x => x !== t);
-        if(!(state.preview.tags || []).includes(t)){
-          state.preview.tags = (state.preview.tags || []).concat([t]);
+        state.preview.tags_not = (state.preview.tags_not || []).filter(x => x !== tagText);
+        if(!(state.preview.tags || []).includes(tagText)){
+          state.preview.tags = (state.preview.tags || []).concat([tagText]);
         }
       }
       updateChips();
@@ -4698,15 +4698,15 @@ function hasCalendarSelection(){
 }
 
 function hasSingleDayCalendarSelection(){
-  const f = state.calendar.from || "";
-  const t = state.calendar.to || "";
-  return !!f && f === t;
+  const fromDate = state.calendar.from || "";
+  const toDate = state.calendar.to || "";
+  return !!fromDate && fromDate === toDate;
 }
 
 function hasMultiDayCalendarSelection(){
-  const f = state.calendar.from || "";
-  const t = state.calendar.to || "";
-  return !!f && !!t && f !== t;
+  const fromDate = state.calendar.from || "";
+  const toDate = state.calendar.to || "";
+  return !!fromDate && !!toDate && fromDate !== toDate;
 }
 
 function shouldFilterCalendarYearOrMonth(){
@@ -4733,11 +4733,11 @@ function preserveCalendarAnchorForNavigation(){
 }
 
 function isSelected(key){
-  const f = state.calendar.from;
-  const t = state.calendar.to;
-  if(!f && !t) return false;
-  if(f && !t) return key === f;
-  if(f && t) return (key >= f && key <= t);
+  const fromDate = state.calendar.from;
+  const toDate = state.calendar.to;
+  if(!fromDate && !toDate) return false;
+  if(fromDate && !toDate) return key === fromDate;
+  if(fromDate && toDate) return (key >= fromDate && key <= toDate);
   return false;
 }
 
@@ -4844,11 +4844,11 @@ function calendarUnlockScroll(){
 function onCalendarTouchStart(e, key){
   // Mobile (touch) uses Touch Events to reliably stop scroll while selecting.
   if(!e.touches || e.touches.length !== 1) return;
-  const t = e.touches[0];
+  const touchPoint = e.touches[0];
   calendarLockScroll();
   state.calendar.touch_key = key;
-  state.calendar.touch_x = t.clientX;
-  state.calendar.touch_y = t.clientY;
+  state.calendar.touch_x = touchPoint.clientX;
+  state.calendar.touch_y = touchPoint.clientY;
 
   window.addEventListener("touchmove", onCalendarTouchMove, { passive: false });
   window.addEventListener("touchend", onCalendarTouchEnd, { passive: true });
@@ -4858,14 +4858,14 @@ function onCalendarTouchStart(e, key){
 function onCalendarTouchMove(e){
   const pk = state.calendar.touch_key;
   if(!pk) return;
-  const t = (e.touches && e.touches[0]) || null;
-  if(!t) return;
+  const touchPoint = (e.touches && e.touches[0]) || null;
+  if(!touchPoint) return;
 
   // stop overlay scroll immediately (iOS Safari will steal the gesture otherwise)
   e.preventDefault();
 
-  const dx = Math.abs(t.clientX - (state.calendar.touch_x || 0));
-  const dy = Math.abs(t.clientY - (state.calendar.touch_y || 0));
+  const dx = Math.abs(touchPoint.clientX - (state.calendar.touch_x || 0));
+  const dy = Math.abs(touchPoint.clientY - (state.calendar.touch_y || 0));
 
   if(!state.calendar.dragging){
     if(dx + dy < 8) return;
@@ -5251,11 +5251,7 @@ function renderCalendar(){
   foot.className = 'calFoot';
   const fromDate = state.calendar.from;
   const toDate = state.calendar.to;
-  const txt = (!fromDate && !toDate)
-    ? t("common.no_selection")
-    : (fromDate && (!toDate || fromDate===toDate))
-      ? fromDate
-      : `${fromDate} 〜 ${toDate}`;
+  const txt = (!fromDate && !toDate) ? t("common.no_selection") : (fromDate && (!toDate || fromDate===toDate)) ? fromDate : `${fromDate} 〜 ${toDate}`;
   foot.innerHTML = `
     <div class="calSel">${escapeHtml(txt)}</div>
     <div class="calFootBtns">

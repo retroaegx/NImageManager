@@ -158,14 +158,14 @@ function renderSimpleErrors(el, errors, emptyText){
 }
 
 function showToast(text){
-  const t = document.createElement("div");
-  t.className = "maintToast";
-  t.textContent = text;
-  document.body.appendChild(t);
-  requestAnimationFrame(() => t.classList.add("show"));
+  const toastEl = document.createElement("div");
+  toastEl.className = "maintToast";
+  toastEl.textContent = text;
+  document.body.appendChild(toastEl);
+  requestAnimationFrame(() => toastEl.classList.add("show"));
   setTimeout(() => {
-    t.classList.remove("show");
-    setTimeout(() => t.remove(), 250);
+    toastEl.classList.remove("show");
+    setTimeout(() => toastEl.remove(), 250);
   }, 3500);
 }
 
