@@ -6,6 +6,7 @@ const STORAGE_KEYS = {
   user: 'nim.user',
   showNovelAiMenu: 'nim.show_novelai_menu',
   autoTransfer: 'nim.auto_transfer',
+  initialSetupPrompted: 'nim.initial_setup_prompted',
 };
 
 function extError(code, extra = {}) {
@@ -195,14 +196,38 @@ async function uploadImage(payload) {
 }
 
 async function openOptionsPage() {
+  let primaryError = null;
   if (ext.runtime.openOptionsPage) {
-    await ext.runtime.openOptionsPage();
-    return;
+    try {
+      await ext.runtime.openOptionsPage();
+      return;
+    } catch (error) {
+      primaryError = error;
+    }
   }
   const url = ext.runtime.getURL('options.html');
   if (ext.tabs && ext.tabs.create) {
     await ext.tabs.create({ url });
+    return;
   }
+  if (primaryError) throw primaryError;
+  throw extError('OPEN_OPTIONS_FAILED');
+}
+
+let initialOptionsPromise = null;
+
+function ensureInitialOptionsPage() {
+  if (initialOptionsPromise) return initialOptionsPromise;
+  initialOptionsPromise = (async () => {
+    const stored = await getStorage([STORAGE_KEYS.initialSetupPrompted]);
+    if (stored?.[STORAGE_KEYS.initialSetupPrompted] === true) return false;
+    await openOptionsPage();
+    await setStorage({ [STORAGE_KEYS.initialSetupPrompted]: true });
+    return true;
+  })().finally(() => {
+    initialOptionsPromise = null;
+  });
+  return initialOptionsPromise;
 }
 
 async function openLoginPage(loginUrl) {
@@ -232,11 +257,16 @@ async function openTab(targetUrl) {
 if (ext.runtime.onInstalled) {
   ext.runtime.onInstalled.addListener((details) => {
     if (details.reason === 'install') {
-      saveConfig({ showNovelAiMenu: true, autoTransfer: false }).catch(() => {});
-      openOptionsPage().catch(() => {});
+      saveConfig({ showNovelAiMenu: true, autoTransfer: false })
+        .then(() => ensureInitialOptionsPage())
+        .catch((error) => console.warn('[NIM Transfer] initial options failed', error));
     }
   });
 }
+
+ensureInitialOptionsPage().catch((error) => {
+  console.warn('[NIM Transfer] initial options fallback failed', error);
+});
 
 ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const type = String(message?.type || '');
