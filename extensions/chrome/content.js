@@ -61,6 +61,7 @@ function errorText(code, fallbackKey = 'error_UNKNOWN') {
 }
 
 const BUTTON_FLAG = 'data-nim-transfer-button';
+const BUTTON_WRAPPER_FLAG = 'data-nim-transfer-wrapper';
 const TOAST_CONTAINER_ID = 'nim-transfer-toast-container';
 const MAIN_IMAGE_SELECTOR = '.display-grid-images img.image-grid-image';
 const MAIN_CANVAS_SELECTOR = '.display-grid-images canvas';
@@ -238,6 +239,48 @@ function getSeedButton(toolbar) {
     const text = normalizeNodeText(button.textContent);
     return /\b\d{6,}\b/.test(text) && /(シード値をコピー|Copy seed)/i.test(text);
   }) || buttons.find((button) => /\b\d{6,}\b/.test(normalizeNodeText(button.textContent))) || null;
+}
+
+function getVisibleToolbarButtons(root) {
+  if (!(root instanceof HTMLElement)) return [];
+  return Array.from(root.querySelectorAll('button')).filter((button) => {
+    if (!(button instanceof HTMLButtonElement) || button.hasAttribute(BUTTON_FLAG)) return false;
+    const rect = button.getBoundingClientRect();
+    const style = window.getComputedStyle(button);
+    return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+  });
+}
+
+function getSaveButton(toolbar) {
+  const buttons = getVisibleToolbarButtons(toolbar);
+  const semantic = buttons.find((button) => {
+    const source = normalizeNodeText(`${button.getAttribute('aria-label') || ''} ${button.title || ''} ${button.textContent || ''}`);
+    return /save|download|保存|ダウンロード/i.test(source);
+  });
+  if (semantic) return semantic;
+
+  // NovelAI's current save icon has no accessible name, so retain its stable icon slot as a fallback.
+  const currentSaveIcon = buttons.find((button) => button.querySelector('.sc-8ac360b8-53'));
+  if (currentSaveIcon) return currentSaveIcon;
+
+  // The compact image action group is ordered pin, copy, save (and sometimes palette).
+  for (const button of buttons) {
+    for (let group = button.parentElement; group && group !== toolbar; group = group.parentElement) {
+      const groupedButtons = getVisibleToolbarButtons(group);
+      if (groupedButtons.length >= 3 && groupedButtons.length <= 4) return groupedButtons[2] || null;
+      if (groupedButtons.length > 4) break;
+    }
+  }
+  return null;
+}
+
+function getCompactActionGroup(button, toolbar) {
+  for (let group = button?.parentElement; group && group !== toolbar; group = group.parentElement) {
+    const buttons = getVisibleToolbarButtons(group);
+    if (buttons.length >= 3 && buttons.length <= 4) return group;
+    if (buttons.length > 4) break;
+  }
+  return button?.parentElement instanceof HTMLElement ? button.parentElement : null;
 }
 
 function inferSeedText() {
@@ -429,8 +472,9 @@ function createTransferButton(referenceButton) {
 
 function removeMisplacedButtons() {
   document.querySelectorAll(`button[${BUTTON_FLAG}="1"]`).forEach((button) => {
-    const toolbar = button.closest('.display-grid-bottom');
-    if (!toolbar) button.remove();
+    if (button.closest('.display-grid-bottom')) return;
+    const wrapper = button.closest(`[${BUTTON_WRAPPER_FLAG}="1"]`);
+    (wrapper || button).remove();
   });
 }
 
@@ -440,19 +484,33 @@ function attachBottomTransferButton() {
   if (!(toolbar instanceof HTMLElement)) {
     return { ok: false, reason: 'no-toolbar' };
   }
-  const existing = toolbar.querySelector(`button[${BUTTON_FLAG}="1"]`);
-  if (existing) return { ok: true, reason: 'existing' };
-  const seedButton = getSeedButton(toolbar);
-  if (!(seedButton instanceof HTMLButtonElement)) {
-    return { ok: false, reason: 'no-seed-button' };
+  const saveButton = getSaveButton(toolbar);
+  if (!(saveButton instanceof HTMLButtonElement)) {
+    return { ok: false, reason: 'no-save-button' };
   }
-  const actionsGroup = seedButton.parentElement;
+  const actionsGroup = getCompactActionGroup(saveButton, toolbar);
   if (!(actionsGroup instanceof HTMLElement)) {
     return { ok: false, reason: 'no-actions-group' };
   }
-  const referenceButton = Array.from(actionsGroup.querySelectorAll('button')).find((button) => button !== seedButton) || seedButton;
-  const transferButton = createTransferButton(referenceButton);
-  seedButton.insertAdjacentElement('beforebegin', transferButton);
+  const saveNode = unwrapDirectChildInContainer(saveButton, actionsGroup) || saveButton;
+  const existing = toolbar.querySelector(`button[${BUTTON_FLAG}="1"]`);
+  if (existing) {
+    const existingNode = existing.closest(`[${BUTTON_WRAPPER_FLAG}="1"]`) || existing;
+    if (existingNode.parentElement === actionsGroup && existingNode.nextSibling === saveNode) {
+      return { ok: true, reason: 'existing' };
+    }
+    existingNode.remove();
+  }
+  const transferButton = createTransferButton(saveButton);
+  if (saveNode !== saveButton) {
+    const wrapper = saveNode.cloneNode(false);
+    wrapper.setAttribute(BUTTON_WRAPPER_FLAG, '1');
+    wrapper.removeAttribute('id');
+    wrapper.appendChild(transferButton);
+    actionsGroup.insertBefore(wrapper, saveNode);
+  } else {
+    actionsGroup.insertBefore(transferButton, saveNode);
+  }
   return { ok: true, reason: 'attached' };
 }
 
@@ -467,7 +525,6 @@ const overlayState = {
   autoTransferTopbarHost: null,
   autoTransferToggleLabel: null,
   autoTransferToggleButton: null,
-  autoTransferManualButton: null,
   overlay: null,
   overlayMenuButton: null,
   overlayMenu: null,
@@ -656,7 +713,7 @@ function getStableTopbarTargetSnapshot() {
 
 function getTopbarRowFromNavbar(navbar) {
   if (!(navbar instanceof HTMLElement)) return null;
-  if (navbar.classList.contains('display-grid-top') && isInlineRowContainer(navbar)) return navbar;
+  if (navbar.classList.contains('image-gen-nav-row')) return navbar;
   const children = Array.from(navbar.children).filter((child) => child instanceof HTMLElement);
   for (const child of children) {
     if (isInlineRowContainer(child)) return child;
@@ -672,10 +729,13 @@ function findNearestInlineRowAncestor(node) {
 }
 
 function findTopbarNavbarRoot() {
-  const outputBars = Array.from(document.querySelectorAll('.display-grid-top')).filter((node) => node instanceof HTMLElement && isElementVisibleForAnchoring(node));
-  if (outputBars.length) {
-    outputBars.sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width);
-    return outputBars[0];
+  const menuInNavRow = Array.from(document.querySelectorAll('.image-gen-nav-row button')).find((button) => {
+    const source = normalizeNodeText(`${button.getAttribute('aria-label') || ''} ${button.title || ''} ${button.textContent || ''}`);
+    return /menu|メニュー/i.test(source) && isElementVisibleForAnchoring(button);
+  });
+  const navRow = menuInNavRow?.closest('.image-gen-nav-row');
+  if (navRow instanceof HTMLElement && isElementVisibleForAnchoring(navRow)) {
+    return navRow;
   }
 
   const explicit = Array.from(document.querySelectorAll('.image-gen-navbar')).filter((node) => node instanceof HTMLElement && isElementVisibleForAnchoring(node));
@@ -695,7 +755,19 @@ function findTopbarInsertionTarget() {
   if (!(row instanceof HTMLElement)) return getStableTopbarTargetSnapshot();
 
   const menuButton = findBestButton(row, scoreTopbarMenuButton);
-  const plusButton = findBestButton(row, scoreTopbarPlusButton);
+  let plusButton = null;
+  if (menuButton instanceof HTMLButtonElement) {
+    const menuRect = menuButton.getBoundingClientRect();
+    plusButton = Array.from(row.querySelectorAll('button'))
+      .filter((button) => {
+        if (!(button instanceof HTMLButtonElement) || button === menuButton || button.hasAttribute(BUTTON_FLAG)) return false;
+        if (!isElementVisibleForAnchoring(button)) return false;
+        const rect = button.getBoundingClientRect();
+        return rect.right <= menuRect.left + 2 && Math.abs(rect.top - menuRect.top) <= Math.max(rect.height, menuRect.height);
+      })
+      .sort((a, b) => b.getBoundingClientRect().right - a.getBoundingClientRect().right)[0] || null;
+  }
+  if (!(plusButton instanceof HTMLButtonElement)) plusButton = findBestButton(row, scoreTopbarPlusButton);
   const menuNode = unwrapDirectChildInContainer(menuButton, row);
   const plusNode = unwrapDirectChildInContainer(plusButton, row);
 
@@ -817,26 +889,6 @@ function createAutoTransferTopbarHost() {
       transform: translateX(22px);
       background: #7dd3fc;
     }
-    .manualTransferButton {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 30px;
-      height: 30px;
-      padding: 0;
-      border: 1px solid rgba(125, 211, 252, 0.42);
-      border-radius: 999px;
-      background: rgba(8, 47, 73, 0.88);
-      color: #e0f2fe;
-      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.24);
-      cursor: pointer;
-    }
-    .manualTransferButton:hover { transform: translateY(-1px); }
-    .manualTransferButton:disabled { opacity: 0.65; cursor: wait; }
-    .manualTransferButton:focus-visible {
-      outline: 2px solid rgba(125, 211, 252, 0.65);
-      outline-offset: 2px;
-    }
     :host([data-mode="compact"]) .autoTransferLabel {
       font-size: 9px;
     }
@@ -875,18 +927,8 @@ function createAutoTransferTopbarHost() {
     },
   });
   const thumb = createElement('span', { className: 'autoTransferThumb' });
-  const manualButton = createElement('button', {
-    className: 'manualTransferButton',
-    attrs: {
-      type: 'button',
-      title: msg('transferToNim'),
-      'aria-label': msg('transferToNim'),
-    },
-  });
-  manualButton.appendChild(createTransferIcon());
-
   toggle.appendChild(thumb);
-  wrap.append(label, toggle, manualButton);
+  wrap.append(label, toggle);
   shadowRoot.appendChild(wrap);
 
   return host;
@@ -929,7 +971,6 @@ function ensureAutoTransferTopbarHost() {
   overlayState.autoTransferTopbarHost = host;
   overlayState.autoTransferToggleLabel = host.shadowRoot?.querySelector('.autoTransferLabel') || null;
   overlayState.autoTransferToggleButton = host.shadowRoot?.querySelector('.autoTransferToggle') || null;
-  overlayState.autoTransferManualButton = host.shadowRoot?.querySelector('.manualTransferButton') || null;
   if (overlayState.autoTransferToggleButton && !overlayState.autoTransferToggleButton.dataset.bound) {
     overlayState.autoTransferToggleButton.dataset.bound = '1';
     overlayState.autoTransferToggleButton.addEventListener('click', (event) => {
@@ -937,21 +978,6 @@ function ensureAutoTransferTopbarHost() {
       event.stopPropagation();
       toggleAutoTransferFromPage().catch((error) => {
         warn('auto transfer toggle failed', error);
-      });
-    });
-  }
-  if (overlayState.autoTransferManualButton && !overlayState.autoTransferManualButton.dataset.bound) {
-    overlayState.autoTransferManualButton.dataset.bound = '1';
-    overlayState.autoTransferManualButton.addEventListener('click', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      transferCurrentImage({
-        button: overlayState.autoTransferManualButton,
-        showProgressToast: true,
-        showSuccessToast: true,
-      }).catch((error) => {
-        warn('manual transfer failed', error);
-        showToast(String(error?.message || error || errorText('UPLOAD_FAILED')), 'error');
       });
     });
   }
@@ -991,8 +1017,7 @@ function positionAutoTransferTopbarHost() {
   const availableWidth = Math.max(0, rightLimit - plusRect.right - 12);
 
   host.hidden = false;
-  const desktop = window.innerWidth >= 900;
-  if (availableWidth >= 210 || desktop) host.dataset.mode = 'full';
+  if (availableWidth >= 210) host.dataset.mode = 'full';
   else if (availableWidth >= 132) host.dataset.mode = 'compact';
   else host.dataset.mode = 'toggleOnly';
 
@@ -1691,11 +1716,11 @@ function installObservers() {
         return;
       case 'existing':
         return;
-      case 'no-seed-button':
-        warn('seed button not found in display-grid-bottom');
+      case 'no-save-button':
+        warn('save button not found in display-grid-bottom');
         return;
       case 'no-actions-group':
-        warn('seed button parent not found');
+        warn('save button action group not found');
         return;
       default:
         return;
