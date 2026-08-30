@@ -204,6 +204,9 @@ function findDisplayPanelRoot() {
   const media = getMainMediaElement();
   if (!(media instanceof HTMLElement)) return null;
 
+  const explicitRoot = media.closest('.display-grid-chrome');
+  if (explicitRoot instanceof HTMLElement) return explicitRoot;
+
   let node = media.parentElement;
   while (node && node !== document.body) {
     const hasImages = Array.from(node.children).some((child) => child instanceof HTMLElement && child.classList.contains('display-grid-images'));
@@ -216,8 +219,16 @@ function findDisplayPanelRoot() {
 
 function getBottomToolbar() {
   const root = findDisplayPanelRoot();
-  if (!root) return null;
-  return Array.from(root.children).find((child) => child instanceof HTMLElement && child.classList.contains('display-grid-bottom')) || null;
+  const scoped = root?.querySelector?.('.display-grid-bottom');
+  if (scoped instanceof HTMLElement) return scoped;
+
+  const visible = Array.from(document.querySelectorAll('.display-grid-bottom')).filter((toolbar) => {
+    if (!(toolbar instanceof HTMLElement)) return false;
+    const rect = toolbar.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  });
+  visible.sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width);
+  return visible[0] || null;
 }
 
 function getSeedButton(toolbar) {
@@ -456,6 +467,7 @@ const overlayState = {
   autoTransferTopbarHost: null,
   autoTransferToggleLabel: null,
   autoTransferToggleButton: null,
+  autoTransferManualButton: null,
   overlay: null,
   overlayMenuButton: null,
   overlayMenu: null,
@@ -480,6 +492,7 @@ const autoTransferState = {
   inFlight: false,
   scheduled: 0,
   attemptedSignatures: new Set(),
+  failedSignatures: new Map(),
 };
 
 function rememberAttemptedSignature(signature) {
@@ -488,6 +501,22 @@ function rememberAttemptedSignature(signature) {
   if (autoTransferState.attemptedSignatures.size <= 128) return;
   const oldest = autoTransferState.attemptedSignatures.values().next().value;
   if (oldest) autoTransferState.attemptedSignatures.delete(oldest);
+}
+
+function rememberFailedSignature(signature) {
+  if (!signature) return 10000;
+  const previous = autoTransferState.failedSignatures.get(signature);
+  const attempts = Math.min(6, Number(previous?.attempts || 0) + 1);
+  const delayMs = Math.min(60000, 5000 * (2 ** (attempts - 1)));
+  autoTransferState.failedSignatures.set(signature, {
+    attempts,
+    retryAt: Date.now() + delayMs,
+  });
+  if (autoTransferState.failedSignatures.size > 128) {
+    const oldest = autoTransferState.failedSignatures.keys().next().value;
+    if (oldest) autoTransferState.failedSignatures.delete(oldest);
+  }
+  return delayMs;
 }
 
 function applyExtensionConfig(config) {
@@ -627,6 +656,7 @@ function getStableTopbarTargetSnapshot() {
 
 function getTopbarRowFromNavbar(navbar) {
   if (!(navbar instanceof HTMLElement)) return null;
+  if (navbar.classList.contains('display-grid-top') && isInlineRowContainer(navbar)) return navbar;
   const children = Array.from(navbar.children).filter((child) => child instanceof HTMLElement);
   for (const child of children) {
     if (isInlineRowContainer(child)) return child;
@@ -642,6 +672,12 @@ function findNearestInlineRowAncestor(node) {
 }
 
 function findTopbarNavbarRoot() {
+  const outputBars = Array.from(document.querySelectorAll('.display-grid-top')).filter((node) => node instanceof HTMLElement && isElementVisibleForAnchoring(node));
+  if (outputBars.length) {
+    outputBars.sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width);
+    return outputBars[0];
+  }
+
   const explicit = Array.from(document.querySelectorAll('.image-gen-navbar')).filter((node) => node instanceof HTMLElement && isElementVisibleForAnchoring(node));
   if (explicit.length) {
     explicit.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
@@ -781,6 +817,26 @@ function createAutoTransferTopbarHost() {
       transform: translateX(22px);
       background: #7dd3fc;
     }
+    .manualTransferButton {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 30px;
+      height: 30px;
+      padding: 0;
+      border: 1px solid rgba(125, 211, 252, 0.42);
+      border-radius: 999px;
+      background: rgba(8, 47, 73, 0.88);
+      color: #e0f2fe;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.24);
+      cursor: pointer;
+    }
+    .manualTransferButton:hover { transform: translateY(-1px); }
+    .manualTransferButton:disabled { opacity: 0.65; cursor: wait; }
+    .manualTransferButton:focus-visible {
+      outline: 2px solid rgba(125, 211, 252, 0.65);
+      outline-offset: 2px;
+    }
     :host([data-mode="compact"]) .autoTransferLabel {
       font-size: 9px;
     }
@@ -819,9 +875,18 @@ function createAutoTransferTopbarHost() {
     },
   });
   const thumb = createElement('span', { className: 'autoTransferThumb' });
+  const manualButton = createElement('button', {
+    className: 'manualTransferButton',
+    attrs: {
+      type: 'button',
+      title: msg('transferToNim'),
+      'aria-label': msg('transferToNim'),
+    },
+  });
+  manualButton.appendChild(createTransferIcon());
 
   toggle.appendChild(thumb);
-  wrap.append(label, toggle);
+  wrap.append(label, toggle, manualButton);
   shadowRoot.appendChild(wrap);
 
   return host;
@@ -835,15 +900,36 @@ function ensureAutoTransferTopbarHost() {
 
   const target = findTopbarInsertionTarget();
   if (target?.container && target.anchor) {
-    const beforeNode = target.beforeNode instanceof Node ? target.beforeNode : target.anchor.nextSibling;
-    if (host.parentElement !== target.container || host.nextSibling !== beforeNode) {
-      target.container.insertBefore(host, beforeNode || null);
+    let beforeNode = target.beforeNode instanceof Node && target.beforeNode.parentNode === target.container
+      ? target.beforeNode
+      : null;
+    if (!beforeNode && target.anchor.parentElement === target.container) {
+      beforeNode = target.anchor.nextSibling;
     }
+    if (host.parentElement !== target.container || host.nextSibling !== beforeNode) {
+      try {
+        target.container.insertBefore(host, beforeNode || null);
+      } catch (_) {
+        target.container.appendChild(host);
+      }
+    }
+    Object.assign(host.style, {
+      position: '',
+      top: '',
+      right: '',
+      left: '',
+      bottom: '',
+      zIndex: '',
+      transform: '',
+    });
+  } else if (!host.isConnected) {
+    document.documentElement.appendChild(host);
   }
 
   overlayState.autoTransferTopbarHost = host;
   overlayState.autoTransferToggleLabel = host.shadowRoot?.querySelector('.autoTransferLabel') || null;
   overlayState.autoTransferToggleButton = host.shadowRoot?.querySelector('.autoTransferToggle') || null;
+  overlayState.autoTransferManualButton = host.shadowRoot?.querySelector('.manualTransferButton') || null;
   if (overlayState.autoTransferToggleButton && !overlayState.autoTransferToggleButton.dataset.bound) {
     overlayState.autoTransferToggleButton.dataset.bound = '1';
     overlayState.autoTransferToggleButton.addEventListener('click', (event) => {
@@ -851,6 +937,21 @@ function ensureAutoTransferTopbarHost() {
       event.stopPropagation();
       toggleAutoTransferFromPage().catch((error) => {
         warn('auto transfer toggle failed', error);
+      });
+    });
+  }
+  if (overlayState.autoTransferManualButton && !overlayState.autoTransferManualButton.dataset.bound) {
+    overlayState.autoTransferManualButton.dataset.bound = '1';
+    overlayState.autoTransferManualButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      transferCurrentImage({
+        button: overlayState.autoTransferManualButton,
+        showProgressToast: true,
+        showSuccessToast: true,
+      }).catch((error) => {
+        warn('manual transfer failed', error);
+        showToast(String(error?.message || error || errorText('UPLOAD_FAILED')), 'error');
       });
     });
   }
@@ -868,13 +969,18 @@ function positionAutoTransferTopbarHost() {
   }
 
   if (!target?.container || !target?.anchor) {
-    if (host.isConnected) {
-      host.hidden = false;
-      host.dataset.mode = 'toggleOnly';
-      host.style.margin = '0 8px 0 auto';
-      return host;
-    }
-    host.hidden = true;
+    host.hidden = false;
+    host.dataset.mode = window.innerWidth >= 900 ? 'full' : 'toggleOnly';
+    Object.assign(host.style, {
+      position: 'fixed',
+      top: 'calc(env(safe-area-inset-top, 0px) + 12px)',
+      right: 'calc(env(safe-area-inset-right, 0px) + 76px)',
+      left: 'auto',
+      bottom: 'auto',
+      zIndex: '2147483645',
+      transform: 'none',
+      margin: '0',
+    });
     return host;
   }
 
@@ -1008,13 +1114,23 @@ async function maybeAutoTransfer() {
   const signature = getCurrentImageSignature();
   if (!signature) return;
   if (autoTransferState.attemptedSignatures.has(signature)) return;
+  const failed = autoTransferState.failedSignatures.get(signature);
+  if (failed?.retryAt && failed.retryAt > Date.now()) return;
   if (autoTransferState.inFlight) return;
 
   autoTransferState.inFlight = true;
-  rememberAttemptedSignature(signature);
   try {
-    await transferCurrentImage({ showProgressToast: false, showSuccessToast: true });
+    const response = await transferCurrentImage({ showProgressToast: false, showSuccessToast: true });
+    if (!response?.ok) {
+      const delayMs = rememberFailedSignature(signature);
+      window.setTimeout(scheduleAutoTransfer, delayMs + 50);
+      return;
+    }
+    autoTransferState.failedSignatures.delete(signature);
+    rememberAttemptedSignature(signature);
   } catch (error) {
+    const delayMs = rememberFailedSignature(signature);
+    window.setTimeout(scheduleAutoTransfer, delayMs + 50);
     warn('auto transfer failed', error);
     showToast(String(error?.message || error || errorText('UPLOAD_FAILED')), 'error');
   } finally {
@@ -1551,7 +1667,11 @@ function installFloatingControlsSync() {
 function installObservers() {
   installFloatingControlsSync();
   injectBridgeScript();
-  installOverlay();
+  try {
+    installOverlay();
+  } catch (error) {
+    warn('floating controls setup failed; transfer observer will continue', error);
+  }
   refreshExtensionConfig().catch(() => {});
 
   let retryCount = 0;
@@ -1583,7 +1703,13 @@ function installObservers() {
   };
 
   const runAttach = () => {
-    const result = attachBottomTransferButton();
+    let result;
+    try {
+      result = attachBottomTransferButton();
+    } catch (error) {
+      warn('transfer button attach failed', error);
+      result = { ok: false, reason: 'exception' };
+    }
     reportStatus(result);
     if (!result.ok && retryCount < maxRetries) {
       retryCount += 1;
