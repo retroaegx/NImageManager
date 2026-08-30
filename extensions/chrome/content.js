@@ -63,8 +63,16 @@ function errorText(code, fallbackKey = 'error_UNKNOWN') {
 const BUTTON_FLAG = 'data-nim-transfer-button';
 const BUTTON_WRAPPER_FLAG = 'data-nim-transfer-wrapper';
 const TOAST_CONTAINER_ID = 'nim-transfer-toast-container';
-const MAIN_IMAGE_SELECTOR = '.display-grid-images img.image-grid-image';
-const MAIN_CANVAS_SELECTOR = '.display-grid-images canvas';
+const MAIN_IMAGE_SELECTOR = [
+  '.display-grid-images img.image-grid-image',
+  '.image-gen-output-region img.image-grid-image',
+  '.image-gen-canvas img.image-grid-image',
+].join(', ');
+const MAIN_CANVAS_SELECTOR = [
+  '.display-grid-images canvas',
+  '.image-gen-output-region canvas',
+  '.image-gen-canvas canvas',
+].join(', ');
 const DEBUG_PREFIX = '[NIM Transfer]';
 const BRIDGE_REQUEST_TYPE = 'NIM_TRANSFER_FETCH_BLOB_REQUEST';
 const BRIDGE_RESPONSE_TYPE = 'NIM_TRANSFER_FETCH_BLOB_RESPONSE';
@@ -197,8 +205,53 @@ async function canvasToBlob(canvas) {
   });
 }
 
+function scoreMediaCandidate(element) {
+  if (!(element instanceof HTMLElement)) return Number.NEGATIVE_INFINITY;
+  const rect = element.getBoundingClientRect();
+  const style = window.getComputedStyle(element);
+  if (rect.width <= 0 || rect.height <= 0 || style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+    return Number.NEGATIVE_INFINITY;
+  }
+  if (element instanceof HTMLImageElement) {
+    const src = String(element.currentSrc || element.src || '').trim();
+    if (!src || !element.complete || !element.naturalWidth || !element.naturalHeight) return Number.NEGATIVE_INFINITY;
+  }
+  if (element instanceof HTMLCanvasElement && (!element.width || !element.height)) return Number.NEGATIVE_INFINITY;
+
+  const intersectionWidth = Math.max(0, Math.min(rect.right, window.innerWidth) - Math.max(rect.left, 0));
+  const intersectionHeight = Math.max(0, Math.min(rect.bottom, window.innerHeight) - Math.max(rect.top, 0));
+  const intersectionArea = intersectionWidth * intersectionHeight;
+  const centerX = rect.left + rect.width / 2;
+  const centerY = rect.top + rect.height / 2;
+  const distanceSquared = ((centerX - window.innerWidth / 2) ** 2) + ((centerY - window.innerHeight / 2) ** 2);
+  return intersectionArea > 0 ? (1e12 + intersectionArea * 1000 - distanceSquared) : -distanceSquared;
+}
+
+function findBestMediaCandidate(selector) {
+  let best = null;
+  let bestScore = Number.NEGATIVE_INFINITY;
+  for (const candidate of Array.from(document.querySelectorAll(selector))) {
+    const score = scoreMediaCandidate(candidate);
+    if (score > bestScore) {
+      best = candidate;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+function getMainImageElement() {
+  const image = findBestMediaCandidate(MAIN_IMAGE_SELECTOR);
+  return image instanceof HTMLImageElement ? image : null;
+}
+
+function getMainCanvasElement() {
+  const canvas = findBestMediaCandidate(MAIN_CANVAS_SELECTOR);
+  return canvas instanceof HTMLCanvasElement ? canvas : null;
+}
+
 function getMainMediaElement() {
-  return document.querySelector(MAIN_IMAGE_SELECTOR) || document.querySelector(MAIN_CANVAS_SELECTOR) || null;
+  return getMainImageElement() || getMainCanvasElement() || null;
 }
 
 function findDisplayPanelRoot() {
@@ -207,6 +260,10 @@ function findDisplayPanelRoot() {
 
   const explicitRoot = media.closest('.display-grid-chrome');
   if (explicitRoot instanceof HTMLElement) return explicitRoot;
+
+  const resultsStage = media.closest('.image-gen-results-stage');
+  const stageChrome = resultsStage?.querySelector?.('.display-grid-chrome');
+  if (stageChrome instanceof HTMLElement) return stageChrome;
 
   let node = media.parentElement;
   while (node && node !== document.body) {
@@ -380,8 +437,8 @@ function dataUrlToBytes(dataUrl) {
   return { bytes, mimeType };
 }
 
-async function extractCurrentImagePayload() {
-  const img = document.querySelector(MAIN_IMAGE_SELECTOR);
+async function extractCurrentImagePayload(preferredMedia = null) {
+  const img = preferredMedia instanceof HTMLImageElement ? preferredMedia : getMainImageElement();
   if (img instanceof HTMLImageElement) {
     const src = String(img.currentSrc || img.src || '').trim();
     log('selected image src', src || '(empty)');
@@ -407,7 +464,7 @@ async function extractCurrentImagePayload() {
       lastModifiedMs: Date.now(),
     };
   }
-  const canvas = document.querySelector(MAIN_CANVAS_SELECTOR);
+  const canvas = preferredMedia instanceof HTMLCanvasElement ? preferredMedia : getMainCanvasElement();
   if (canvas instanceof HTMLCanvasElement) {
     log('selected canvas size', `${canvas.width}x${canvas.height}`);
     const blob = await canvasToBlob(canvas);
@@ -548,6 +605,7 @@ const extensionConfig = {
 const autoTransferState = {
   inFlight: false,
   scheduled: 0,
+  pendingMedia: null,
   attemptedSignatures: new Set(),
   failedSignatures: new Map(),
 };
@@ -594,7 +652,7 @@ async function refreshExtensionConfig() {
 function isLikelyImageGenerationPage() {
   if (/(^|\/)(image|image-generation)(?:\/|$)/i.test(String(location.pathname || ''))) return true;
   if (/Image Generation|画像生成/i.test(String(document.title || ''))) return true;
-  if (document.querySelector(MAIN_IMAGE_SELECTOR) || document.querySelector(MAIN_CANVAS_SELECTOR)) return true;
+  if (getMainMediaElement()) return true;
   if (getBottomToolbar()) return true;
   return false;
 }
@@ -1079,14 +1137,14 @@ async function toggleAutoTransferFromPage() {
   }
 }
 
-function getCurrentImageSignature() {
-  const img = document.querySelector(MAIN_IMAGE_SELECTOR);
+function getCurrentImageSignature(preferredMedia = null) {
+  const img = preferredMedia instanceof HTMLImageElement ? preferredMedia : getMainImageElement();
   if (img instanceof HTMLImageElement) {
     const src = String(img.currentSrc || img.src || '').trim();
     if (!src) return '';
     return `img:${src}`;
   }
-  const canvas = document.querySelector(MAIN_CANVAS_SELECTOR);
+  const canvas = preferredMedia instanceof HTMLCanvasElement ? preferredMedia : getMainCanvasElement();
   if (canvas instanceof HTMLCanvasElement) {
     if (!canvas.width || !canvas.height) return '';
     const seed = inferSeedText();
@@ -1095,7 +1153,7 @@ function getCurrentImageSignature() {
   return '';
 }
 
-async function transferCurrentImage({ button = null, showProgressToast = true, showSuccessToast = true } = {}) {
+async function transferCurrentImage({ button = null, media = null, showProgressToast = true, showSuccessToast = true } = {}) {
   if (button) {
     button.disabled = true;
     button.style.opacity = '0.7';
@@ -1104,7 +1162,7 @@ async function transferCurrentImage({ button = null, showProgressToast = true, s
     showToast(msg('transferring'), 'info');
   }
   try {
-    const payload = await extractCurrentImagePayload();
+    const payload = await extractCurrentImagePayload(media);
     const response = await messageRuntime({
       type: 'nim-upload-image',
       payload: {
@@ -1136,7 +1194,9 @@ async function transferCurrentImage({ button = null, showProgressToast = true, s
 
 async function maybeAutoTransfer() {
   if (!extensionConfig.autoTransfer) return;
-  const signature = getCurrentImageSignature();
+  const media = autoTransferState.pendingMedia?.isConnected ? autoTransferState.pendingMedia : getMainMediaElement();
+  if (!(media instanceof HTMLImageElement) && !(media instanceof HTMLCanvasElement)) return;
+  const signature = getCurrentImageSignature(media);
   if (!signature) return;
   if (autoTransferState.attemptedSignatures.has(signature)) return;
   const failed = autoTransferState.failedSignatures.get(signature);
@@ -1145,17 +1205,18 @@ async function maybeAutoTransfer() {
 
   autoTransferState.inFlight = true;
   try {
-    const response = await transferCurrentImage({ showProgressToast: false, showSuccessToast: true });
+    const response = await transferCurrentImage({ media, showProgressToast: false, showSuccessToast: true });
     if (!response?.ok) {
       const delayMs = rememberFailedSignature(signature);
-      window.setTimeout(scheduleAutoTransfer, delayMs + 50);
+      window.setTimeout(() => scheduleAutoTransfer(media), delayMs + 50);
       return;
     }
     autoTransferState.failedSignatures.delete(signature);
     rememberAttemptedSignature(signature);
+    if (autoTransferState.pendingMedia === media) autoTransferState.pendingMedia = null;
   } catch (error) {
     const delayMs = rememberFailedSignature(signature);
-    window.setTimeout(scheduleAutoTransfer, delayMs + 50);
+    window.setTimeout(() => scheduleAutoTransfer(media), delayMs + 50);
     warn('auto transfer failed', error);
     showToast(String(error?.message || error || errorText('UPLOAD_FAILED')), 'error');
   } finally {
@@ -1163,8 +1224,11 @@ async function maybeAutoTransfer() {
   }
 }
 
-function scheduleAutoTransfer() {
+function scheduleAutoTransfer(preferredMedia = null) {
   if (!extensionConfig.autoTransfer) return;
+  if (preferredMedia instanceof HTMLImageElement || preferredMedia instanceof HTMLCanvasElement) {
+    autoTransferState.pendingMedia = preferredMedia;
+  }
   if (autoTransferState.scheduled) return;
   autoTransferState.scheduled = window.setTimeout(() => {
     autoTransferState.scheduled = 0;
@@ -1760,16 +1824,27 @@ function installObservers() {
     }, 120);
   };
 
-  const observer = new MutationObserver(() => {
+  const observer = new MutationObserver((records) => {
+    let newestMedia = null;
+    for (const record of records) {
+      for (const node of Array.from(record.addedNodes || [])) {
+        if (!(node instanceof Element)) continue;
+        if (node.matches?.(MAIN_IMAGE_SELECTOR) || node.matches?.(MAIN_CANVAS_SELECTOR)) newestMedia = node;
+        const nested = node.querySelectorAll?.(`${MAIN_IMAGE_SELECTOR}, ${MAIN_CANVAS_SELECTOR}`);
+        if (nested?.length) newestMedia = nested[nested.length - 1];
+      }
+    }
     scheduleAttachFromObserver();
+    if (newestMedia) scheduleAutoTransfer(newestMedia);
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });
 
-  const imgLoadHandler = () => scheduleAutoTransfer();
   document.addEventListener('load', (event) => {
     const target = event.target;
     if (target instanceof HTMLImageElement || target instanceof HTMLCanvasElement) {
-      imgLoadHandler();
+      if (target.matches?.(MAIN_IMAGE_SELECTOR) || target.matches?.(MAIN_CANVAS_SELECTOR)) {
+        scheduleAutoTransfer(target);
+      }
     }
   }, true);
 
