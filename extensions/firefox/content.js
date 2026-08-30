@@ -948,7 +948,23 @@ function createAutoTransferTopbarHost() {
       background: #7dd3fc;
     }
     :host([data-mode="compact"]) .autoTransferLabel {
-      font-size: 9px;
+      font-size: 8px;
+    }
+    :host([data-mode="compact"]) .autoTransferWrap {
+      gap: 3px;
+    }
+    :host([data-mode="compact"]) .autoTransferToggle {
+      width: 40px;
+      height: 24px;
+    }
+    :host([data-mode="compact"]) .autoTransferThumb {
+      top: 2px;
+      left: 2px;
+      width: 18px;
+      height: 18px;
+    }
+    :host([data-mode="compact"]) .autoTransferToggle[data-state="1"] .autoTransferThumb {
+      transform: translateX(18px);
     }
     :host([data-mode="toggleOnly"]) .autoTransferLabel {
       display: none;
@@ -1075,8 +1091,8 @@ function positionAutoTransferTopbarHost() {
   const availableWidth = Math.max(0, rightLimit - plusRect.right - 12);
 
   host.hidden = false;
-  if (availableWidth >= 210) host.dataset.mode = 'full';
-  else if (availableWidth >= 132) host.dataset.mode = 'compact';
+  if (availableWidth >= 120) host.dataset.mode = 'full';
+  else if (availableWidth >= 72) host.dataset.mode = 'compact';
   else host.dataset.mode = 'toggleOnly';
 
   host.style.margin = '0 8px 0 8px';
