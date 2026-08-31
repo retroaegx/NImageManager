@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 import gzip
 import csv
+import hashlib
 import secrets
 from typing import Iterable, Optional
 
@@ -873,7 +874,7 @@ def get_queue_conn() -> sqlite3.Connection:
 
 def ensure_bootstrap() -> None:
     """Initial bootstrap:
-    - import tag dictionary if empty
+    - import or refresh bundled tag dictionaries when their assets change
     - ensure a single master user exists for upgraded DBs
     """
 
@@ -907,15 +908,50 @@ def ensure_bootstrap() -> None:
         tag_master = ASSETS_DIR / "tags" / "tag_master.csv.gz"
         tag_alias = ASSETS_DIR / "tags" / "tag_alias.csv.gz"
 
-        if tn == 0 and tag_master.exists():
-            _import_tags_master(conn, tag_master)
+        tag_assets_changed = False
+        if tag_master.exists():
+            master_hash = hashlib.sha1(tag_master.read_bytes()).hexdigest()
+            old = conn.execute(
+                "SELECT value FROM admin_kv WHERE key='tag_master_asset_sha1'"
+            ).fetchone()
+            old_master_hash = str(old[0] if isinstance(old, tuple) else old["value"]) if old else ""
+            if tn == 0 or old_master_hash != master_hash:
+                _import_tags_master(conn, tag_master)
+                conn.execute(
+                    """
+                    INSERT INTO admin_kv(key, value, updated_at)
+                    VALUES ('tag_master_asset_sha1', ?, datetime('now'))
+                    ON CONFLICT(key) DO UPDATE SET
+                      value=excluded.value,
+                      updated_at=datetime('now')
+                    """,
+                    (master_hash,),
+                )
+                tag_assets_changed = True
 
-        # Even if tags_master already exists, we may still want to import aliases
-        # (e.g., a previous run partially initialized the DB).
-        if an == 0 and tag_alias.exists():
-            _import_tag_aliases(conn, tag_alias)
+        # Keep existing aliases, while adding new aliases and updating changed
+        # canonical destinations from the bundled dictionary.
+        if tag_alias.exists():
+            alias_hash = hashlib.sha1(tag_alias.read_bytes()).hexdigest()
+            old = conn.execute(
+                "SELECT value FROM admin_kv WHERE key='tag_alias_asset_sha1'"
+            ).fetchone()
+            old_alias_hash = str(old[0] if isinstance(old, tuple) else old["value"]) if old else ""
+            if an == 0 or old_alias_hash != alias_hash:
+                _import_tag_aliases(conn, tag_alias)
+                conn.execute(
+                    """
+                    INSERT INTO admin_kv(key, value, updated_at)
+                    VALUES ('tag_alias_asset_sha1', ?, datetime('now'))
+                    ON CONFLICT(key) DO UPDATE SET
+                      value=excluded.value,
+                      updated_at=datetime('now')
+                    """,
+                    (alias_hash,),
+                )
+                tag_assets_changed = True
 
-        if tn == 0 or an == 0:
+        if tag_assets_changed:
             conn.commit()
 
         # quality tags set
@@ -923,7 +959,6 @@ def ensure_bootstrap() -> None:
         # - support wildcard patterns (e.g. year_*) stored as-is
         # - refresh automatically when the bundled asset changes
         try:
-            import hashlib
             from .services.tag_parser import normalize_tag
 
             cur = conn.execute("SELECT COUNT(*) AS n FROM quality_tags")
@@ -1090,7 +1125,14 @@ def _import_tags_master(conn: sqlite3.Connection, gz_path: Path) -> None:
             post_count = int(row.get("post_count") or 0) if (row.get("post_count") or "").strip().isdigit() else None
             sources = row.get("sources")
             conn.execute(
-                "INSERT OR REPLACE INTO tags_master(tag, category, post_count, sources) VALUES (?,?,?,?)",
+                """
+                INSERT INTO tags_master(tag, category, post_count, sources)
+                VALUES (?,?,?,?)
+                ON CONFLICT(tag) DO UPDATE SET
+                  category=excluded.category,
+                  post_count=excluded.post_count,
+                  sources=excluded.sources
+                """,
                 (tag, category, post_count, sources),
             )
 
@@ -1109,7 +1151,10 @@ def _import_tag_aliases(conn: sqlite3.Connection, gz_path: Path) -> None:
                 (canonical, None, None, None),
             )
             conn.execute(
-                "INSERT OR REPLACE INTO tag_aliases(alias, canonical) VALUES (?,?)",
+                """
+                INSERT INTO tag_aliases(alias, canonical) VALUES (?,?)
+                ON CONFLICT(alias) DO UPDATE SET canonical=excluded.canonical
+                """,
                 (alias, canonical),
             )
 
