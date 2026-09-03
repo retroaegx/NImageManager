@@ -466,7 +466,9 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             admin_js = (web_root / "admin.js").read_text(encoding="utf-8")
             settings_js = (web_root / "settings.js").read_text(encoding="utf-8")
             app_js = (web_root / "app.js").read_text(encoding="utf-8")
+            login_js = (web_root / "login.js").read_text(encoding="utf-8")
             index_html = (web_root / "index.html").read_text(encoding="utf-8")
+            login_html = (web_root / "login.html").read_text(encoding="utf-8")
             settings_html = (web_root / "settings.html").read_text(encoding="utf-8")
             page_i18n = (web_root / "lib" / "page-i18n.js").read_text(encoding="utf-8")
             ja_json = json.loads((web_root / "i18n" / "ja.json").read_text(encoding="utf-8"))
@@ -488,6 +490,11 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             self.assertEqual(en_json["nav.preview"], "Preview")
             self.assertNotIn("プレビュー管理", index_html)
             self.assertNotIn("アップロード管理", index_html)
+            self.assertLess(login_html.index('id="googleRegisterButton"'), login_html.index('id="registerUser"'))
+            self.assertIn('id="googleRegisterFields"', login_html)
+            self.assertIn('id="completeGoogleRegisterBtn"', login_html)
+            self.assertIn('data?.detail==="google registration required"', login_js)
+            self.assertNotIn("register.google_new_account", login_js)
 
     def test_auth_and_account_lifecycle(self):
         with Runtime() as rt:
@@ -581,6 +588,14 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
                 "name": "Google User",
                 "nonce": nonce,
             }
+            google_start = rt.json(
+                "POST",
+                "/auth/google",
+                payload={"credential": "stub"},
+            )
+            self.assertEqual(google_start.status_code, 428)
+            self.assertEqual(google_start.json()["detail"], "google registration required")
+            self.assertEqual(google_start.json()["email"], "google@example.com")
             google = rt.json(
                 "POST",
                 "/auth/google",

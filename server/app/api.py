@@ -1853,6 +1853,22 @@ def google_login(request: Request, response: Response, req: GoogleAuthReq):
                 raise HTTPException(status_code=409, detail="email already registered; sign in with password")
 
         if not row:
+            has_registration_details = bool(
+                str(req.username or "").strip()
+                or req.password
+                or req.password2
+                or req.accepted
+                or req.terms_version
+                or req.privacy_version
+            )
+            if not has_registration_details:
+                return JSONResponse(
+                    status_code=428,
+                    content={
+                        "detail": "google registration required",
+                        "email": profile["email"],
+                    },
+                )
             _validate_current_consent(
                 accepted=bool(req.accepted),
                 terms_version=req.terms_version,

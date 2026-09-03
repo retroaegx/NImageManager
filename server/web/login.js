@@ -11,8 +11,8 @@ const EMBED_AUTH_NAV_FLAG = "nim_embed_auth_nav_attempted_v2";
 let providers = { google_enabled:false, registration_enabled:false, terms_version:"", privacy_version:"" };
 let agreementAccepted = false;
 let agreementStep = 0;
-let pendingGoogleMode = "login";
 let pendingGoogleCredential = "";
+let googleRegistrationActive = false;
 
 function $(id){ return document.getElementById(id); }
 function isEmbedded(){ try { return window.self !== window.top; } catch { return true; } }
@@ -67,14 +67,29 @@ function showMessage(id,message,kind="error"){
 }
 function showPanel(name){
   const login=name==="login", register=name==="register", forgot=name==="forgot", googlePassword=name==="googlePassword";
-  if(login) pendingGoogleMode="login";
-  if(register) pendingGoogleMode="register";
   $("loginPanel")?.classList.toggle("hidden",!login); $("registerPanel")?.classList.toggle("hidden",!register); $("forgotPanel")?.classList.toggle("hidden",!forgot); $("googlePasswordPanel")?.classList.toggle("hidden",!googlePassword);
   $("showLoginBtn")?.classList.toggle("active",login); $("showRegisterBtn")?.classList.toggle("active",register);
   $("showLoginBtn")?.setAttribute("aria-selected",String(login)); $("showRegisterBtn")?.setAttribute("aria-selected",String(register));
   $("authHeading").textContent=t(googlePassword?"google_password.heading":forgot?"password.reset_title":register?"register.heading":"login.heading");
-  (googlePassword?$("googleExtensionPass"):forgot?$("forgotEmail"):register?$("registerUser"):$("loginUser"))?.focus();
+  (googlePassword?$("googleExtensionPass"):forgot?$("forgotEmail"):register?(googleRegistrationActive?$("googleRegisterUser"):$("registerUser")):$("loginUser"))?.focus();
 }
+function setGoogleRegistrationMode(active,email=""){
+  googleRegistrationActive=Boolean(active);
+  $("emailRegisterFields")?.classList.toggle("hidden",googleRegistrationActive);
+  $("googleRegisterFields")?.classList.toggle("hidden",!googleRegistrationActive);
+  $("registerBtn")?.classList.toggle("hidden",googleRegistrationActive);
+  $("completeGoogleRegisterBtn")?.classList.toggle("hidden",!googleRegistrationActive);
+  $("resendVerificationBtn")?.classList.toggle("hidden",googleRegistrationActive);
+  $("cancelGoogleRegisterBtn")?.classList.toggle("hidden",!googleRegistrationActive);
+  if($("googleRegisterEmail")) $("googleRegisterEmail").textContent=String(email||"");
+  updateAgreementState();
+}
+function resetGoogleRegistration(){
+  pendingGoogleCredential="";
+  setGoogleRegistrationMode(false);
+  showMessage("registerErr","");
+}
+function openRegisterPanel(){resetGoogleRegistration();showPanel("register");}
 async function doLogin(){
   const username=$("loginUser").value.trim(), password=$("loginPass").value; showMessage("loginErr","");
   if(!username||!password){ showMessage("loginErr",t("common.required")); return; }
@@ -89,7 +104,8 @@ function updateAgreementState(){
   const state=$("agreementState");
   if(state){ state.textContent=t(agreementAccepted?"agreement.accepted":"agreement.required"); state.classList.toggle("ok",agreementAccepted); }
   if($("registerBtn")) $("registerBtn").disabled=!agreementAccepted||!providers.registration_enabled;
-  $("googleRegisterArea")?.classList.toggle("hidden",!agreementAccepted||!providers.google_enabled);
+  if($("completeGoogleRegisterBtn")) $("completeGoogleRegisterBtn").disabled=!agreementAccepted||!pendingGoogleCredential;
+  $("googleRegisterArea")?.classList.toggle("hidden",googleRegistrationActive||!providers.google_enabled);
 }
 async function doRegister(){
   const payload={username:$("registerUser").value.trim(),email:$("registerEmail").value.trim(),password:$("registerPass").value,password2:$("registerPass2").value,accepted:agreementAccepted,terms_version:providers.terms_version,privacy_version:providers.privacy_version};
@@ -144,18 +160,29 @@ function loadGoogleScript(){
   return new Promise((resolve,reject)=>{const script=document.createElement("script");script.src="https://accounts.google.com/gsi/client";script.async=true;script.defer=true;script.onload=resolve;script.onerror=reject;document.head.appendChild(script);});
 }
 async function handleGoogleCredential(credential){
-  const isRegister=pendingGoogleMode==="register",messageId=isRegister?"registerErr":"loginErr";
-  const payload={credential,username:isRegister?$("registerUser").value.trim():null,password:isRegister?$("registerPass").value:null,password2:isRegister?$("registerPass2").value:null,accepted:isRegister&&agreementAccepted,terms_version:providers.terms_version,privacy_version:providers.privacy_version};
-  if(isRegister&&!payload.username){showMessage(messageId,t("register.username_for_google"));return;}
-  if(isRegister&&(!payload.password||!payload.password2)){showMessage(messageId,t("register.password_for_google"));return;}
-  if(isRegister&&payload.password!==payload.password2){showMessage(messageId,t("common.confirmation_mismatch"));return;}
+  const messageId=$("registerPanel")?.classList.contains("hidden")?"loginErr":"registerErr";
   try{
-    const response=await fetch(API.google,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),credentials:"include"}); const data=await readJson(response);
+    const response=await fetch(API.google,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({credential}),credentials:"include"}); const data=await readJson(response);
     if(response.ok){location.href="/";return;}
     if(response.status===428&&data?.detail==="extension password required"){pendingGoogleCredential=credential;showPanel("googlePassword");return;}
-    if(!isRegister&&data?.detail==="agreement required"){showPanel("register");showMessage("registerErr",t("register.google_new_account"));return;}
+    if(response.status===428&&data?.detail==="google registration required"){
+      pendingGoogleCredential=credential;setGoogleRegistrationMode(true,data?.email||"");showPanel("register");return;
+    }
     showMessage(messageId,data?.detail||t("login.google_failed"));
   }catch{showMessage(messageId,t("common.connection_failed"));}
+}
+async function completeGoogleRegistration(){
+  const payload={credential:pendingGoogleCredential,username:$("googleRegisterUser").value.trim(),password:$("googleRegisterPass").value,password2:$("googleRegisterPass2").value,accepted:agreementAccepted,terms_version:providers.terms_version,privacy_version:providers.privacy_version};
+  showMessage("registerErr","");
+  if(!payload.credential){resetGoogleRegistration();showMessage("registerErr",t("register.google_session_expired"));return;}
+  if(!payload.username||!payload.password||!payload.password2){showMessage("registerErr",t("common.required"));return;}
+  if(payload.password!==payload.password2){showMessage("registerErr",t("common.confirmation_mismatch"));return;}
+  try{
+    const response=await fetch(API.google,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),credentials:"include"});const data=await readJson(response);
+    if(response.ok){pendingGoogleCredential="";location.href="/";return;}
+    if(response.status===401){resetGoogleRegistration();showMessage("registerErr",t("register.google_session_expired"));return;}
+    showMessage("registerErr",data?.detail||t("register.failed"));
+  }catch{showMessage("registerErr",t("common.connection_failed"));}
 }
 async function saveGoogleExtensionPassword(){
   const password=$("googleExtensionPass").value,password2=$("googleExtensionPass2").value;showMessage("googlePasswordErr","");
@@ -181,7 +208,7 @@ async function setupGoogle(){
 }
 async function loadProviders(){
   try{const response=await fetch(API.providers,{credentials:"include",cache:"no-store"});if(response.ok)providers={...providers,...await response.json()};}catch{}
-  if(!providers.registration_enabled){$("showRegisterBtn").disabled=true;$("showRegisterBtn").title=t("register.unavailable");}
+  if(!providers.registration_enabled&&!providers.google_enabled){$("showRegisterBtn").disabled=true;$("showRegisterBtn").title=t("register.unavailable");}
   updateAgreementState();await setupGoogle();
 }
 
@@ -193,8 +220,9 @@ async function initEmbeddedLogin(){
   $("embedRetry")?.addEventListener("click",()=>refreshEmbeddedLoginState({redirectOnSuccess:true,tryAutoActivate:true}));await refreshEmbeddedLoginState({redirectOnSuccess:false,tryAutoActivate:true});return true;
 }
 async function init(){
-  $("showLoginBtn")?.addEventListener("click",()=>showPanel("login"));$("showRegisterBtn")?.addEventListener("click",()=>showPanel("register"));$("forgotPasswordBtn")?.addEventListener("click",()=>showPanel("forgot"));$("backToLoginBtn")?.addEventListener("click",()=>showPanel("login"));
+  $("showLoginBtn")?.addEventListener("click",()=>{resetGoogleRegistration();showPanel("login");});$("showRegisterBtn")?.addEventListener("click",openRegisterPanel);$("forgotPasswordBtn")?.addEventListener("click",()=>showPanel("forgot"));$("backToLoginBtn")?.addEventListener("click",()=>showPanel("login"));
   $("loginBtn")?.addEventListener("click",doLogin);$("loginPass")?.addEventListener("keydown",e=>{if(e.key==="Enter")doLogin();});$("registerBtn")?.addEventListener("click",doRegister);$("resendVerificationBtn")?.addEventListener("click",resendVerification);$("sendResetBtn")?.addEventListener("click",sendPasswordReset);
+  $("completeGoogleRegisterBtn")?.addEventListener("click",completeGoogleRegistration);$("cancelGoogleRegisterBtn")?.addEventListener("click",resetGoogleRegistration);
   $("saveGooglePasswordBtn")?.addEventListener("click",saveGoogleExtensionPassword);$("cancelGooglePasswordBtn")?.addEventListener("click",()=>{pendingGoogleCredential="";showPanel("login");});
   $("openAgreementBtn")?.addEventListener("click",openAgreement);$("closeAgreementBtn")?.addEventListener("click",closeAgreement);$("agreementNextBtn")?.addEventListener("click",advanceAgreement);$("agreementFrame")?.addEventListener("load",bindAgreementFrameScroll);
   $("agreementModal")?.addEventListener("click",e=>{if(e.target===$("agreementModal"))closeAgreement();});document.addEventListener("keydown",e=>{if(e.key==="Escape"&&!$("agreementModal")?.classList.contains("hidden"))closeAgreement();});

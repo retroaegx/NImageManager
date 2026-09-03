@@ -2191,6 +2191,11 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
 .authDivider{display:flex;align-items:center;gap:10px;margin:16px 0 12px;color:rgba(255,255,255,.5);font-size:12px}
 .authDivider::before,.authDivider::after{content:"";height:1px;background:rgba(255,255,255,.12);flex:1}
 .googleAuthArea>div:last-child{display:flex;justify-content:center;min-height:40px}
+.googleRegisterFields{margin-top:12px}
+.googleAccountConfirmed{display:flex;flex-direction:column;gap:5px;padding:12px 14px;border:1px solid rgba(115,230,164,.32);border-radius:12px;background:rgba(50,180,110,.1)}
+.googleAccountConfirmed strong{font-size:13px;color:#a9f2c7}
+.googleAccountConfirmed span{font-size:14px;overflow-wrap:anywhere}
+.authFieldHint{margin:-2px 0 8px;line-height:1.5;color:rgba(255,255,255,.62)}
 .loginLegalLinks{display:flex;justify-content:center;gap:18px;margin-top:18px;font-size:12px}
 .loginLegalLinks a{color:rgba(210,217,255,.8)}
 
