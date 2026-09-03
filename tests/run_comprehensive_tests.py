@@ -473,7 +473,7 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             en_json = json.loads((web_root / "i18n" / "en.json").read_text(encoding="utf-8"))
 
             self.assertIn("confirmAccountDelete", admin_js)
-            self.assertIn("tr(", admin_js)
+            self.assertIn('t("admin.account.delete.first_confirm"', admin_js)
             self.assertIn("confirmMyAccountDelete", settings_js)
             self.assertIn("ui_language", settings_js)
             self.assertIn('id="uiLanguage"', settings_html)
@@ -483,9 +483,9 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             self.assertIn("page-i18n.js", index_html)
             self.assertRegex(index_html, r">\s*プレビュー\s*<")
             self.assertRegex(index_html, r">\s*アップロード\s*<")
-            self.assertIn("initI18n()", page_i18n)
-            self.assertEqual(ja_json["source"]["Preview"], "プレビュー")
-            self.assertEqual(en_json["source"]["プレビュー"], "Preview")
+            self.assertIn("initI18n(readBootstrapPreference())", page_i18n)
+            self.assertEqual(ja_json["nav.preview"], "プレビュー")
+            self.assertEqual(en_json["nav.preview"], "Preview")
             self.assertNotIn("プレビュー管理", index_html)
             self.assertNotIn("アップロード管理", index_html)
 
@@ -519,6 +519,85 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             expect_status(delete_other_user, 200)
             login_deleted = rt.json("POST", "/auth/login", payload={"username": "user2", "password": "user2pw"})
             self.assertEqual(login_deleted.status_code, 401)
+
+    def test_public_registration_verification_reset_google_and_delete(self):
+        with Runtime() as rt:
+            rt.setup_master()
+            sent: dict[str, str] = {}
+            rt.api.smtp_enabled = lambda: True
+            rt.api._send_verification_message = lambda **kwargs: sent.update(verify=kwargs["token"])
+            rt.api._send_password_reset_message = lambda **kwargs: sent.update(reset=kwargs["token"])
+
+            policy = {
+                "accepted": True,
+                "terms_version": rt.api.TERMS_VERSION,
+                "privacy_version": rt.api.PRIVACY_VERSION,
+            }
+            registered = rt.json(
+                "POST",
+                "/auth/register",
+                payload={
+                    "username": "public-user",
+                    "email": "public@example.com",
+                    "password": "initial-pass-123",
+                    "password2": "initial-pass-123",
+                    **policy,
+                },
+            )
+            expect_status(registered, 202)
+            self.assertTrue(registered.json()["verification_required"])
+
+            blocked = rt.json(
+                "POST", "/auth/login", payload={"username": "public@example.com", "password": "initial-pass-123"}
+            )
+            self.assertEqual(blocked.status_code, 401)
+            verified = rt.json("POST", "/auth/verify-email", payload={"token": sent["verify"]})
+            expect_status(verified, 200)
+            logged_in = rt.json(
+                "POST", "/auth/login", payload={"username": "public@example.com", "password": "initial-pass-123"}
+            )
+            expect_status(logged_in, 200)
+
+            forgot = rt.json("POST", "/auth/forgot-password", payload={"email": "public@example.com"})
+            expect_status(forgot, 200)
+            reset = rt.json(
+                "POST",
+                "/auth/password_tokens/consume",
+                payload={"token": sent["reset"], "password": "changed-pass-456", "password2": "changed-pass-456"},
+            )
+            expect_status(reset, 200)
+            expect_status(
+                rt.json("POST", "/auth/login", payload={"username": "public-user", "password": "changed-pass-456"}),
+                200,
+            )
+
+            rt.api.google_client_id = lambda: "test-client.apps.googleusercontent.com"
+            providers = rt.request("GET", "/auth/providers")
+            expect_status(providers, 200)
+            nonce = providers.json()["google_nonce"]
+            rt.api.verify_google_credential = lambda _credential: {
+                "sub": "google-subject-1",
+                "email": "google@example.com",
+                "name": "Google User",
+                "nonce": nonce,
+            }
+            google = rt.json(
+                "POST",
+                "/auth/google",
+                payload={"credential": "stub", "username": "google-user", **policy},
+            )
+            expect_status(google, 200)
+            google_token = google.json()["token"]
+
+            deleted = rt.request("DELETE", "/me", headers={"Authorization": f"Bearer {google_token}"})
+            expect_status(deleted, 200)
+            conn = rt.db.get_conn()
+            try:
+                self.assertIsNone(conn.execute("SELECT id FROM users WHERE google_sub=?", ("google-subject-1",)).fetchone())
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM user_consents WHERE user_id NOT IN (SELECT id FROM users)").fetchone()[0], 0)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM account_tokens WHERE user_id NOT IN (SELECT id FROM users)").fetchone()[0], 0)
+            finally:
+                conn.close()
 
     def test_visibility_matrix_gallery_sidebar_and_filters(self):
         with Runtime() as rt:

@@ -185,6 +185,10 @@ def migrate_db(conn: sqlite3.Connection) -> None:
                       id                INTEGER PRIMARY KEY,
                       username          TEXT NOT NULL UNIQUE,
                       username_norm     TEXT,
+                      email             TEXT,
+                      email_norm        TEXT,
+                      email_verified_at TEXT,
+                      google_sub        TEXT,
                       password_hash     TEXT NOT NULL,
                       role              TEXT NOT NULL CHECK(role IN ('master','admin','user')),
                       created_at        TEXT NOT NULL DEFAULT (datetime('now')),
@@ -233,6 +237,10 @@ def migrate_db(conn: sqlite3.Connection) -> None:
     _ensure_col("users", "must_set_password", "must_set_password INTEGER NOT NULL DEFAULT 0")
     _ensure_col("users", "pw_set_at", "pw_set_at TEXT")
     _ensure_col("users", "username_norm", "username_norm TEXT")
+    _ensure_col("users", "email", "email TEXT")
+    _ensure_col("users", "email_norm", "email_norm TEXT")
+    _ensure_col("users", "email_verified_at", "email_verified_at TEXT")
+    _ensure_col("users", "google_sub", "google_sub TEXT")
 
     try:
         import unicodedata
@@ -256,6 +264,47 @@ def migrate_db(conn: sqlite3.Connection) -> None:
         ).fetchone()
         if not dup:
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_norm ON users(username_norm)")
+    except Exception:
+        pass
+
+    try:
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_norm "
+            "ON users(email_norm) WHERE email_norm IS NOT NULL AND TRIM(email_norm) <> ''"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub "
+            "ON users(google_sub) WHERE google_sub IS NOT NULL AND TRIM(google_sub) <> ''"
+        )
+    except Exception:
+        pass
+
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS account_tokens (
+              token_hash TEXT PRIMARY KEY,
+              user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              kind       TEXT NOT NULL CHECK(kind IN ('verify_email','password_reset')),
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              expires_at TEXT NOT NULL,
+              used_at    TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_account_tokens_user_kind
+              ON account_tokens(user_id, kind, used_at);
+
+            CREATE TABLE IF NOT EXISTS user_consents (
+              id              INTEGER PRIMARY KEY,
+              user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              terms_version   TEXT NOT NULL,
+              privacy_version TEXT NOT NULL,
+              agreed_at       TEXT NOT NULL DEFAULT (datetime('now')),
+              method          TEXT NOT NULL CHECK(method IN ('password','google','migration'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_consents_user
+              ON user_consents(user_id, agreed_at);
+            """
+        )
     except Exception:
         pass
 
@@ -1165,6 +1214,10 @@ CREATE TABLE IF NOT EXISTS users (
   id            INTEGER PRIMARY KEY,
   username      TEXT NOT NULL UNIQUE,
   username_norm TEXT,
+  email         TEXT,
+  email_norm    TEXT,
+  email_verified_at TEXT,
+  google_sub    TEXT,
   password_hash TEXT NOT NULL,
   role          TEXT NOT NULL CHECK(role IN ('master','admin','user')),
   created_at    TEXT NOT NULL DEFAULT (datetime('now')),
@@ -1181,6 +1234,24 @@ CREATE TABLE IF NOT EXISTS password_tokens (
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   expires_at  TEXT NOT NULL,
   used_at     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS account_tokens (
+  token_hash TEXT PRIMARY KEY,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind       TEXT NOT NULL CHECK(kind IN ('verify_email','password_reset')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT NOT NULL,
+  used_at    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS user_consents (
+  id              INTEGER PRIMARY KEY,
+  user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  terms_version   TEXT NOT NULL,
+  privacy_version TEXT NOT NULL,
+  agreed_at       TEXT NOT NULL DEFAULT (datetime('now')),
+  method          TEXT NOT NULL CHECK(method IN ('password','google','migration'))
 );
 
 CREATE TABLE IF NOT EXISTS images (

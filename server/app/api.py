@@ -60,6 +60,17 @@ from .services.gallery_query import (
 from .services.derivative_queue import enqueue_derivative_job, enqueue_upload_item_job, start_derivative_worker, stop_derivative_worker
 from .logging_utils import log_perf, perf_logging_enabled
 from .services.update_checker import get_update_status
+from .services.account_auth import (
+    PRIVACY_VERSION,
+    TERMS_VERSION,
+    google_client_id,
+    hash_account_token,
+    normalize_email,
+    send_account_email,
+    smtp_enabled,
+    valid_email,
+    verify_google_credential,
+)
 
 api_router = APIRouter()
 
@@ -1485,6 +1496,413 @@ class LoginReq(BaseModel):
     password: str
 
 
+_PUBLIC_AUTH_RATE_LOCK = threading.Lock()
+_PUBLIC_AUTH_RATE: dict[str, list[float]] = {}
+
+
+def _public_auth_client_key(request: Request) -> str:
+    value = (request.headers.get("cf-connecting-ip") or "").split(",")[0].strip()
+    if value:
+        return value[:96]
+    if request.client and request.client.host:
+        return str(request.client.host)[:96]
+    return "unknown"
+
+
+def _check_public_auth_rate(request: Request, action: str, *, limit: int, window_seconds: int) -> None:
+    now = time.time()
+    key = f"{action}:{_public_auth_client_key(request)}"
+    cutoff = now - max(1, int(window_seconds))
+    with _PUBLIC_AUTH_RATE_LOCK:
+        recent = [stamp for stamp in _PUBLIC_AUTH_RATE.get(key, []) if stamp >= cutoff]
+        if len(recent) >= max(1, int(limit)):
+            raise HTTPException(status_code=429, detail="too many requests")
+        recent.append(now)
+        _PUBLIC_AUTH_RATE[key] = recent
+
+
+def _validate_public_username(username: str | None) -> tuple[str, str]:
+    display = unicodedata.normalize("NFKC", str(username or "")).strip()
+    normalized = _normalize_username(display)
+    if len(display) < 2 or len(display) > 40 or not normalized:
+        raise HTTPException(status_code=400, detail="username must be 2-40 characters")
+    if any(unicodedata.category(ch).startswith("C") for ch in display):
+        raise HTTPException(status_code=400, detail="username contains invalid characters")
+    if "@" in display:
+        raise HTTPException(status_code=400, detail="username cannot contain @")
+    return display, normalized
+
+
+def _validate_new_password(password: str, password2: str) -> None:
+    if not password or not password2:
+        raise HTTPException(status_code=400, detail="password required")
+    if password != password2:
+        raise HTTPException(status_code=400, detail="password mismatch")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="password too short")
+    if len(password) > 256:
+        raise HTTPException(status_code=400, detail="password too long")
+
+
+def _validate_current_consent(*, accepted: bool, terms_version: str, privacy_version: str) -> None:
+    if not accepted:
+        raise HTTPException(status_code=400, detail="agreement required")
+    if str(terms_version or "") != TERMS_VERSION or str(privacy_version or "") != PRIVACY_VERSION:
+        raise HTTPException(status_code=409, detail="policy version changed")
+
+
+def _record_user_consent(conn: sqlite3.Connection, user_id: int, *, method: str) -> None:
+    conn.execute(
+        "INSERT INTO user_consents(user_id, terms_version, privacy_version, method) VALUES (?,?,?,?)",
+        (int(user_id), TERMS_VERSION, PRIVACY_VERSION, str(method)),
+    )
+
+
+def _create_account_token(
+    conn: sqlite3.Connection,
+    *,
+    user_id: int,
+    kind: str,
+    expires_in: timedelta,
+) -> str:
+    raw = secrets.token_urlsafe(40)
+    token_hash = hash_account_token(raw)
+    expires_at = (datetime.now(timezone.utc) + expires_in).isoformat()
+    conn.execute(
+        "UPDATE account_tokens SET used_at=datetime('now') WHERE user_id=? AND kind=? AND used_at IS NULL",
+        (int(user_id), str(kind)),
+    )
+    conn.execute(
+        "INSERT INTO account_tokens(token_hash, user_id, kind, expires_at) VALUES (?,?,?,?)",
+        (token_hash, int(user_id), str(kind), expires_at),
+    )
+    return raw
+
+
+def _send_verification_message(*, email: str, username: str, token: str, request: Request) -> None:
+    url = _abs_url(f"/verify-email.html?token={token}", request)
+    send_account_email(
+        to_email=email,
+        subject="NImageManager メールアドレスの確認",
+        body=(
+            f"{username} さん\n\n"
+            "NImageManagerへの登録を完了するには、24時間以内に次のURLを開いてください。\n"
+            f"{url}\n\n"
+            "この登録に心当たりがない場合は、このメールを破棄してください。\n\n"
+            "NImageManager運営\n"
+            "お問い合わせ: nimagemanager@gmail.com\n"
+        ),
+    )
+
+
+def _send_password_reset_message(*, email: str, username: str, token: str, request: Request) -> None:
+    url = _abs_url(f"/set-password.html?token={token}", request)
+    send_account_email(
+        to_email=email,
+        subject="NImageManager パスワード再設定",
+        body=(
+            f"{username} さん\n\n"
+            "パスワードを再設定するには、2時間以内に次のURLを開いてください。\n"
+            f"{url}\n\n"
+            "この操作に心当たりがない場合は、何もせずこのメールを破棄してください。\n\n"
+            "NImageManager運営\n"
+            "お問い合わせ: nimagemanager@gmail.com\n"
+        ),
+    )
+
+
+def _set_login_cookie(response: Response, request: Request, row: sqlite3.Row) -> str:
+    token = create_token(user_id=int(row["id"]), username=row["username"], role=row["role"])
+    response.set_cookie(
+        key="nai_token",
+        value=token,
+        httponly=True,
+        samesite=_cookie_samesite_value(request),
+        max_age=60 * 60 * 24 * 30,
+        path="/",
+        secure=_cookie_secure_flag(request),
+    )
+    return token
+
+
+class RegisterReq(BaseModel):
+    username: str
+    email: str
+    password: str
+    password2: str
+    accepted: bool = False
+    terms_version: str = ""
+    privacy_version: str = ""
+
+
+@api_router.get("/auth/providers")
+def auth_providers(request: Request, response: Response):
+    client_id = google_client_id()
+    google_nonce = secrets.token_urlsafe(24) if client_id else None
+    if google_nonce:
+        response.set_cookie(
+            key="nai_google_nonce",
+            value=google_nonce,
+            httponly=True,
+            samesite=_cookie_samesite_value(request),
+            max_age=600,
+            path="/api/auth/google",
+            secure=_cookie_secure_flag(request),
+        )
+    return {
+        "google_enabled": bool(client_id),
+        "google_client_id": client_id or None,
+        "google_nonce": google_nonce,
+        "registration_enabled": smtp_enabled(),
+        "terms_version": TERMS_VERSION,
+        "privacy_version": PRIVACY_VERSION,
+    }
+
+
+@api_router.post("/auth/register", status_code=202)
+def register_account(request: Request, req: RegisterReq):
+    _check_public_auth_rate(request, "register", limit=5, window_seconds=3600)
+    if not smtp_enabled():
+        raise HTTPException(status_code=503, detail="registration email is not configured")
+    username, username_norm = _validate_public_username(req.username)
+    email = normalize_email(req.email)
+    if not valid_email(email):
+        raise HTTPException(status_code=400, detail="valid email required")
+    _validate_new_password(req.password, req.password2)
+    _validate_current_consent(
+        accepted=bool(req.accepted),
+        terms_version=req.terms_version,
+        privacy_version=req.privacy_version,
+    )
+
+    conn = get_conn()
+    try:
+        try:
+            cur = conn.execute(
+                """
+                INSERT INTO users(
+                  username, username_norm, email, email_norm, password_hash, role,
+                  disabled, must_set_password, pw_set_at
+                ) VALUES (?,?,?,?,?,'user',0,0,datetime('now'))
+                """,
+                (username, username_norm, email, email, hash_password(req.password)),
+            )
+            user_id = int(cur.lastrowid)
+            _record_user_consent(conn, user_id, method="password")
+            token = _create_account_token(
+                conn,
+                user_id=user_id,
+                kind="verify_email",
+                expires_in=timedelta(hours=24),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            conn.rollback()
+            text = str(exc).lower()
+            if "email" in text:
+                raise HTTPException(status_code=409, detail="email already registered")
+            raise HTTPException(status_code=409, detail="username already exists")
+
+        try:
+            _send_verification_message(email=email, username=username, token=token, request=request)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="verification email could not be sent") from exc
+        return {"ok": True, "verification_required": True}
+    finally:
+        conn.close()
+
+
+class EmailReq(BaseModel):
+    email: str
+
+
+@api_router.post("/auth/resend-verification")
+def resend_verification(request: Request, req: EmailReq):
+    _check_public_auth_rate(request, "resend", limit=5, window_seconds=3600)
+    email = normalize_email(req.email)
+    if not valid_email(email) or not smtp_enabled():
+        return {"ok": True}
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT id, username, email, email_verified_at, disabled FROM users WHERE email_norm=?",
+            (email,),
+        ).fetchone()
+        if not row or row["email_verified_at"] or int(row["disabled"] or 0) == 1:
+            return {"ok": True}
+        token = _create_account_token(
+            conn,
+            user_id=int(row["id"]),
+            kind="verify_email",
+            expires_in=timedelta(hours=24),
+        )
+        conn.commit()
+        try:
+            _send_verification_message(email=row["email"], username=row["username"], token=token, request=request)
+        except Exception:
+            pass
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+class VerifyEmailReq(BaseModel):
+    token: str
+
+
+@api_router.post("/auth/verify-email")
+def verify_email(req: VerifyEmailReq):
+    token_hash = hash_account_token(req.token)
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT token_hash, user_id, expires_at, used_at FROM account_tokens WHERE token_hash=? AND kind='verify_email'",
+            (token_hash,),
+        ).fetchone()
+        if not row or row["used_at"]:
+            raise HTTPException(status_code=400, detail="invalid verification token")
+        try:
+            expires = datetime.fromisoformat(str(row["expires_at"]).replace("Z", "+00:00"))
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) > expires:
+                raise HTTPException(status_code=410, detail="verification token expired")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="invalid verification token") from exc
+        conn.execute("UPDATE users SET email_verified_at=datetime('now') WHERE id=?", (int(row["user_id"]),))
+        conn.execute("UPDATE account_tokens SET used_at=datetime('now') WHERE token_hash=?", (token_hash,))
+        conn.execute(
+            "UPDATE account_tokens SET used_at=datetime('now') WHERE user_id=? AND kind='verify_email' AND used_at IS NULL",
+            (int(row["user_id"]),),
+        )
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@api_router.post("/auth/forgot-password")
+def forgot_password(request: Request, req: EmailReq):
+    _check_public_auth_rate(request, "forgot", limit=5, window_seconds=3600)
+    email = normalize_email(req.email)
+    if not valid_email(email) or not smtp_enabled():
+        return {"ok": True}
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            """
+            SELECT id, username, email
+            FROM users
+            WHERE email_norm=? AND email_verified_at IS NOT NULL AND disabled=0
+            """,
+            (email,),
+        ).fetchone()
+        if not row:
+            return {"ok": True}
+        token = _create_account_token(
+            conn,
+            user_id=int(row["id"]),
+            kind="password_reset",
+            expires_in=timedelta(hours=2),
+        )
+        conn.commit()
+        try:
+            _send_password_reset_message(email=row["email"], username=row["username"], token=token, request=request)
+        except Exception:
+            pass
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+class GoogleAuthReq(BaseModel):
+    credential: str
+    username: str | None = None
+    accepted: bool = False
+    terms_version: str = ""
+    privacy_version: str = ""
+
+
+@api_router.post("/auth/google")
+def google_login(request: Request, response: Response, req: GoogleAuthReq):
+    _check_public_auth_rate(request, "google", limit=20, window_seconds=3600)
+    try:
+        profile = verify_google_credential(req.credential)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    expected_nonce = str(request.cookies.get("nai_google_nonce") or "")
+    if not expected_nonce or not secrets.compare_digest(expected_nonce, str(profile.get("nonce") or "")):
+        raise HTTPException(status_code=401, detail="Google sign-in state mismatch")
+
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT id, username, role, disabled, google_sub FROM users WHERE google_sub=?",
+            (profile["sub"],),
+        ).fetchone()
+        if not row:
+            email_row = conn.execute(
+                "SELECT id, username, role, disabled, google_sub FROM users WHERE email_norm=?",
+                (profile["email"],),
+            ).fetchone()
+            if email_row:
+                raise HTTPException(status_code=409, detail="email already registered; sign in with password")
+
+        if not row:
+            _validate_current_consent(
+                accepted=bool(req.accepted),
+                terms_version=req.terms_version,
+                privacy_version=req.privacy_version,
+            )
+            username, username_norm = _validate_public_username(req.username)
+            try:
+                cur = conn.execute(
+                    """
+                    INSERT INTO users(
+                      username, username_norm, email, email_norm, email_verified_at,
+                      google_sub, password_hash, role, disabled, must_set_password, pw_set_at
+                    ) VALUES (?,?,?,?,datetime('now'),?,?,'user',0,0,datetime('now'))
+                    """,
+                    (
+                        username,
+                        username_norm,
+                        profile["email"],
+                        profile["email"],
+                        profile["sub"],
+                        hash_password(secrets.token_urlsafe(48)),
+                    ),
+                )
+                user_id = int(cur.lastrowid)
+                _record_user_consent(conn, user_id, method="google")
+                conn.commit()
+                row = conn.execute(
+                    "SELECT id, username, role, disabled FROM users WHERE id=?",
+                    (user_id,),
+                ).fetchone()
+            except sqlite3.IntegrityError as exc:
+                conn.rollback()
+                raise HTTPException(status_code=409, detail="username or email already registered") from exc
+
+        if int(row["disabled"] or 0) == 1:
+            raise HTTPException(status_code=403, detail="account disabled")
+        token = _set_login_cookie(response, request, row)
+        response.delete_cookie(
+            "nai_google_nonce",
+            path="/api/auth/google",
+            secure=_cookie_secure_flag(request),
+            samesite=_cookie_samesite_value(request),
+        )
+        return {
+            "ok": True,
+            "token": token,
+            "user": {"id": row["id"], "username": row["username"], "role": row["role"]},
+        }
+    finally:
+        conn.close()
+
+
 def _ext_auth_failed(request: Request | None = None) -> JSONResponse:
     payload = {
         "ok": False,
@@ -1499,11 +1917,20 @@ def _ext_auth_failed(request: Request | None = None) -> JSONResponse:
 def _login_user_row(username: str, password: str) -> sqlite3.Row | None:
     conn = get_conn()
     try:
-        row = conn.execute(
-            "SELECT id, username, password_hash, role, disabled FROM users WHERE username_norm=?",
-            (_normalize_username(username),),
-        ).fetchone()
+        identity = str(username or "").strip()
+        if valid_email(identity):
+            row = conn.execute(
+                "SELECT id, username, password_hash, role, disabled, email_norm, email_verified_at FROM users WHERE email_norm=?",
+                (normalize_email(identity),),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT id, username, password_hash, role, disabled, email_norm, email_verified_at FROM users WHERE username_norm=?",
+                (_normalize_username(identity),),
+            ).fetchone()
         if not row or int(row["disabled"] or 0) == 1:
+            return None
+        if str(row["email_norm"] or "").strip() and not row["email_verified_at"]:
             return None
         if not verify_password(password, row["password_hash"]):
             return None
@@ -1795,7 +2222,7 @@ def delete_me(user: dict = Depends(get_user)):
 
 
 @api_router.post("/auth/logout")
-def logout(response: Response):
+def logout(request: Request, response: Response):
     response.delete_cookie("nai_token", path="/", secure=_cookie_secure_flag(request), samesite=_cookie_samesite_value(request))
     return {"ok": True}
 
@@ -2191,6 +2618,34 @@ def admin_issue_password_link(request: Request, user_id: int, admin: dict = Depe
 def password_token_info(token: str):
     conn = get_conn()
     try:
+        account_row = conn.execute(
+            """
+            SELECT at.kind, at.expires_at, at.used_at, u.username
+            FROM account_tokens at
+            JOIN users u ON u.id=at.user_id
+            WHERE at.token_hash=? AND at.kind='password_reset'
+            """,
+            (hash_account_token(token),),
+        ).fetchone()
+        if account_row:
+            if account_row["used_at"]:
+                return {"ok": False, "status": "used", "kind": "reset", "username": account_row["username"]}
+            try:
+                exp = datetime.fromisoformat(str(account_row["expires_at"]).replace("Z", "+00:00"))
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) > exp:
+                    return {"ok": False, "status": "expired", "kind": "reset", "username": account_row["username"]}
+            except Exception:
+                pass
+            return {
+                "ok": True,
+                "status": "ok",
+                "kind": "reset",
+                "username": account_row["username"],
+                "expires_at": account_row["expires_at"],
+            }
+
         row = conn.execute(
             "SELECT pt.token, pt.kind, pt.expires_at, pt.used_at, u.username "
             "FROM password_tokens pt JOIN users u ON u.id=pt.user_id WHERE pt.token=?",
@@ -2230,17 +2685,56 @@ def consume_password_token(req: ConsumePasswordTokenReq):
         raise HTTPException(status_code=400, detail="password required")
     if req.password != req.password2:
         raise HTTPException(status_code=400, detail="password mismatch")
-    if len(req.password) < 6:
-        raise HTTPException(status_code=400, detail="password too short")
+    if len(req.password) > 256:
+        raise HTTPException(status_code=400, detail="password too long")
 
     conn = get_conn()
     try:
+        account_hash = hash_account_token(req.token)
+        account_row = conn.execute(
+            """
+            SELECT token_hash, user_id, expires_at, used_at
+            FROM account_tokens
+            WHERE token_hash=? AND kind='password_reset'
+            """,
+            (account_hash,),
+        ).fetchone()
+        if account_row:
+            if len(req.password) < 8:
+                raise HTTPException(status_code=400, detail="password must be at least 8 characters")
+            if account_row["used_at"]:
+                raise HTTPException(status_code=409, detail="token already used")
+            try:
+                exp = datetime.fromisoformat(str(account_row["expires_at"]).replace("Z", "+00:00"))
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) > exp:
+                    raise HTTPException(status_code=410, detail="token expired")
+            except HTTPException:
+                raise
+            except Exception:
+                pass
+            uid = int(account_row["user_id"])
+            conn.execute(
+                "UPDATE users SET password_hash=?, must_set_password=0, pw_set_at=datetime('now') WHERE id=?",
+                (hash_password(req.password), uid),
+            )
+            conn.execute("UPDATE account_tokens SET used_at=datetime('now') WHERE token_hash=?", (account_hash,))
+            conn.execute(
+                "UPDATE account_tokens SET used_at=datetime('now') WHERE user_id=? AND kind='password_reset' AND used_at IS NULL",
+                (uid,),
+            )
+            conn.commit()
+            return {"ok": True}
+
         row = conn.execute(
             "SELECT token, user_id, kind, expires_at, used_at FROM password_tokens WHERE token=?",
             (req.token,),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="not found")
+        if len(req.password) < 6:
+            raise HTTPException(status_code=400, detail="password must be at least 6 characters")
         if row["used_at"]:
             raise HTTPException(status_code=409, detail="token already used")
 

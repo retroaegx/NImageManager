@@ -221,6 +221,7 @@ def _html_with_asset_versions(name: str, bootstrap_user: dict | None = None) -> 
         "login.js": _asset_version("login.js"),
         "setup.js": _asset_version("setup.js"),
         "set-password.js": _asset_version("set-password.js"),
+        "verify-email.js": _asset_version("verify-email.js"),
     }
     for asset, version in repls.items():
         html = re.sub(
@@ -304,6 +305,21 @@ def _set_password(user: dict | None = Depends(get_user_optional)):
     if user:
         return _file("set-password.html", bootstrap_user=_bootstrap_user_payload(user))
     return _file("set-password.html")
+
+
+@app.get("/verify-email.html")
+def _verify_email_page():
+    return _file("verify-email.html")
+
+
+@app.get("/terms.html")
+def _terms_page():
+    return _file("terms.html")
+
+
+@app.get("/privacy.html")
+def _privacy_page():
+    return _file("privacy.html")
 
 
 @app.get("/admin.html")

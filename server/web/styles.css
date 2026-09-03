@@ -371,6 +371,7 @@ input:focus, select:focus{
   transition: transform 120ms ease, filter 120ms ease;
 }
 .primaryBtn:hover{ transform: translateY(-1px); filter: brightness(1.05); }
+.primaryBtn:disabled{opacity:.42;cursor:not-allowed;transform:none;filter:saturate(.35)}
 
 .ghostBtn{
   border: 1px solid rgba(255,255,255,0.16);
@@ -2176,6 +2177,45 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
 .loginEmbedded .loginCard{ max-width: 640px; }
 .loginEmbedded #loginFormArea{ display:none !important; }
 
+.authTabs{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:12px 0 14px;padding:4px;border-radius:12px;background:rgba(255,255,255,.04)}
+.authTab{border:0;border-radius:9px;padding:9px 12px;background:transparent;color:rgba(255,255,255,.68);font-weight:800;cursor:pointer}
+.authTab.active{background:rgba(116,140,255,.2);color:#fff;box-shadow:inset 0 0 0 1px rgba(145,162,255,.28)}
+.authTab:disabled{opacity:.42;cursor:not-allowed}
+.authActionRow{align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.authActionRow .primaryBtn{min-width:140px}
+.linkBtn{border:0;background:transparent;color:#aebcff;padding:7px 0;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+.authMessage{min-height:20px;margin-top:8px;overflow-wrap:anywhere}
+.authWideBtn,.agreementOpenBtn{width:100%;justify-content:center;margin-top:10px}
+.agreementState{margin-top:8px;line-height:1.55}
+.agreementState.ok,.authMessage.ok{color:#73e6a4}
+.authDivider{display:flex;align-items:center;gap:10px;margin:16px 0 12px;color:rgba(255,255,255,.5);font-size:12px}
+.authDivider::before,.authDivider::after{content:"";height:1px;background:rgba(255,255,255,.12);flex:1}
+.googleAuthArea>div:last-child{display:flex;justify-content:center;min-height:40px}
+.loginLegalLinks{display:flex;justify-content:center;gap:18px;margin-top:18px;font-size:12px}
+.loginLegalLinks a{color:rgba(210,217,255,.8)}
+
+.agreementModal{position:fixed;inset:0;z-index:1000;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(2,4,14,.78);backdrop-filter:blur(8px)}
+.agreementDialog{width:min(820px,100%);height:min(780px,94vh);display:flex;flex-direction:column;border:1px solid rgba(255,255,255,.16);border-radius:18px;background:#11152a;box-shadow:0 28px 90px rgba(0,0,0,.62);overflow:hidden}
+.agreementHeader{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid rgba(255,255,255,.1)}
+.agreementHeader h2{margin:0 0 3px;font-size:18px}
+.agreementFrame{width:100%;flex:1;border:0;background:#0d1020}
+.agreementScrollHint{padding:8px 16px;color:#ffd37a;text-align:center;border-top:1px solid rgba(255,255,255,.08)}
+.agreementFooter{display:flex;justify-content:flex-end;padding:12px 16px;border-top:1px solid rgba(255,255,255,.08)}
+
+.legalPage{margin:0;background:#0d1020;color:#edf0ff;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.75}
+.legalDocument{width:min(900px,100%);margin:0 auto;padding:20px clamp(18px,4vw,46px) 70px;box-sizing:border-box}
+.legalHeader{display:flex;justify-content:space-between;align-items:center;padding:8px 0 18px;border-bottom:1px solid rgba(255,255,255,.12)}
+.legalHeader a,.legalDocument article a{color:#aebcff}
+.legalEmbedded .legalHeader{display:none}
+.legalEmbedded .legalDocument{padding-top:8px}
+.legalDocument article{padding-top:16px}
+.legalDocument h1{font-size:clamp(25px,5vw,36px);line-height:1.3;margin:12px 0}
+.legalDocument h2{font-size:18px;margin:32px 0 8px;padding-bottom:6px;border-bottom:1px solid rgba(255,255,255,.11)}
+.legalDocument p,.legalDocument li{color:rgba(239,242,255,.86)}
+.legalDocument li+li{margin-top:7px}
+.legalMeta{font-size:12px;color:rgba(255,255,255,.58)!important}
+@media(max-width:600px){.loginShell{padding:10px}.loginCard{padding:15px}.agreementModal{padding:0}.agreementDialog{height:100dvh;border-radius:0;border-left:0;border-right:0}.authActionRow>*{width:100%}.linkBtn{text-align:left}}
+
 
 .menu::-webkit-scrollbar{ display:none; }
 
@@ -2803,4 +2843,3 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
     z-index: 60;
   }
 }
-

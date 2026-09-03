@@ -32,7 +32,7 @@ def get_user_optional(
         try:
             row = conn.execute(
                 """
-                SELECT u.id, u.username, u.role, u.disabled,
+                SELECT u.id, u.username, u.email, u.email_verified_at, u.role, u.disabled,
                        COALESCE(us.share_works,0) AS share_works,
                        COALESCE(us.share_bookmarks,0) AS share_bookmarks,
                        COALESCE(NULLIF(TRIM(us.ui_language),''),'auto') AS ui_language
@@ -48,7 +48,7 @@ def get_user_optional(
                 raise
             row = conn.execute(
                 """
-                SELECT u.id, u.username, u.role, u.disabled,
+                SELECT u.id, u.username, u.email, u.email_verified_at, u.role, u.disabled,
                        COALESCE(us.share_works,0) AS share_works,
                        COALESCE(us.share_bookmarks,0) AS share_bookmarks
                 FROM users u
@@ -63,6 +63,8 @@ def get_user_optional(
         return {
             "id": row["id"],
             "username": row["username"],
+            "email": row["email"],
+            "email_verified": bool(row["email_verified_at"]),
             "role": row["role"],
             "share_works": int(row["share_works"] or 0),
             "share_bookmarks": int(row["share_bookmarks"] or 0),

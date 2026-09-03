@@ -20,7 +20,7 @@
         </div>
       </div>
 
-      <h2 class="loginH" data-i18n="login.heading">ログイン</h2>
+      <h2 class="loginH" id="authHeading" data-i18n="login.heading">ログイン</h2>
       <div id="loginHint" class="loginHint" data-i18n="login.hint">ローカルで安全に画像を管理します。</div>
 
       <div id="embedLoginBox" class="embedLoginBox hidden">
@@ -34,18 +34,93 @@
       </div>
 
       <div id="loginFormArea">
-        <div class="field">
-          <label data-i18n="common.username">ユーザー名</label>
-          <input id="loginUser" autocomplete="username" data-i18n-placeholder="common.username_placeholder" />
+        <div class="authTabs" role="tablist">
+          <button id="showLoginBtn" class="authTab active" type="button" role="tab" aria-selected="true" data-i18n="login.tab">ログイン</button>
+          <button id="showRegisterBtn" class="authTab" type="button" role="tab" aria-selected="false" data-i18n="register.tab">新規登録</button>
         </div>
-        <div class="field">
-          <label data-i18n="common.password">パスワード</label>
-          <input id="loginPass" type="password" autocomplete="current-password" data-i18n-placeholder="common.password_placeholder" />
+
+        <section id="loginPanel">
+          <div class="field">
+            <label data-i18n="login.identity">ユーザー名またはメールアドレス</label>
+            <input id="loginUser" autocomplete="username" data-i18n-placeholder="login.identity_placeholder" />
+          </div>
+          <div class="field">
+            <label data-i18n="common.password">パスワード</label>
+            <input id="loginPass" type="password" autocomplete="current-password" data-i18n-placeholder="common.password_placeholder" />
+          </div>
+          <div class="row authActionRow">
+            <button id="loginBtn" class="primaryBtn" type="button" data-i18n="login.action">ログイン</button>
+            <button id="forgotPasswordBtn" class="linkBtn" type="button" data-i18n="password.forgot">パスワードを忘れた場合</button>
+          </div>
+          <div id="loginErr" class="err authMessage" aria-live="polite"></div>
+          <div id="googleLoginArea" class="googleAuthArea hidden">
+            <div class="authDivider"><span data-i18n="login.or">または</span></div>
+            <div id="googleLoginButton"></div>
+          </div>
+        </section>
+
+        <section id="registerPanel" class="hidden">
+          <div class="field">
+            <label data-i18n="common.username">ユーザー名</label>
+            <input id="registerUser" maxlength="40" autocomplete="username" data-i18n-placeholder="common.username_placeholder" />
+          </div>
+          <div class="field">
+            <label data-i18n="common.email">メールアドレス</label>
+            <input id="registerEmail" type="email" maxlength="254" autocomplete="email" data-i18n-placeholder="common.email_placeholder" />
+          </div>
+          <div class="field">
+            <label data-i18n="common.password">パスワード</label>
+            <input id="registerPass" type="password" minlength="8" autocomplete="new-password" data-i18n-placeholder="register.password_placeholder" />
+          </div>
+          <div class="field">
+            <label data-i18n="common.password_confirm">パスワード（確認）</label>
+            <input id="registerPass2" type="password" minlength="8" autocomplete="new-password" data-i18n-placeholder="common.password_placeholder" />
+          </div>
+          <button id="openAgreementBtn" class="secondaryBtn agreementOpenBtn" type="button" data-i18n="agreement.open">利用規約とプライバシーポリシーを確認</button>
+          <div id="agreementState" class="small agreementState" data-i18n="agreement.required">登録には両方の文書を最後まで確認し、同意する必要があります。</div>
+          <button id="registerBtn" class="primaryBtn authWideBtn" type="button" disabled data-i18n="register.action">確認メールを送信して登録</button>
+          <div id="registerErr" class="err authMessage" aria-live="polite"></div>
+          <button id="resendVerificationBtn" class="linkBtn" type="button" data-i18n="register.resend">確認メールを再送</button>
+          <div id="googleRegisterArea" class="googleAuthArea hidden">
+            <div class="authDivider"><span data-i18n="register.google_or">またはGoogleで登録</span></div>
+            <div id="googleRegisterButton"></div>
+          </div>
+        </section>
+
+        <section id="forgotPanel" class="hidden">
+          <p class="loginHint" data-i18n="password.reset_hint">登録済みメールアドレスへ再設定用URLを送信します。</p>
+          <div class="field">
+            <label data-i18n="common.email">メールアドレス</label>
+            <input id="forgotEmail" type="email" autocomplete="email" data-i18n-placeholder="common.email_placeholder" />
+          </div>
+          <div class="row authActionRow">
+            <button id="sendResetBtn" class="primaryBtn" type="button" data-i18n="password.send_reset">再設定メールを送信</button>
+            <button id="backToLoginBtn" class="secondaryBtn" type="button" data-i18n="common.back">戻る</button>
+          </div>
+          <div id="forgotMessage" class="small authMessage" aria-live="polite"></div>
+        </section>
+
+        <div class="loginLegalLinks">
+          <a href="/terms.html" target="_blank" rel="noopener" data-i18n="legal.terms">利用規約</a>
+          <a href="/privacy.html" target="_blank" rel="noopener" data-i18n="legal.privacy">プライバシーポリシー</a>
         </div>
-        <div class="row" style="align-items:center; justify-content:space-between; gap:10px">
-          <button id="loginBtn" class="primaryBtn" style="min-width:140px" data-i18n="login.action">ログイン</button>
-          <span id="loginErr" class="err"></span>
+      </div>
+    </div>
+  </div>
+
+  <div id="agreementModal" class="agreementModal hidden" role="dialog" aria-modal="true" aria-labelledby="agreementTitle">
+    <div class="agreementDialog">
+      <div class="agreementHeader">
+        <div>
+          <h2 id="agreementTitle" data-i18n="agreement.terms_title">利用規約</h2>
+          <div id="agreementProgress" class="small" data-i18n="agreement.step_terms">1/2 利用規約</div>
         </div>
+        <button id="closeAgreementBtn" class="ghostBtn" type="button" aria-label="閉じる" data-i18n="common.close">閉じる</button>
+      </div>
+      <iframe id="agreementFrame" class="agreementFrame" title="利用規約"></iframe>
+      <div id="agreementScrollHint" class="small agreementScrollHint" data-i18n="agreement.scroll_hint">最後までスクロールしてください。</div>
+      <div class="agreementFooter">
+        <button id="agreementNextBtn" class="primaryBtn" type="button" disabled data-i18n="agreement.next_privacy">プライバシーポリシーへ</button>
       </div>
     </div>
   </div>
