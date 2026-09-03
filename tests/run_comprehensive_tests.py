@@ -584,10 +584,42 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             google = rt.json(
                 "POST",
                 "/auth/google",
-                payload={"credential": "stub", "username": "google-user", **policy},
+                payload={
+                    "credential": "stub",
+                    "username": "google-user",
+                    "password": "extension-pass-789",
+                    "password2": "extension-pass-789",
+                    **policy,
+                },
             )
             expect_status(google, 200)
             google_token = google.json()["token"]
+
+            conn = rt.db.get_conn()
+            try:
+                conn.execute("UPDATE users SET extension_password_set=0 WHERE google_sub=?", ("google-subject-1",))
+                conn.commit()
+            finally:
+                conn.close()
+            expect_status(
+                rt.json("POST", "/auth/login", payload={"username": "google-user", "password": "extension-pass-789"}),
+                401,
+            )
+            providers = rt.request("GET", "/auth/providers")
+            nonce = providers.json()["google_nonce"]
+            needs_extension_password = rt.json("POST", "/auth/google", payload={"credential": "stub"})
+            self.assertEqual(needs_extension_password.status_code, 428)
+            google = rt.json(
+                "POST",
+                "/auth/google",
+                payload={"credential": "stub", "password": "new-extension-pass", "password2": "new-extension-pass"},
+            )
+            expect_status(google, 200)
+            google_token = google.json()["token"]
+            expect_status(
+                rt.json("POST", "/auth/login", payload={"username": "google-user", "password": "new-extension-pass"}),
+                200,
+            )
 
             deleted = rt.request("DELETE", "/me", headers={"Authorization": f"Bearer {google_token}"})
             expect_status(deleted, 200)

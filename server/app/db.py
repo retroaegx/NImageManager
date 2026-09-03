@@ -189,6 +189,7 @@ def migrate_db(conn: sqlite3.Connection) -> None:
                       email_norm        TEXT,
                       email_verified_at TEXT,
                       google_sub        TEXT,
+                      extension_password_set INTEGER NOT NULL DEFAULT 0,
                       password_hash     TEXT NOT NULL,
                       role              TEXT NOT NULL CHECK(role IN ('master','admin','user')),
                       created_at        TEXT NOT NULL DEFAULT (datetime('now')),
@@ -241,6 +242,7 @@ def migrate_db(conn: sqlite3.Connection) -> None:
     _ensure_col("users", "email_norm", "email_norm TEXT")
     _ensure_col("users", "email_verified_at", "email_verified_at TEXT")
     _ensure_col("users", "google_sub", "google_sub TEXT")
+    _ensure_col("users", "extension_password_set", "extension_password_set INTEGER NOT NULL DEFAULT 0")
 
     try:
         import unicodedata
@@ -1218,6 +1220,7 @@ CREATE TABLE IF NOT EXISTS users (
   email_norm    TEXT,
   email_verified_at TEXT,
   google_sub    TEXT,
+  extension_password_set INTEGER NOT NULL DEFAULT 0,
   password_hash TEXT NOT NULL,
   role          TEXT NOT NULL CHECK(role IN ('master','admin','user')),
   created_at    TEXT NOT NULL DEFAULT (datetime('now')),

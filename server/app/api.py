@@ -1820,6 +1820,8 @@ def forgot_password(request: Request, req: EmailReq):
 class GoogleAuthReq(BaseModel):
     credential: str
     username: str | None = None
+    password: str | None = None
+    password2: str | None = None
     accepted: bool = False
     terms_version: str = ""
     privacy_version: str = ""
@@ -1839,12 +1841,12 @@ def google_login(request: Request, response: Response, req: GoogleAuthReq):
     conn = get_conn()
     try:
         row = conn.execute(
-            "SELECT id, username, role, disabled, google_sub FROM users WHERE google_sub=?",
+            "SELECT id, username, role, disabled, google_sub, extension_password_set FROM users WHERE google_sub=?",
             (profile["sub"],),
         ).fetchone()
         if not row:
             email_row = conn.execute(
-                "SELECT id, username, role, disabled, google_sub FROM users WHERE email_norm=?",
+                "SELECT id, username, role, disabled, google_sub, extension_password_set FROM users WHERE email_norm=?",
                 (profile["email"],),
             ).fetchone()
             if email_row:
@@ -1857,13 +1859,14 @@ def google_login(request: Request, response: Response, req: GoogleAuthReq):
                 privacy_version=req.privacy_version,
             )
             username, username_norm = _validate_public_username(req.username)
+            _validate_new_password(str(req.password or ""), str(req.password2 or ""))
             try:
                 cur = conn.execute(
                     """
                     INSERT INTO users(
                       username, username_norm, email, email_norm, email_verified_at,
-                      google_sub, password_hash, role, disabled, must_set_password, pw_set_at
-                    ) VALUES (?,?,?,?,datetime('now'),?,?,'user',0,0,datetime('now'))
+                      google_sub, extension_password_set, password_hash, role, disabled, must_set_password, pw_set_at
+                    ) VALUES (?,?,?,?,datetime('now'),?,1,?,'user',0,0,datetime('now'))
                     """,
                     (
                         username,
@@ -1871,14 +1874,14 @@ def google_login(request: Request, response: Response, req: GoogleAuthReq):
                         profile["email"],
                         profile["email"],
                         profile["sub"],
-                        hash_password(secrets.token_urlsafe(48)),
+                        hash_password(str(req.password)),
                     ),
                 )
                 user_id = int(cur.lastrowid)
                 _record_user_consent(conn, user_id, method="google")
                 conn.commit()
                 row = conn.execute(
-                    "SELECT id, username, role, disabled FROM users WHERE id=?",
+                    "SELECT id, username, role, disabled, google_sub, extension_password_set FROM users WHERE id=?",
                     (user_id,),
                 ).fetchone()
             except sqlite3.IntegrityError as exc:
@@ -1887,6 +1890,15 @@ def google_login(request: Request, response: Response, req: GoogleAuthReq):
 
         if int(row["disabled"] or 0) == 1:
             raise HTTPException(status_code=403, detail="account disabled")
+        if str(row["google_sub"] or "") and int(row["extension_password_set"] or 0) != 1:
+            if not req.password and not req.password2:
+                raise HTTPException(status_code=428, detail="extension password required")
+            _validate_new_password(str(req.password or ""), str(req.password2 or ""))
+            conn.execute(
+                "UPDATE users SET password_hash=?, extension_password_set=1, pw_set_at=datetime('now') WHERE id=?",
+                (hash_password(str(req.password)), int(row["id"])),
+            )
+            conn.commit()
         token = _set_login_cookie(response, request, row)
         response.delete_cookie(
             "nai_google_nonce",
@@ -1920,17 +1932,19 @@ def _login_user_row(username: str, password: str) -> sqlite3.Row | None:
         identity = str(username or "").strip()
         if valid_email(identity):
             row = conn.execute(
-                "SELECT id, username, password_hash, role, disabled, email_norm, email_verified_at FROM users WHERE email_norm=?",
+                "SELECT id, username, password_hash, role, disabled, email_norm, email_verified_at, google_sub, extension_password_set FROM users WHERE email_norm=?",
                 (normalize_email(identity),),
             ).fetchone()
         else:
             row = conn.execute(
-                "SELECT id, username, password_hash, role, disabled, email_norm, email_verified_at FROM users WHERE username_norm=?",
+                "SELECT id, username, password_hash, role, disabled, email_norm, email_verified_at, google_sub, extension_password_set FROM users WHERE username_norm=?",
                 (_normalize_username(identity),),
             ).fetchone()
         if not row or int(row["disabled"] or 0) == 1:
             return None
         if str(row["email_norm"] or "").strip() and not row["email_verified_at"]:
+            return None
+        if str(row["google_sub"] or "").strip() and int(row["extension_password_set"] or 0) != 1:
             return None
         if not verify_password(password, row["password_hash"]):
             return None
@@ -2716,7 +2730,7 @@ def consume_password_token(req: ConsumePasswordTokenReq):
                 pass
             uid = int(account_row["user_id"])
             conn.execute(
-                "UPDATE users SET password_hash=?, must_set_password=0, pw_set_at=datetime('now') WHERE id=?",
+                "UPDATE users SET password_hash=?, must_set_password=0, extension_password_set=1, pw_set_at=datetime('now') WHERE id=?",
                 (hash_password(req.password), uid),
             )
             conn.execute("UPDATE account_tokens SET used_at=datetime('now') WHERE token_hash=?", (account_hash,))
@@ -2754,7 +2768,7 @@ def consume_password_token(req: ConsumePasswordTokenReq):
 
         uid = int(row["user_id"])
         conn.execute(
-            "UPDATE users SET password_hash=?, must_set_password=0, pw_set_at=datetime('now') WHERE id=?",
+            "UPDATE users SET password_hash=?, must_set_password=0, extension_password_set=1, pw_set_at=datetime('now') WHERE id=?",
             (hash_password(req.password), uid),
         )
         conn.execute(

@@ -72,6 +72,7 @@
             <label data-i18n="common.password">パスワード</label>
             <input id="registerPass" type="password" minlength="8" autocomplete="new-password" data-i18n-placeholder="register.password_placeholder" />
           </div>
+          <div class="small authFieldHint" data-i18n="register.extension_password_hint">このパスワードは拡張機能からのログインにも使用します。</div>
           <div class="field">
             <label data-i18n="common.password_confirm">パスワード（確認）</label>
             <input id="registerPass2" type="password" minlength="8" autocomplete="new-password" data-i18n-placeholder="common.password_placeholder" />
@@ -100,6 +101,21 @@
           <div id="forgotMessage" class="small authMessage" aria-live="polite"></div>
         </section>
 
+        <section id="googlePasswordPanel" class="hidden">
+          <p class="loginHint" data-i18n="google_password.hint">拡張機能からログインできるよう、8文字以上のパスワードを設定してください。</p>
+          <div class="field">
+            <label data-i18n="google_password.label">拡張機能ログイン用パスワード</label>
+            <input id="googleExtensionPass" type="password" minlength="8" autocomplete="new-password" data-i18n-placeholder="register.password_placeholder" />
+          </div>
+          <div class="field">
+            <label data-i18n="common.password_confirm">パスワード（確認）</label>
+            <input id="googleExtensionPass2" type="password" minlength="8" autocomplete="new-password" data-i18n-placeholder="common.password_placeholder" />
+          </div>
+          <button id="saveGooglePasswordBtn" class="primaryBtn authWideBtn" type="button" data-i18n="google_password.action">パスワードを設定してログイン</button>
+          <div id="googlePasswordErr" class="err authMessage" aria-live="polite"></div>
+          <button id="cancelGooglePasswordBtn" class="linkBtn" type="button" data-i18n="common.back">戻る</button>
+        </section>
+
         <div class="loginLegalLinks">
           <a href="/terms.html" target="_blank" rel="noopener" data-i18n="legal.terms">利用規約</a>
           <a href="/privacy.html" target="_blank" rel="noopener" data-i18n="legal.privacy">プライバシーポリシー</a>
@@ -125,7 +141,6 @@
     </div>
   </div>
 
-  <script type="module" src="/lib/page-i18n.js"></script>
   <script type="module" src="/login.js"></script>
 </body>
 </html>
