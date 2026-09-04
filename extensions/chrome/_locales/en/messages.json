@@ -47,6 +47,9 @@
   "browserLoginHelp": {
     "message": "Sign in to NImageManager in your browser and authorize this extension. Google sign-in is supported."
   },
+  "browserLoginRequirement": {
+    "message": "This sign-in method requires NImageManager 1.0.5 or later. Update the server if it is running an older version."
+  },
   "browserLoginOpening": {
     "message": "Opening the authorization page…"
   },

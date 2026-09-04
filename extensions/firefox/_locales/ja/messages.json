@@ -47,6 +47,9 @@
   "browserLoginHelp": {
     "message": "ブラウザでNImageManagerへログインし、この拡張機能を認証します。Googleログインも利用できます。"
   },
+  "browserLoginRequirement": {
+    "message": "この認証方法にはNImageManager本体 1.0.5以降が必要です。古い本体を利用している場合は更新してください。"
+  },
   "browserLoginOpening": {
     "message": "認証ページを開いています…"
   },

@@ -96,6 +96,16 @@ button.secondary {
 .browserLoginMessage.success { color: #86efac; }
 .browserLoginMessage.error { color: #fca5a5; }
 
+.browserLoginRequirement {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(251, 191, 36, 0.5);
+  border-radius: 8px;
+  background: rgba(251, 191, 36, 0.1);
+  color: #fde68a;
+  font-size: 13px;
+}
+
 .statusList {
   display: grid;
   gap: 12px;

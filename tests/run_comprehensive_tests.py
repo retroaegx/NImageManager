@@ -508,6 +508,7 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
                 background_js = (extension_root / "background.js").read_text(encoding="utf-8")
                 manifest = json.loads((extension_root / "manifest.json").read_text(encoding="utf-8"))
                 self.assertIn('id="browserLogin"', options_html)
+                self.assertIn('data-i18n="browserLoginRequirement"', options_html)
                 self.assertNotIn('id="login"', options_html)
                 self.assertNotIn('id="username"', options_html)
                 self.assertNotIn('id="password"', options_html)
