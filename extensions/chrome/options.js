@@ -161,22 +161,6 @@ function bindBehaviorToggle(id) {
   });
 }
 
-async function login() {
-  const response = await runtimeMessage({
-    type: 'nim-login',
-    baseUrl: $('baseUrl').value,
-    username: $('username').value,
-    password: $('password').value,
-  });
-  if (!response?.ok) {
-    setPill('loginState', 'status_check_failed', 'error');
-    throw new Error(response?.code || 'LOGIN_FAILED');
-  }
-  $('password').value = '';
-  await loadConfig();
-  setPill('loginState', 'status_login_ok', 'success');
-}
-
 async function browserLogin() {
   if (browserLoginInProgress) return;
   browserLoginInProgress = true;
@@ -277,7 +261,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   bindAction('saveConfig', saveConfig, () => setPill('saveState', 'status_save_failed', 'error'));
   bindAction('browserLogin', browserLogin, () => setPill('loginState', 'status_check_failed', 'error'));
-  bindAction('login', login, () => setPill('loginState', 'status_check_failed', 'error'));
   bindAction('logout', logout, () => setPill('loginState', 'status_logout_failed', 'error'));
   bindAction('checkSession', checkSession, () => setPill('loginState', 'status_check_failed', 'error'));
   bindAction('openLoginPage', openLoginPage, () => setPill('loginState', 'status_check_failed', 'error'));

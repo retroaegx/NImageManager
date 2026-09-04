@@ -59,24 +59,6 @@
   "browserLoginFailed": {
     "message": "Browser authorization failed."
   },
-  "legacyLoginDivider": {
-    "message": "or use the existing method"
-  },
-  "legacyLoginHeading": {
-    "message": "Sign in with username and password"
-  },
-  "legacyLoginHelp": {
-    "message": "The existing sign-in method remains available."
-  },
-  "usernameLabel": {
-    "message": "Username"
-  },
-  "passwordLabel": {
-    "message": "Password"
-  },
-  "loginButton": {
-    "message": "Login"
-  },
   "logoutButton": {
     "message": "Logout"
   },

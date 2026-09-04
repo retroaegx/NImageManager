@@ -59,24 +59,6 @@
   "browserLoginFailed": {
     "message": "ブラウザ認証に失敗しました。"
   },
-  "legacyLoginDivider": {
-    "message": "または従来の方法"
-  },
-  "legacyLoginHeading": {
-    "message": "ユーザー名とパスワードでログイン"
-  },
-  "legacyLoginHelp": {
-    "message": "既存のログイン方法も引き続き利用できます。"
-  },
-  "usernameLabel": {
-    "message": "Username"
-  },
-  "passwordLabel": {
-    "message": "Password"
-  },
-  "loginButton": {
-    "message": "Login"
-  },
   "logoutButton": {
     "message": "Logout"
   },

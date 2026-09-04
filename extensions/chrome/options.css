@@ -28,11 +28,6 @@ h1, h2 {
   margin: 0 0 12px;
 }
 
-h3 {
-  margin: 0 0 10px;
-  font-size: 16px;
-}
-
 .note {
   margin: 0 0 16px;
   color: #cbd5e1;
@@ -100,25 +95,6 @@ button.secondary {
 
 .browserLoginMessage.success { color: #86efac; }
 .browserLoginMessage.error { color: #fca5a5; }
-
-.optionDivider {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 18px 0;
-  color: #94a3b8;
-  font-size: 12px;
-}
-
-.optionDivider::before,
-.optionDivider::after {
-  content: "";
-  height: 1px;
-  flex: 1;
-  background: rgba(148, 163, 184, 0.2);
-}
-
-.legacyLoginNote { margin-bottom: 12px; }
 
 .statusList {
   display: grid;

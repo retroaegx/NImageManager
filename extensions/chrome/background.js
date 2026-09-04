@@ -78,25 +78,6 @@ async function clearSession() {
   await saveConfig({ token: '', user: null });
 }
 
-async function loginToServer({ baseUrl, username, password }) {
-  const apiBase = apiBaseFrom(baseUrl);
-  const response = await fetch(`${apiBase}/api/ext/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password }),
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok || !data.ok) {
-    throw extError(data.code || 'LOGIN_FAILED');
-  }
-  await saveConfig({
-    baseUrl: apiBase,
-    token: String(data.token || ''),
-    user: data.user || null,
-  });
-  return data;
-}
-
 async function startBrowserLogin({ baseUrl }) {
   const apiBase = apiBaseFrom(baseUrl);
   const response = await fetch(`${apiBase}/api/ext/device/start`, {
@@ -334,10 +315,6 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
         autoTransfer: Object.prototype.hasOwnProperty.call(message, 'autoTransfer') ? Boolean(message.autoTransfer) : currentConfig.autoTransfer,
       });
       return { ok: true, config: await getConfig() };
-    }
-    if (type === 'nim-login') {
-      const data = await loginToServer(message);
-      return { ok: true, data };
     }
     if (type === 'nim-browser-login-start') {
       const data = await startBrowserLogin(message);
