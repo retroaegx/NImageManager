@@ -1578,7 +1578,7 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
     grid-template-columns: repeat(4, minmax(0, 1fr));
     grid-template-areas:
       "filter allsel bulkbm delete"
-      "sort sort sort view"
+      "sort sort page view"
       "status status status status";
     gap: 6px;
     justify-content: stretch;
@@ -1622,6 +1622,7 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
     text-align: center;
   }
   #mobileFilterBtn{ grid-area: filter; }
+  #pageSelectBtn{ grid-area: page; }
   #allSelectBtn{ grid-area: allsel; }
   #bulkBookmarkBtn{ grid-area: bulkbm; }
   #bulkDeleteBtn{
