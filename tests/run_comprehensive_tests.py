@@ -475,6 +475,11 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             extension_auth_html = (web_root / "extension-auth.html").read_text(encoding="utf-8")
             settings_html = (web_root / "settings.html").read_text(encoding="utf-8")
             page_i18n = (web_root / "lib" / "page-i18n.js").read_text(encoding="utf-8")
+            i18n_js = (web_root / "lib" / "i18n.js").read_text(encoding="utf-8")
+            terms_html = (web_root / "terms.html").read_text(encoding="utf-8")
+            privacy_html = (web_root / "privacy.html").read_text(encoding="utf-8")
+            verify_email_html = (web_root / "verify-email.html").read_text(encoding="utf-8")
+            verify_email_js = (web_root / "verify-email.js").read_text(encoding="utf-8")
             user_menu_js = (web_root / "lib" / "userMenu.js").read_text(encoding="utf-8")
             styles_css = (web_root / "styles.css").read_text(encoding="utf-8")
             ja_json = json.loads((web_root / "i18n" / "ja.json").read_text(encoding="utf-8"))
@@ -494,6 +499,20 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             self.assertIn("initI18n(readBootstrapPreference())", page_i18n)
             self.assertEqual(ja_json["nav.preview"], "プレビュー")
             self.assertEqual(en_json["nav.preview"], "Preview")
+            self.assertEqual(set(ja_json), set(en_json))
+            self.assertIn('if(value.startsWith("ja")) return "ja";', i18n_js)
+            self.assertGreaterEqual(i18n_js.count('return "en";'), 2)
+            self.assertIn('src="/lib/page-i18n.js?', terms_html)
+            self.assertIn('src="/lib/page-i18n.js?', privacy_html)
+            self.assertIn('data-i18n="terms.title"', terms_html)
+            self.assertIn('data-i18n="privacy.title"', privacy_html)
+            self.assertIn('data-i18n="verify_email.title"', verify_email_html)
+            self.assertIn('initI18n("auto")', verify_email_js)
+            self.assertIn('locale:getLocale()', login_js)
+            self.assertIn('lang=${encodeURIComponent(getLocale())}', login_js)
+            for localized_html in (terms_html, privacy_html, verify_email_html):
+                used_keys = set(re.findall(r'data-i18n(?:-html|-title|-placeholder|-aria-label)?="([^"]+)"', localized_html))
+                self.assertFalse(used_keys - set(en_json), used_keys - set(en_json))
             self.assertNotIn("プレビュー管理", index_html)
             self.assertNotIn("アップロード管理", index_html)
             self.assertLess(login_html.index('id="googleRegisterButton"'), login_html.index('id="registerUser"'))
@@ -664,8 +683,12 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             rt.setup_master()
             sent: dict[str, str] = {}
             rt.api.smtp_enabled = lambda: True
-            rt.api._send_verification_message = lambda **kwargs: sent.update(verify=kwargs["token"])
-            rt.api._send_password_reset_message = lambda **kwargs: sent.update(reset=kwargs["token"])
+            rt.api._send_verification_message = lambda **kwargs: sent.update(
+                verify=kwargs["token"], verify_locale=kwargs["locale"]
+            )
+            rt.api._send_password_reset_message = lambda **kwargs: sent.update(
+                reset=kwargs["token"], reset_locale=kwargs["locale"]
+            )
 
             policy = {
                 "accepted": True,
@@ -680,11 +703,13 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
                     "email": "public@example.com",
                     "password": "initial-pass-123",
                     "password2": "initial-pass-123",
+                    "locale": "en",
                     **policy,
                 },
             )
             expect_status(registered, 202)
             self.assertTrue(registered.json()["verification_required"])
+            self.assertEqual(sent["verify_locale"], "en")
 
             blocked = rt.json(
                 "POST", "/auth/login", payload={"username": "public@example.com", "password": "initial-pass-123"}
@@ -697,8 +722,11 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             )
             expect_status(logged_in, 200)
 
-            forgot = rt.json("POST", "/auth/forgot-password", payload={"email": "public@example.com"})
+            forgot = rt.json(
+                "POST", "/auth/forgot-password", payload={"email": "public@example.com", "locale": "en"}
+            )
             expect_status(forgot, 200)
+            self.assertEqual(sent["reset_locale"], "en")
             reset = rt.json(
                 "POST",
                 "/auth/password_tokens/consume",

@@ -1,7 +1,7 @@
 import { $ } from "./dom.js";
 import { apiFetch, apiJson } from "./http.js";
 import { logoutAndRedirect } from "./session.js";
-import { t, formatDateTime } from "./i18n.js";
+import { t, formatDateTime } from "./i18n.js?v=1.0.6-i18n1";
 
 function formatUtc(ts){
   if(!ts) return "";

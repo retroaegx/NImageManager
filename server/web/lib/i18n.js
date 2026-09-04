@@ -9,9 +9,8 @@ let initPromise = null;
 
 function normalizeLocale(locale){
   const value = String(locale || "").trim().toLowerCase();
-  if(value.startsWith("en")) return "en";
   if(value.startsWith("ja")) return "ja";
-  return "ja";
+  return "en";
 }
 
 function normalizePreference(value){
@@ -38,7 +37,7 @@ function detectLocale(){
     const locale = normalizeLocale(lang);
     if(SUPPORTED_LOCALES.has(locale)) return locale;
   }
-  return "ja";
+  return "en";
 }
 
 function resolveLocale(preference){

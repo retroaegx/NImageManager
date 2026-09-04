@@ -1,4 +1,4 @@
-import { initI18n, t } from "./lib/i18n.js";
+import { getLocale, initI18n, t } from "./lib/i18n.js?v=1.0.6-i18n1";
 
 const API = {
   login: "/api/auth/login", register: "/api/auth/register", resend: "/api/auth/resend-verification", forgot: "/api/auth/forgot-password",
@@ -71,6 +71,31 @@ function showMessage(id,message,kind="error"){
   const el=$(id); if(!el) return;
   el.textContent=message||""; el.classList.toggle("ok",kind==="success"); el.classList.toggle("err",kind!=="success"&&Boolean(message));
 }
+const AUTH_DETAIL_KEYS = new Map([
+  ["too many requests", "auth.error.too_many_requests"],
+  ["username must be 2-40 characters", "auth.error.username_length"],
+  ["username contains invalid characters", "auth.error.username_invalid"],
+  ["username cannot contain @", "auth.error.username_at"],
+  ["valid email required", "auth.error.email_invalid"],
+  ["password required", "auth.error.password_required"],
+  ["password mismatch", "common.confirmation_mismatch"],
+  ["password too short", "auth.error.password_short"],
+  ["password too long", "auth.error.password_long"],
+  ["agreement required", "auth.error.agreement_required"],
+  ["policy version changed", "auth.error.policy_changed"],
+  ["registration email is not configured", "register.unavailable"],
+  ["email already registered", "auth.error.email_registered"],
+  ["username already exists", "auth.error.username_registered"],
+  ["verification email could not be sent", "auth.error.verification_send_failed"],
+  ["Google sign-in state mismatch", "auth.error.google_state"],
+  ["email already registered; sign in with password", "auth.error.email_password_login"],
+  ["username or email already registered", "auth.error.account_registered"],
+  ["account disabled", "auth.error.account_disabled"],
+]);
+function authErrorMessage(data, fallbackKey){
+  const key=AUTH_DETAIL_KEYS.get(String(data?.detail||""));
+  return t(key||fallbackKey);
+}
 function showPanel(name){
   const login=name==="login", register=name==="register", forgot=name==="forgot";
   $("loginPanel")?.classList.toggle("hidden",!login); $("registerPanel")?.classList.toggle("hidden",!register); $("forgotPanel")?.classList.toggle("hidden",!forgot);
@@ -114,14 +139,14 @@ function updateAgreementState(){
   $("googleRegisterArea")?.classList.toggle("hidden",googleRegistrationActive||!providers.google_enabled);
 }
 async function doRegister(){
-  const payload={username:$("registerUser").value.trim(),email:$("registerEmail").value.trim(),password:$("registerPass").value,password2:$("registerPass2").value,accepted:agreementAccepted,terms_version:providers.terms_version,privacy_version:providers.privacy_version};
+  const payload={username:$("registerUser").value.trim(),email:$("registerEmail").value.trim(),password:$("registerPass").value,password2:$("registerPass2").value,accepted:agreementAccepted,terms_version:providers.terms_version,privacy_version:providers.privacy_version,locale:getLocale()};
   showMessage("registerErr","");
   if(!payload.username||!payload.email||!payload.password||!payload.password2){ showMessage("registerErr",t("common.required")); return; }
   if(payload.password!==payload.password2){ showMessage("registerErr",t("common.confirmation_mismatch")); return; }
   try{
     const response=await fetch(API.register,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),credentials:"include"});
     const data=await readJson(response);
-    if(!response.ok){ showMessage("registerErr",data?.detail||t("register.failed")); return; }
+    if(!response.ok){ showMessage("registerErr",authErrorMessage(data,"register.failed")); return; }
     showMessage("registerErr",t("register.check_email"),"success"); $("registerBtn").disabled=true;
   }catch{ showMessage("registerErr",t("common.connection_failed")); }
 }
@@ -129,7 +154,7 @@ async function sendPasswordReset(){
   const email=$("forgotEmail").value.trim(); showMessage("forgotMessage","");
   if(!email){ showMessage("forgotMessage",t("common.required")); return; }
   try{
-    await fetch(API.forgot,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email}),credentials:"include"});
+    await fetch(API.forgot,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,locale:getLocale()}),credentials:"include"});
     showMessage("forgotMessage",t("password.reset_sent"),"success");
   }catch{ showMessage("forgotMessage",t("common.connection_failed")); }
 }
@@ -137,7 +162,7 @@ async function resendVerification(){
   const email=$("registerEmail").value.trim();showMessage("registerErr","");
   if(!email){showMessage("registerErr",t("common.required"));return;}
   try{
-    await fetch(API.resend,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email}),credentials:"include"});
+    await fetch(API.resend,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,locale:getLocale()}),credentials:"include"});
     showMessage("registerErr",t("register.resent"),"success");
   }catch{showMessage("registerErr",t("common.connection_failed"));}
 }
@@ -155,7 +180,9 @@ function bindAgreementFrameScroll(){
 function loadAgreementStep(step){
   agreementStep=step; const terms=step===0,frame=$("agreementFrame"),next=$("agreementNextBtn");
   $("agreementTitle").textContent=t(terms?"agreement.terms_title":"agreement.privacy_title"); $("agreementProgress").textContent=t(terms?"agreement.step_terms":"agreement.step_privacy");
-  next.textContent=t(terms?"agreement.next_privacy":"agreement.accept"); next.disabled=true; frame.title=$("agreementTitle").textContent; frame.src=terms?"/terms.html?embed=1":"/privacy.html?embed=1";
+  next.textContent=t(terms?"agreement.next_privacy":"agreement.accept"); next.disabled=true; frame.title=$("agreementTitle").textContent;
+  const documentPath=terms?"/terms.html":"/privacy.html";
+  frame.src=`${documentPath}?embed=1&lang=${encodeURIComponent(getLocale())}`;
 }
 function openAgreement(){ $("agreementModal").classList.remove("hidden"); loadAgreementStep(0); }
 function closeAgreement(){ $("agreementModal").classList.add("hidden"); }
@@ -173,7 +200,7 @@ async function handleGoogleCredential(credential){
     if(response.status===428&&data?.detail==="google registration required"){
       pendingGoogleCredential=credential;setGoogleRegistrationMode(true,data?.email||"");showPanel("register");return;
     }
-    showMessage(messageId,data?.detail||t("login.google_failed"));
+    showMessage(messageId,authErrorMessage(data,"login.google_failed"));
   }catch{showMessage(messageId,t("common.connection_failed"));}
 }
 async function completeGoogleRegistration(){
@@ -185,7 +212,7 @@ async function completeGoogleRegistration(){
     const response=await fetch(API.google,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),credentials:"include"});const data=await readJson(response);
     if(response.ok){pendingGoogleCredential="";finishLogin();return;}
     if(response.status===401){resetGoogleRegistration();showMessage("registerErr",t("register.google_session_expired"));return;}
-    showMessage("registerErr",data?.detail||t("register.failed"));
+    showMessage("registerErr",authErrorMessage(data,"register.failed"));
   }catch{showMessage("registerErr",t("common.connection_failed"));}
 }
 async function setupGoogle(){

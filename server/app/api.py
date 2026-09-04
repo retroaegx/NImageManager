@@ -1579,35 +1579,71 @@ def _create_account_token(
     return raw
 
 
-def _send_verification_message(*, email: str, username: str, token: str, request: Request) -> None:
-    url = _abs_url(f"/verify-email.html?token={token}", request)
-    send_account_email(
-        to_email=email,
-        subject="NImageManager メールアドレスの確認",
-        body=(
+def _normalize_public_locale(value: str | None) -> str:
+    return "ja" if str(value or "").strip().lower().startswith("ja") else "en"
+
+
+def _send_verification_message(
+    *, email: str, username: str, token: str, request: Request, locale: str = "ja"
+) -> None:
+    language = _normalize_public_locale(locale)
+    url = _abs_url(f"/verify-email.html?token={token}&lang={language}", request)
+    if language == "ja":
+        subject = "NImageManager メールアドレスの確認"
+        body = (
             f"{username} さん\n\n"
             "NImageManagerへの登録を完了するには、24時間以内に次のURLを開いてください。\n"
             f"{url}\n\n"
             "この登録に心当たりがない場合は、このメールを破棄してください。\n\n"
             "NImageManager運営\n"
             "お問い合わせ: nimagemanager@gmail.com\n"
-        ),
+        )
+    else:
+        subject = "Verify your NImageManager email address"
+        body = (
+            f"Hello {username},\n\n"
+            "Open the following URL within 24 hours to complete your NImageManager registration.\n"
+            f"{url}\n\n"
+            "If you did not request this registration, you can ignore this email.\n\n"
+            "NImageManager Operations\n"
+            "Contact: nimagemanager@gmail.com\n"
+        )
+    send_account_email(
+        to_email=email,
+        subject=subject,
+        body=body,
     )
 
 
-def _send_password_reset_message(*, email: str, username: str, token: str, request: Request) -> None:
-    url = _abs_url(f"/set-password.html?token={token}", request)
-    send_account_email(
-        to_email=email,
-        subject="NImageManager パスワード再設定",
-        body=(
+def _send_password_reset_message(
+    *, email: str, username: str, token: str, request: Request, locale: str = "ja"
+) -> None:
+    language = _normalize_public_locale(locale)
+    url = _abs_url(f"/set-password.html?token={token}&lang={language}", request)
+    if language == "ja":
+        subject = "NImageManager パスワード再設定"
+        body = (
             f"{username} さん\n\n"
             "パスワードを再設定するには、2時間以内に次のURLを開いてください。\n"
             f"{url}\n\n"
             "この操作に心当たりがない場合は、何もせずこのメールを破棄してください。\n\n"
             "NImageManager運営\n"
             "お問い合わせ: nimagemanager@gmail.com\n"
-        ),
+        )
+    else:
+        subject = "Reset your NImageManager password"
+        body = (
+            f"Hello {username},\n\n"
+            "Open the following URL within 2 hours to reset your password.\n"
+            f"{url}\n\n"
+            "If you did not request this reset, you can ignore this email.\n\n"
+            "NImageManager Operations\n"
+            "Contact: nimagemanager@gmail.com\n"
+        )
+    send_account_email(
+        to_email=email,
+        subject=subject,
+        body=body,
     )
 
 
@@ -1633,6 +1669,7 @@ class RegisterReq(BaseModel):
     accepted: bool = False
     terms_version: str = ""
     privacy_version: str = ""
+    locale: str = "ja"
 
 
 @api_router.get("/auth/providers")
@@ -1704,7 +1741,9 @@ def register_account(request: Request, req: RegisterReq):
             raise HTTPException(status_code=409, detail="username already exists")
 
         try:
-            _send_verification_message(email=email, username=username, token=token, request=request)
+            _send_verification_message(
+                email=email, username=username, token=token, request=request, locale=req.locale
+            )
         except Exception as exc:
             raise HTTPException(status_code=503, detail="verification email could not be sent") from exc
         return {"ok": True, "verification_required": True}
@@ -1714,6 +1753,7 @@ def register_account(request: Request, req: RegisterReq):
 
 class EmailReq(BaseModel):
     email: str
+    locale: str = "ja"
 
 
 @api_router.post("/auth/resend-verification")
@@ -1738,7 +1778,10 @@ def resend_verification(request: Request, req: EmailReq):
         )
         conn.commit()
         try:
-            _send_verification_message(email=row["email"], username=row["username"], token=token, request=request)
+            _send_verification_message(
+                email=row["email"], username=row["username"], token=token,
+                request=request, locale=req.locale,
+            )
         except Exception:
             pass
         return {"ok": True}
@@ -1809,7 +1852,10 @@ def forgot_password(request: Request, req: EmailReq):
         )
         conn.commit()
         try:
-            _send_password_reset_message(email=row["email"], username=row["username"], token=token, request=request)
+            _send_password_reset_message(
+                email=row["email"], username=row["username"], token=token,
+                request=request, locale=req.locale,
+            )
         except Exception:
             pass
         return {"ok": True}

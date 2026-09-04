@@ -2,6 +2,7 @@ import { $ } from "./lib/dom.js";
 import { apiFetch, apiJson } from "./lib/http.js";
 import { bindUserMenu } from "./lib/userMenu.js";
 import { loadCurrentUser, logoutAndRedirect } from "./lib/session.js";
+import { t } from "./lib/i18n.js?v=1.0.6-i18n1";
 
 const API = {
   me: "/api/me",
@@ -375,6 +376,20 @@ function renderReparseErrors(state){
 
 let pollTimer = null;
 
+function localizedStartError(error, operation){
+  const message=String(error?.message||error||"");
+  const isReparse=message.includes("再解析")||message.toLowerCase().includes("reparse");
+  const isRebuild=message.includes("統計再集計")||message.toLowerCase().includes("statistics rebuild");
+  const isDerivative=message.includes("派生画像補完")||message.toLowerCase().includes("derivative fill");
+  if(operation==="reparse"&&isRebuild) return t("maintenance.start_blocked.reparse_by_rebuild");
+  if(operation==="reparse"&&isDerivative) return t("maintenance.start_blocked.reparse_by_derivative");
+  if(operation==="rebuild"&&isReparse) return t("maintenance.start_blocked.rebuild_by_reparse");
+  if(operation==="rebuild"&&isDerivative) return t("maintenance.start_blocked.rebuild_by_derivative");
+  if(operation==="derivative"&&isReparse) return t("maintenance.start_blocked.derivative_by_reparse");
+  if(operation==="derivative"&&isRebuild) return t("maintenance.start_blocked.derivative_by_rebuild");
+  return t("common.failed");
+}
+
 async function startReparse(){
   $("reparseErr").textContent = "";
   try{
@@ -382,7 +397,7 @@ async function startReparse(){
     await apiJson(res);
     await refreshAll(true);
   }catch(e){
-    $("reparseErr").textContent = String(e.message || e);
+    $("reparseErr").textContent = localizedStartError(e,"reparse");
   }
 }
 
@@ -393,7 +408,7 @@ async function startRebuild(){
     await apiJson(res);
     await refreshAll(true);
   }catch(e){
-    $("rebuildErr").textContent = String(e.message || e);
+    $("rebuildErr").textContent = localizedStartError(e,"rebuild");
   }
 }
 
@@ -404,7 +419,7 @@ async function startDerivativeFill(){
     await apiJson(res);
     await refreshAll(true);
   }catch(e){
-    $("derivativeFillErr").textContent = String(e.message || e);
+    $("derivativeFillErr").textContent = localizedStartError(e,"derivative");
   }
 }
 

@@ -2,7 +2,7 @@ import { $ } from "./lib/dom.js";
 import { apiFetch, apiJson, safeJson } from "./lib/http.js";
 import { bindUserMenu } from "./lib/userMenu.js";
 import { loadCurrentUser, logoutAndRedirect, isAdminRole } from "./lib/session.js";
-import { t, setLocalePreference } from "./lib/i18n.js";
+import { t, setLocalePreference } from "./lib/i18n.js?v=1.0.6-i18n1";
 
 
 const SettingsPage = (window.NIMSettings && typeof window.NIMSettings === "object") ? window.NIMSettings : {};
@@ -272,8 +272,7 @@ async function deleteMyAccount(){
     setStatus(t("status.deleting"), null);
     const r = await apiFetch(API.deleteMe, { method: "DELETE" });
     if(!r.ok){
-      const j = await safeJson(r);
-      throw new Error(j?.detail || t("status.delete_failed"));
+      throw new Error(t("status.delete_failed"));
     }
     await logoutAndRedirect(API.logout);
   }catch(e){

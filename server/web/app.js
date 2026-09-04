@@ -4,7 +4,7 @@ import { bindUserMenu } from "./lib/userMenu.js";
 import { loadCurrentUser, logoutAndRedirect } from "./lib/session.js";
 import { buildPageQuery as buildPageQueryShared, buildPageQueryCore as buildPageQueryCoreShared, buildScrollQuery as buildScrollQueryShared } from "./lib/galleryQuery.js";
 import { joinKeep, joinPlain, promptTextForCopyKeep, promptTextForCopyPlain } from "./lib/prompt.js";
-import { t } from "./lib/i18n.js";
+import { t } from "./lib/i18n.js?v=1.0.6-i18n1";
 
 const UPLOAD_STATE_LABELS = { pending: "upload.state.pending", uploading: "upload.state.uploading", received: "upload.state.received", processing: "upload.state.processing", done: "upload.state.done", duplicate: "upload.state.duplicate", failed: "upload.state.failed" };
 const uploadStateCode = (value) => String(value || "").trim();
@@ -5698,4 +5698,3 @@ if(document.readyState === 'loading'){
 }else{
   boot();
 }
-

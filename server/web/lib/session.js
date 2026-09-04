@@ -1,6 +1,6 @@
 import { $ } from "./dom.js";
 import { apiFetch, apiJson } from "./http.js";
-import { t, setLocalePreference } from "./i18n.js";
+import { t, setLocalePreference } from "./i18n.js?v=1.0.6-i18n1";
 
 export function isAdminRole(role){
   return role === "admin" || role === "master";

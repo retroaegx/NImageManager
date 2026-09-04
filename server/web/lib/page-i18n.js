@@ -1,4 +1,4 @@
-import { initI18n, applyTranslations } from "./i18n.js";
+import { initI18n, applyTranslations } from "./i18n.js?v=1.0.6-i18n1";
 
 function readBootstrapPreference(){
   try{

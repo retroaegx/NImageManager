@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>メールアドレス確認 - NImageManager</title>
+  <title data-i18n="verify_email.page_title">メールアドレス確認 - NImageManager</title>
   <link rel="stylesheet" href="/styles.css?v=42" />
 </head>
 <body class="loginPage">
@@ -14,11 +14,11 @@
         <div class="loginMark"><svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2c3.2 0 5.9 1.8 7.2 4.4.4.8 0 1.7-.9 2.1l-2.6 1.2c-.8.4-1.7 0-2.1-.9C13 7.8 12.1 7.2 12 7.2c-1.5 0-2.8 1.3-2.8 2.8v1.2h1.6c.9 0 1.6.7 1.6 1.6v2.4c0 .9-.7 1.6-1.6 1.6H9.2V20c0 1.1-.9 2-2 2H6c-1.1 0-2-.9-2-2v-6.4c0-3.8 0-4.1.1-4.6C4.6 5.1 8 2 12 2Z" fill="currentColor" opacity=".92"/></svg></div>
         <div><div class="loginTitle">NIM</div><div class="loginSub">NovelAI Image Manager</div></div>
       </div>
-      <h2 class="loginH">メールアドレスの確認</h2>
-      <p id="verifyMessage" class="loginHint" aria-live="polite">確認しています…</p>
-      <a id="verifyLoginLink" class="primaryBtn hidden" href="/login.html">ログインへ</a>
+      <h2 class="loginH" data-i18n="verify_email.title">メールアドレスの確認</h2>
+      <p id="verifyMessage" class="loginHint" aria-live="polite" data-i18n="verify_email.checking">確認しています…</p>
+      <a id="verifyLoginLink" class="primaryBtn hidden" href="/login.html" data-i18n="verify_email.login">ログインへ</a>
     </div>
   </div>
-  <script type="module" src="/verify-email.js"></script>
+  <script type="module" src="/verify-email.js?v=1.0.6-i18n1"></script>
 </body>
 </html>

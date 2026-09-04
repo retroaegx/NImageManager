@@ -1,4 +1,4 @@
-import { initI18n, t } from "./lib/i18n.js";
+import { initI18n, t } from "./lib/i18n.js?v=1.0.6-i18n1";
 
 const API = {
   info: (token) => `/api/auth/password_tokens/info?token=${encodeURIComponent(token)}`,

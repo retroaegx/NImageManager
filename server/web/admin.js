@@ -2,7 +2,7 @@ import { $ } from "./lib/dom.js";
 import { apiFetch, apiJson, safeJson } from "./lib/http.js";
 import { bindUserMenu } from "./lib/userMenu.js";
 import { loadCurrentUser, logoutAndRedirect, isAdminRole } from "./lib/session.js";
-import { t } from "./lib/i18n.js";
+import { t } from "./lib/i18n.js?v=1.0.6-i18n1";
 
 
 const API = {

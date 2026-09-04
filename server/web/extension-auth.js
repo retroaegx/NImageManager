@@ -1,4 +1,4 @@
-import { initI18n, t } from "./lib/i18n.js";
+import { initI18n, t } from "./lib/i18n.js?v=1.0.6-i18n1";
 
 const $ = (id) => document.getElementById(id);
 const requestId = new URLSearchParams(location.search).get("request_id") || "";
@@ -28,7 +28,7 @@ async function submitDecision(path) {
     body: JSON.stringify({ request_id: requestId }),
   });
   const data = await readJson(response);
-  if (!response.ok) throw new Error(data?.detail || t("extension_auth.failed"));
+  if (!response.ok) throw new Error(t("extension_auth.failed"));
   return data;
 }
 
@@ -68,7 +68,7 @@ async function init() {
   });
   const info = await readJson(infoResponse);
   if (!infoResponse.ok || info.status !== "pending") {
-    showMessage(info?.detail || t("extension_auth.invalid"), "error");
+    showMessage(t("extension_auth.invalid"), "error");
     return;
   }
   const user = globalThis.__NIM_BOOTSTRAP__?.user;
