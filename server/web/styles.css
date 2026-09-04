@@ -1575,11 +1575,11 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
   #galleryHint{ font-size: 11px; }
   .galleryActions{
     display:grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     grid-template-areas:
-      "filter allsel bulkbm delete"
-      "sort sort page view"
-      "status status status status";
+      "filter page allsel bulkbm delete"
+      "sort sort sort view view"
+      "status status status status status";
     gap: 6px;
     justify-content: stretch;
     align-items: center;
