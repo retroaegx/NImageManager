@@ -117,6 +117,7 @@ def migrate_db(conn: sqlite3.Connection) -> None:
             return
 
     _ensure_drop_import_failures_table()
+    had_upload_used_bytes = _has_col("users", "upload_used_bytes")
 
     # ---- image_tags (older PK variant) ----
     try:
@@ -195,7 +196,9 @@ def migrate_db(conn: sqlite3.Connection) -> None:
                       created_at        TEXT NOT NULL DEFAULT (datetime('now')),
                       disabled          INTEGER NOT NULL DEFAULT 0,
                       must_set_password INTEGER NOT NULL DEFAULT 0,
-                      pw_set_at         TEXT
+                      pw_set_at         TEXT,
+                      upload_limit_bytes INTEGER,
+                      upload_used_bytes INTEGER NOT NULL DEFAULT 0
                     );
                     """
                 )
@@ -243,6 +246,8 @@ def migrate_db(conn: sqlite3.Connection) -> None:
     _ensure_col("users", "email_verified_at", "email_verified_at TEXT")
     _ensure_col("users", "google_sub", "google_sub TEXT")
     _ensure_col("users", "extension_password_set", "extension_password_set INTEGER NOT NULL DEFAULT 0")
+    _ensure_col("users", "upload_limit_bytes", "upload_limit_bytes INTEGER")
+    _ensure_col("users", "upload_used_bytes", "upload_used_bytes INTEGER NOT NULL DEFAULT 0")
 
     try:
         import unicodedata
@@ -593,6 +598,118 @@ def migrate_db(conn: sqlite3.Connection) -> None:
     # ---- image_files columns (if table already existed) ----
     _ensure_col("image_files", "disk_path", "disk_path TEXT")
     _ensure_col("image_files", "size", "size INTEGER")
+
+    # Existing installations calculate the initial value once. From this point
+    # onward triggers maintain the per-user counter inside the same transaction
+    # as the image file mutation; normal quota checks never scan image rows.
+    try:
+        if not had_upload_used_bytes:
+            conn.execute(
+                """
+                UPDATE users
+                SET upload_used_bytes = COALESCE((
+                  SELECT SUM(
+                    CASE
+                      WHEN f.size IS NOT NULL AND f.size >= 0 THEN f.size
+                      WHEN f.bytes IS NOT NULL THEN LENGTH(f.bytes)
+                      ELSE 0
+                    END
+                  )
+                  FROM images i
+                  LEFT JOIN image_files f ON f.image_id=i.id
+                  WHERE i.uploader_user_id=users.id
+                ), 0)
+                """
+            )
+        else:
+            conn.execute("UPDATE users SET upload_used_bytes=0 WHERE upload_used_bytes IS NULL OR upload_used_bytes < 0")
+
+        conn.executescript(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_image_files_upload_usage_insert
+            AFTER INSERT ON image_files
+            BEGIN
+              UPDATE users
+              SET upload_used_bytes = MAX(0, upload_used_bytes +
+                CASE
+                  WHEN NEW.size IS NOT NULL AND NEW.size >= 0 THEN NEW.size
+                  WHEN NEW.bytes IS NOT NULL THEN LENGTH(NEW.bytes)
+                  ELSE 0
+                END
+              )
+              WHERE id=(SELECT uploader_user_id FROM images WHERE id=NEW.image_id);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_image_files_upload_usage_update
+            AFTER UPDATE OF image_id, size, bytes ON image_files
+            BEGIN
+              UPDATE users
+              SET upload_used_bytes = MAX(0, upload_used_bytes -
+                CASE
+                  WHEN OLD.size IS NOT NULL AND OLD.size >= 0 THEN OLD.size
+                  WHEN OLD.bytes IS NOT NULL THEN LENGTH(OLD.bytes)
+                  ELSE 0
+                END
+              )
+              WHERE id=(SELECT uploader_user_id FROM images WHERE id=OLD.image_id);
+
+              UPDATE users
+              SET upload_used_bytes = MAX(0, upload_used_bytes +
+                CASE
+                  WHEN NEW.size IS NOT NULL AND NEW.size >= 0 THEN NEW.size
+                  WHEN NEW.bytes IS NOT NULL THEN LENGTH(NEW.bytes)
+                  ELSE 0
+                END
+              )
+              WHERE id=(SELECT uploader_user_id FROM images WHERE id=NEW.image_id);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_images_upload_usage_delete
+            BEFORE DELETE ON images
+            BEGIN
+              UPDATE users
+              SET upload_used_bytes = MAX(0, upload_used_bytes - COALESCE((
+                SELECT CASE
+                  WHEN f.size IS NOT NULL AND f.size >= 0 THEN f.size
+                  WHEN f.bytes IS NOT NULL THEN LENGTH(f.bytes)
+                  ELSE 0
+                END
+                FROM image_files f
+                WHERE f.image_id=OLD.id
+              ), 0))
+              WHERE id=OLD.uploader_user_id;
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_images_upload_usage_owner_update
+            AFTER UPDATE OF uploader_user_id ON images
+            WHEN OLD.uploader_user_id <> NEW.uploader_user_id
+            BEGIN
+              UPDATE users
+              SET upload_used_bytes = MAX(0, upload_used_bytes - COALESCE((
+                SELECT CASE
+                  WHEN f.size IS NOT NULL AND f.size >= 0 THEN f.size
+                  WHEN f.bytes IS NOT NULL THEN LENGTH(f.bytes)
+                  ELSE 0
+                END
+                FROM image_files f WHERE f.image_id=NEW.id
+              ), 0))
+              WHERE id=OLD.uploader_user_id;
+
+              UPDATE users
+              SET upload_used_bytes = MAX(0, upload_used_bytes + COALESCE((
+                SELECT CASE
+                  WHEN f.size IS NOT NULL AND f.size >= 0 THEN f.size
+                  WHEN f.bytes IS NOT NULL THEN LENGTH(f.bytes)
+                  ELSE 0
+                END
+                FROM image_files f WHERE f.image_id=NEW.id
+              ), 0))
+              WHERE id=NEW.uploader_user_id;
+            END;
+            """
+        )
+    except Exception:
+        raise
     _ensure_col("upload_zip_jobs", "source_kind", "source_kind TEXT NOT NULL DEFAULT 'zip'")
     _ensure_col("upload_zip_jobs", "staging_dir", "staging_dir TEXT")
     _ensure_col("upload_zip_jobs", "bookmark_enabled", "bookmark_enabled INTEGER NOT NULL DEFAULT 0")
@@ -1240,7 +1357,9 @@ CREATE TABLE IF NOT EXISTS users (
   created_at    TEXT NOT NULL DEFAULT (datetime('now')),
   disabled      INTEGER NOT NULL DEFAULT 0,
   must_set_password INTEGER NOT NULL DEFAULT 0,
-  pw_set_at     TEXT
+  pw_set_at     TEXT,
+  upload_limit_bytes INTEGER,
+  upload_used_bytes INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS password_tokens (

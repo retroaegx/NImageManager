@@ -177,7 +177,7 @@ a{ color:inherit; text-decoration:none; }
   background: rgba(0,0,0,0.22);
   box-shadow: 0 12px 26px rgba(0,0,0,0.35);
 }
-.me{ font-size: 12px; color: rgba(255,255,255,0.72); }
+.me{ font-size: 12px; color: rgba(255,255,255,0.72); white-space:nowrap; }
 
 .menuPopup{
   position:absolute;
@@ -213,6 +213,68 @@ a{ color:inherit; text-decoration:none; }
 .hidden{ display:none !important; }
 .small{ font-size: 12px; color: var(--mut); }
 .err{ color: var(--bad); font-size: 12px; }
+
+.uploadQuotaPanel{
+  display:flex;
+  flex-direction:column;
+  gap:2px;
+  width:112px;
+  padding:5px 9px;
+  border:1px solid rgba(255,255,255,0.14);
+  border-radius:12px;
+  background:rgba(0,0,0,0.18);
+  box-sizing:border-box;
+}
+.uploadQuotaAmount,
+.uploadQuotaRemaining{
+  display:block;
+  overflow:hidden;
+  color:rgba(255,255,255,0.62);
+  font-size:9px;
+  line-height:1.05;
+  font-variant-numeric:tabular-nums;
+  text-align:center;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.uploadQuotaTrack{
+  height:3px;
+  overflow:hidden;
+  border-radius:999px;
+  background:rgba(255,255,255,0.09);
+  box-shadow:inset 0 1px 2px rgba(0,0,0,0.25);
+}
+.uploadQuotaFill{
+  width:0;
+  height:100%;
+  border-radius:inherit;
+  background:linear-gradient(90deg, #6bd3ff, #b68cff);
+  transition:width .25s ease, background .25s ease;
+}
+.uploadQuotaPanel.isNearLimit .uploadQuotaFill{
+  background:linear-gradient(90deg, #ffc56b, #ff8a73);
+}
+.uploadQuotaPanel.isReached{
+  color:rgba(255,238,243,0.98);
+}
+.uploadQuotaPanel.isReached .uploadQuotaFill{
+  background:linear-gradient(90deg, #ff9a72, #ff5f87);
+}
+.uploadQuotaPanel.isReached .uploadQuotaAmount,
+.uploadQuotaPanel.isReached .uploadQuotaRemaining{
+  color:rgba(255,222,231,0.96);
+}
+.uploadQuotaWarning{
+  position:absolute;
+  width:1px;
+  height:1px;
+  padding:0;
+  margin:-1px;
+  overflow:hidden;
+  clip:rect(0,0,0,0);
+  white-space:nowrap;
+  border:0;
+}
 
 .main{ padding: 16px; }
 .shell{ max-width: 1560px; margin: 0 auto; }
@@ -1468,7 +1530,9 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
   .brand{ gap: 8px; }
   .logo{ width: 24px; height: 24px; }
   .brandSub{ display:none; }
-  .userBox{ padding: 6px 10px; }
+  .right{ gap:6px; }
+  .uploadQuotaPanel{ width:92px; padding:4px 6px; }
+  .userBox{ padding: 6px 8px; }
   .menu{
     flex: 1 1 100%;
     width: 100%;
@@ -2756,6 +2820,11 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
 .adminTable tbody tr:hover td{
   background: rgba(122,210,255,0.08);
 }
+.adminQuotaCell{ min-width: 230px; }
+.adminQuotaEditor{ display:flex; align-items:center; gap:6px; }
+.adminQuotaInput{ width:90px; min-width:70px; }
+.adminQuotaUnit{ color:var(--mut); white-space:nowrap; }
+.adminQuotaUsage{ margin-top:5px; white-space:nowrap; }
 
 .maintSummary{ font-size: 12px; color: var(--mut); margin: 6px 0 10px; }
 .maintHint{ margin-top: 6px; }

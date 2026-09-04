@@ -516,6 +516,83 @@ def stop_background_workers() -> None:
 
 
 UPLOAD_STAGING_DIR = ORIGINALS_DIR.parent / "upload_staging"
+DEFAULT_USER_UPLOAD_LIMIT_BYTES = 5 * 1024 * 1024 * 1024
+UPLOAD_QUOTA_ERROR_CODE = "UPLOAD_QUOTA_REACHED"
+
+
+def _default_user_upload_limit_bytes() -> int:
+    raw = str(os.getenv("NAI_IM_USER_UPLOAD_LIMIT_BYTES", str(DEFAULT_USER_UPLOAD_LIMIT_BYTES)) or "").strip()
+    try:
+        return max(0, int(raw))
+    except Exception:
+        return DEFAULT_USER_UPLOAD_LIMIT_BYTES
+
+
+def _upload_quota_payload(*, role: str, override_bytes: int | None, used_bytes: int) -> dict:
+    role_text = str(role or "user")
+    override = None if override_bytes is None else max(0, int(override_bytes))
+    if role_text != "user":
+        limit = 0
+        source = "role_unlimited"
+    elif override is None:
+        limit = _default_user_upload_limit_bytes()
+        source = "default"
+    else:
+        limit = override
+        source = "custom"
+    used = max(0, int(used_bytes or 0))
+    limited = limit > 0
+    return {
+        "upload_used_bytes": used,
+        "upload_limit_bytes": int(limit),
+        "upload_limit_override_bytes": override,
+        "upload_limit_source": source,
+        "upload_quota_limited": limited,
+        "upload_quota_reached": bool(limited and used >= limit),
+        "upload_remaining_bytes": max(0, int(limit - used)) if limited else None,
+    }
+
+
+def _get_user_upload_quota(conn: sqlite3.Connection, user_id: int) -> dict:
+    row = conn.execute(
+        "SELECT role, upload_limit_bytes, upload_used_bytes FROM users WHERE id=?",
+        (int(user_id),),
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="user not found")
+    return _upload_quota_payload(
+        role=str(row["role"] or "user"),
+        override_bytes=(int(row["upload_limit_bytes"]) if row["upload_limit_bytes"] is not None else None),
+        used_bytes=int(row["upload_used_bytes"] or 0),
+    )
+
+
+def _upload_quota_exception(status: dict) -> HTTPException:
+    return HTTPException(
+        status_code=413,
+        detail={
+            "code": UPLOAD_QUOTA_ERROR_CODE,
+            "message": "Upload storage limit reached",
+            "used_bytes": int(status.get("upload_used_bytes") or 0),
+            "limit_bytes": int(status.get("upload_limit_bytes") or 0),
+        },
+    )
+
+
+def _assert_user_upload_available(conn: sqlite3.Connection, user_id: int) -> dict:
+    status = _get_user_upload_quota(conn, int(user_id))
+    if status["upload_quota_reached"]:
+        raise _upload_quota_exception(status)
+    return status
+
+
+def _begin_user_upload_quota_guard(conn: sqlite3.Connection, user_id: int) -> None:
+    """Serialize quota check + image insert so only one file may cross the limit."""
+    status = _get_user_upload_quota(conn, int(user_id))
+    if not status["upload_quota_limited"]:
+        return
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
 
 
 def _normalize_username(value: str | None) -> str:
@@ -2292,6 +2369,11 @@ def ext_device_poll(request: Request, req: ExtensionAuthPollReq):
 def ext_session(request: Request, user: dict | None = Depends(get_user_optional)):
     if not user:
         return _ext_auth_failed(request)
+    conn = get_conn()
+    try:
+        quota = _get_user_upload_quota(conn, int(user["id"]))
+    finally:
+        conn.close()
     return {
         "ok": True,
         "user": {
@@ -2300,6 +2382,7 @@ def ext_session(request: Request, user: dict | None = Depends(get_user_optional)
             "role": str(user["role"]),
             "share_works": int(user.get("share_works") or 0),
             "share_bookmarks": int(user.get("share_bookmarks") or 0),
+            **quota,
         },
         "login_url": _abs_url("/login.html", request),
     }
@@ -2308,6 +2391,11 @@ def ext_session(request: Request, user: dict | None = Depends(get_user_optional)
 def me(user: dict = Depends(get_user)):
     data = dict(user or {})
     data["perf_enabled"] = bool(perf_logging_enabled())
+    conn = get_conn()
+    try:
+        data.update(_get_user_upload_quota(conn, int(user["id"])))
+    finally:
+        conn.close()
     return data
 
 
@@ -2546,10 +2634,22 @@ def admin_list_users(_admin: dict = Depends(require_admin)):
     conn = get_conn()
     try:
         rows = conn.execute(
-            "SELECT id, username, role, disabled, created_at, must_set_password, pw_set_at FROM users ORDER BY id ASC"
+            """
+            SELECT u.id, u.username, u.role, u.disabled, u.created_at,
+                   u.must_set_password, u.pw_set_at, u.upload_limit_bytes,
+                   u.upload_used_bytes
+            FROM users u
+            ORDER BY u.id ASC
+            """
         ).fetchall()
-        return [
-            {
+        result = []
+        for r in rows:
+            quota = _upload_quota_payload(
+                role=str(r["role"] or "user"),
+                override_bytes=(int(r["upload_limit_bytes"]) if r["upload_limit_bytes"] is not None else None),
+                used_bytes=int(r["upload_used_bytes"] or 0),
+            )
+            result.append({
                 "id": int(r["id"]),
                 "username": r["username"],
                 "role": r["role"],
@@ -2557,9 +2657,9 @@ def admin_list_users(_admin: dict = Depends(require_admin)):
                 "created_at": r["created_at"],
                 "must_set_password": int(r["must_set_password"] or 0),
                 "pw_set_at": r["pw_set_at"],
-            }
-            for r in rows
-        ]
+                **quota,
+            })
+        return result
     finally:
         conn.close()
 
@@ -2568,6 +2668,7 @@ class UpdateUserReq(BaseModel):
     role: str | None = None
     disabled: int | None = None
     password: str | None = None  # deprecated; kept for compatibility
+    upload_limit_bytes: int | None = None
 
 
 @api_router.post("/admin/users/{user_id}")
@@ -2581,6 +2682,16 @@ def admin_update_user(user_id: int, req: UpdateUserReq, admin: dict = Depends(re
         raise HTTPException(status_code=400, detail="disabled must be 0/1")
     if int(user_id) == int(admin["id"]) and req.disabled is not None and int(req.disabled) == 1:
         raise HTTPException(status_code=400, detail="cannot disable yourself")
+    raw_fields_set = getattr(req, "model_fields_set", None)
+    if raw_fields_set is None:
+        raw_fields_set = getattr(req, "__fields_set__", set())
+    fields_set = set(raw_fields_set or set())
+    limit_requested = "upload_limit_bytes" in fields_set
+    if limit_requested and req.upload_limit_bytes is not None:
+        if int(req.upload_limit_bytes) < 0:
+            raise HTTPException(status_code=400, detail="upload_limit_bytes must be zero or greater")
+        if int(req.upload_limit_bytes) > 9_223_372_036_854_775_807:
+            raise HTTPException(status_code=400, detail="upload_limit_bytes is too large")
 
     conn = get_conn()
     try:
@@ -2601,15 +2712,21 @@ def admin_update_user(user_id: int, req: UpdateUserReq, admin: dict = Depends(re
 
         # Only master can modify admin accounts (except self disable is already blocked).
         if target_role == "admin" and admin.get("role") != "master" and int(user_id) != int(admin["id"]):
-            if req.disabled is not None:
+            if req.disabled is not None or limit_requested:
                 raise HTTPException(status_code=403, detail="master required to modify admin")
+
+        if limit_requested and target_role != "user":
+            raise HTTPException(status_code=400, detail="upload limit applies to regular users only")
 
         if req.role is not None:
             conn.execute("UPDATE users SET role=? WHERE id=?", (req.role, user_id))
         if req.disabled is not None:
             conn.execute("UPDATE users SET disabled=? WHERE id=?", (int(req.disabled), user_id))
+        if limit_requested:
+            limit_value = None if req.upload_limit_bytes is None else int(req.upload_limit_bytes)
+            conn.execute("UPDATE users SET upload_limit_bytes=? WHERE id=?", (limit_value, user_id))
         conn.commit()
-        return {"ok": True}
+        return {"ok": True, **_get_user_upload_quota(conn, int(user_id))}
     finally:
         conn.close()
 
@@ -5678,12 +5795,23 @@ def _poll_ext_upload_job(*, request: Request, job_id: int, user_id: int, timeout
                         "job_id": int(job_id),
                     }
                 if state_txt == "failed":
+                    message = str(item["message"] or last_error or "Upload failed")
+                    if message == UPLOAD_QUOTA_ERROR_CODE:
+                        return JSONResponse(
+                            status_code=413,
+                            content={
+                                "ok": False,
+                                "code": UPLOAD_QUOTA_ERROR_CODE,
+                                "message": "Upload storage limit reached",
+                                "job_id": int(job_id),
+                            },
+                        )
                     return JSONResponse(
                         status_code=500,
                         content={
                             "ok": False,
                             "code": "UPLOAD_FAILED",
-                            "message": str(item["message"] or last_error or "Upload failed"),
+                            "message": message,
                             "job_id": int(job_id),
                         },
                     )
@@ -5723,6 +5851,12 @@ async def ext_upload_image(
 ):
     if not user:
         return _ext_auth_failed(request)
+
+    conn = get_conn()
+    try:
+        _assert_user_upload_available(conn, int(user["id"]))
+    finally:
+        conn.close()
 
     tmp_path, safe_name, total = _write_ext_upload_to_temp(file)
     staging_dir: Path | None = None
@@ -5810,6 +5944,12 @@ async def upload_image(
     bookmark_list_id: str | None = Form(default=None),
     user: dict = Depends(get_user),
 ):
+    conn = get_conn()
+    try:
+        _assert_user_upload_available(conn, int(user["id"]))
+    finally:
+        conn.close()
+
     safe_name = _safe_basename(file.filename or "upload")
     suffix = "." + safe_name.rsplit(".", 1)[-1] if "." in safe_name else ".bin"
     fd, tmp_path = tempfile.mkstemp(prefix="nim_direct_", suffix=suffix)
@@ -6382,9 +6522,14 @@ def _process_upload_item_job(item_id: int, source: str | None = None, trace_id: 
             _cleanup_upload_staging_dir(staging_dir)
     except Exception as e:
         try:
+            message = f"{type(e).__name__}: {e}"[:255]
+            if isinstance(e, HTTPException) and int(e.status_code or 0) == 413:
+                detail = e.detail if isinstance(e.detail, dict) else {}
+                if str(detail.get("code") or "") == UPLOAD_QUOTA_ERROR_CODE:
+                    message = UPLOAD_QUOTA_ERROR_CODE
             conn.execute(
                 "UPDATE upload_zip_items SET state='failed', image_id=NULL, message=? WHERE id=?",
-                (f"{type(e).__name__}: {e}"[:255], int(item_id)),
+                (message, int(item_id)),
             )
             row2 = conn.execute("SELECT job_id FROM upload_zip_items WHERE id=?", (int(item_id),)).fetchone()
             if row2:
@@ -6498,6 +6643,22 @@ def _upload_image_from_path_core(
         full_meta_hash = hashlib.sha1(src.encode("utf-8", errors="ignore")).hexdigest()
     except Exception:
         full_meta_hash = None
+
+    # Serialize the final quota decision and insert. This guarantees that when
+    # several files are processed in parallel, at most one file can take the
+    # account from below the limit to at/above it.
+    _begin_user_upload_quota_guard(conn, int(user_id))
+
+    # A matching image may have been committed while this upload waited for
+    # the write lock. Duplicates consume no additional storage and stay allowed.
+    row = conn.execute("SELECT id FROM images WHERE sha256=?", (sha,)).fetchone()
+    if row:
+        iid = int(row["id"])
+        _apply_upload_bookmark(conn, user_id=int(user_id), image_id=iid, bookmark_list_id=upload_bookmark_list_id)
+        conn.commit()
+        return {"ok": True, "dedup": True, "image_id": iid, "dedup_reason": "binary"}
+
+    _assert_user_upload_available(conn, int(user_id))
 
     parsed_tags = parse_tag_list(prompt_pos or "")
     parsed_char_tags = parse_tag_list(prompt_char or "")
@@ -6735,6 +6896,12 @@ async def upload_zip(
     bookmark_enabled = request.query_params.get("bookmark_enabled")
     bookmark_list_id = request.query_params.get("bookmark_list_id")
 
+    quota_conn = get_conn()
+    try:
+        _assert_user_upload_available(quota_conn, int(user["id"]))
+    finally:
+        quota_conn.close()
+
     # Stream to disk (avoid loading large zip into memory)
     import tempfile
     fd, tmp = tempfile.mkstemp(prefix="nim_zip_", suffix=".zip")
@@ -6827,12 +6994,9 @@ async def upload_zip_chunk_init(
         raise HTTPException(status_code=400, detail="invalid total_bytes")
 
     _zip_incoming_gc()
-    import tempfile
-    fd, tmp = tempfile.mkstemp(prefix="nim_zipc_", suffix=".zip")
-    os.close(fd)
-    token = uuid.uuid4().hex
     conn = get_conn()
     try:
+        _assert_user_upload_available(conn, int(user["id"]))
         upload_bookmark_list_id = _normalize_upload_bookmark_list_id(
             conn,
             user_id=int(user["id"]),
@@ -6841,6 +7005,10 @@ async def upload_zip_chunk_init(
         )
     finally:
         conn.close()
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix="nim_zipc_", suffix=".zip")
+    os.close(fd)
+    token = uuid.uuid4().hex
     with _ZIP_INCOMING_LOCK:
         _ZIP_INCOMING[token] = {
             "user_id": int(user["id"]),
@@ -6990,6 +7158,7 @@ async def upload_batch_init(request: Request, user: dict = Depends(get_user)):
     requested_total = max(0, min(100000, int(req.total or 0)))
     conn = get_conn()
     try:
+        _assert_user_upload_available(conn, int(user["id"]))
         upload_bookmark_list_id = _normalize_upload_bookmark_list_id(
             conn,
             user_id=int(user["id"]),
@@ -7035,6 +7204,8 @@ async def upload_batch_append(
             "SELECT user_id, status, source_kind, staging_dir FROM upload_zip_jobs WHERE id=?",
             (int(job_id),),
         ).fetchone()
+        if row and int(row["user_id"] or 0) == int(user["id"]):
+            _assert_user_upload_available(conn, int(user["id"]))
     finally:
         conn.close()
 

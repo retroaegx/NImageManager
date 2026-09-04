@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title data-i18n="page.index.title">NIM</title>
-  <link rel="stylesheet" href="/styles.css?v=64" />
+  <link rel="stylesheet" href="/styles.css?v=68" />
 </head>
 <body>
   <div class="bg" aria-hidden="true"></div>
@@ -30,6 +30,15 @@
         </nav>
 
         <div class="right">
+          <div id="uploadQuotaPanel" class="uploadQuotaPanel hidden" aria-live="polite">
+            <span id="uploadQuotaAmount" class="uploadQuotaAmount"></span>
+            <div id="uploadQuotaTrack" class="uploadQuotaTrack" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+              <div id="uploadQuotaFill" class="uploadQuotaFill"></div>
+            </div>
+            <span id="uploadQuotaRemaining" class="uploadQuotaRemaining"></span>
+            <span id="uploadQuotaWarning" class="uploadQuotaWarning hidden" role="alert"></span>
+          </div>
+
           <div class="userBox">
             <span id="meLabel" class="me"></span>
           </div>
@@ -462,6 +471,6 @@
   <div id="toastViewport" class="toastViewport" aria-live="polite" aria-atomic="true"></div>
 
   <script type="module" src="/lib/page-i18n.js?v=1.0.6-i18n1"></script>
-  <script type="module" src="/app.js?v=1.0.6-i18n1"></script>
+  <script type="module" src="/app.js?v=1.0.6-quota4"></script>
 </body>
 </html>

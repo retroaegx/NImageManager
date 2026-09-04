@@ -17,6 +17,21 @@ const API = {
 };
 
 let ME = null;
+const GIB = 1024 * 1024 * 1024;
+
+function fmtBytes(value){
+  const n = Math.max(0, Number(value || 0));
+  if(n >= GIB) return `${(n / GIB).toFixed(n >= 10 * GIB ? 1 : 2).replace(/\.0+$/, "")} GiB`;
+  if(n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1).replace(/\.0$/, "")} MiB`;
+  if(n >= 1024) return `${(n / 1024).toFixed(1).replace(/\.0$/, "")} KiB`;
+  return `${Math.round(n)} B`;
+}
+
+function quotaInputValue(bytes){
+  if(bytes === null || bytes === undefined) return "";
+  const value = Number(bytes || 0) / GIB;
+  return String(Number(value.toFixed(3)));
+}
 
 function confirmAccountDelete(username){
   const name = String(username || "").trim();
@@ -147,6 +162,50 @@ function renderUsers(users){
     });
     tdDis.appendChild(chk);
 
+    // upload quota
+    const tdQuota = document.createElement("td");
+    tdQuota.className = "adminQuotaCell";
+    if(u.role !== "user"){
+      tdQuota.textContent = t("admin.quota.role_unlimited");
+      tdQuota.classList.add("small");
+    }else{
+      const editor = document.createElement("div");
+      editor.className = "adminQuotaEditor";
+      const input = document.createElement("input");
+      input.className = "adminQuotaInput";
+      input.type = "number";
+      input.min = "0";
+      input.step = "0.1";
+      input.value = quotaInputValue(u.upload_limit_override_bytes);
+      input.placeholder = t("admin.quota.default_short");
+      input.title = t("admin.quota.input_help");
+      const unit = document.createElement("span");
+      unit.className = "adminQuotaUnit";
+      unit.textContent = "GiB";
+      const save = document.createElement("button");
+      save.className = "ghostBtn smallBtn";
+      save.textContent = t("common.save_action");
+      save.disabled = true;
+      input.addEventListener("input", () => { save.disabled = false; });
+      save.addEventListener("click", async () => {
+        const raw = input.value.trim();
+        const gib = raw === "" ? null : Number(raw);
+        if(gib !== null && (!Number.isFinite(gib) || gib < 0)){
+          alert(t("admin.quota.invalid"));
+          return;
+        }
+        const bytes = gib === null ? null : Math.round(gib * GIB);
+        if(await updateUser(u.id, { upload_limit_bytes: bytes })) await loadUsers();
+      });
+      editor.append(input, unit, save);
+      const usage = document.createElement("div");
+      usage.className = "adminQuotaUsage small";
+      usage.textContent = u.upload_quota_limited
+        ? t("admin.quota.usage", { used: fmtBytes(u.upload_used_bytes), limit: fmtBytes(u.upload_limit_bytes) })
+        : t("admin.quota.usage_unlimited", { used: fmtBytes(u.upload_used_bytes) });
+      tdQuota.append(editor, usage);
+    }
+
     // created
     const tdCreated = document.createElement("td");
     tdCreated.textContent = (u.created_at || "").replace("T"," ").replace("Z","");
@@ -196,6 +255,7 @@ function renderUsers(users){
     tr.appendChild(tdRole);
     tr.appendChild(tdStatus);
     tr.appendChild(tdDis);
+    tr.appendChild(tdQuota);
     tr.appendChild(tdCreated);
     tr.appendChild(tdAct);
     tb.appendChild(tr);
@@ -210,7 +270,9 @@ async function updateUser(id, patch){
   if(!res.ok){
     const j = await safeJson(res);
     alert(j.detail || t("status.update_failed"));
+    return false;
   }
+  return true;
 }
 
 async function createUser(){

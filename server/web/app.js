@@ -1,5 +1,5 @@
 import { $, escapeHtml } from "./lib/dom.js";
-import { apiFetch, apiJson } from "./lib/http.js";
+import { apiFetch, apiJson, safeJson } from "./lib/http.js";
 import { bindUserMenu } from "./lib/userMenu.js";
 import { loadCurrentUser, logoutAndRedirect } from "./lib/session.js";
 import { buildPageQuery as buildPageQueryShared, buildPageQueryCore as buildPageQueryCoreShared, buildScrollQuery as buildScrollQueryShared } from "./lib/galleryQuery.js";
@@ -106,7 +106,15 @@ function xhrPostBinary(url, body, contentType, onProgress){
       }
       const text = xhr.responseText || "";
       if(xhr.status < 200 || xhr.status >= 300){
-        reject(new Error(`${xhr.status} ${(text||"").slice(0,140)}`));
+        let data = {};
+        try{ data = JSON.parse(text || "{}"); }catch(_e){}
+        const detail = (data?.detail && typeof data.detail === "object") ? data.detail : {};
+        const error = new Error(String(data?.message || detail?.message || data?.detail || `HTTP ${xhr.status}`));
+        error.code = String(data?.code || detail?.code || "UPLOAD_FAILED");
+        error.status = Number(xhr.status || 0);
+        error.usedBytes = Number(data?.used_bytes ?? detail?.used_bytes ?? 0);
+        error.limitBytes = Number(data?.limit_bytes ?? detail?.limit_bytes ?? 0);
+        reject(error);
         return;
       }
       if(!text){ resolve(null); return; }
@@ -116,8 +124,122 @@ function xhrPostBinary(url, body, contentType, onProgress){
     xhr.send(body);
   });
 }
+
+function fmtUploadBytes(value){
+  const n = Math.max(0, Number(value || 0));
+  const gib = 1024 * 1024 * 1024;
+  if(n >= gib) return `${(n / gib).toFixed(n >= 10 * gib ? 1 : 2).replace(/\.0+$/, "")} GiB`;
+  if(n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1).replace(/\.0$/, "")} MiB`;
+  if(n >= 1024) return `${(n / 1024).toFixed(1).replace(/\.0$/, "")} KiB`;
+  return `${Math.round(n)} B`;
+}
+
+function uploadErrorFromData(data, status=0){
+  const detail = (data?.detail && typeof data.detail === "object") ? data.detail : {};
+  const error = new Error(String(data?.message || detail?.message || data?.detail || `HTTP ${status || 0}`));
+  error.code = String(data?.code || detail?.code || "UPLOAD_FAILED");
+  error.status = Number(status || 0);
+  error.usedBytes = Number(data?.used_bytes ?? detail?.used_bytes ?? 0);
+  error.limitBytes = Number(data?.limit_bytes ?? detail?.limit_bytes ?? 0);
+  return error;
+}
+
+async function uploadErrorFromResponse(response){
+  return uploadErrorFromData(await safeJson(response), response?.status || 0);
+}
+
+function uploadErrorMessage(error){
+  if(String(error?.code || "") === "UPLOAD_QUOTA_REACHED"){
+    const used = Number(error?.usedBytes || 0);
+    const limit = Number(error?.limitBytes || 0);
+    return limit > 0
+      ? t("app.upload.quota_reached", { used: fmtUploadBytes(used), limit: fmtUploadBytes(limit) })
+      : t("app.upload.quota_reached_short");
+  }
+  return t("app.upload.failed_short");
+}
+
+function renderUploadQuotaWarning(user=state.user){
+  const panel = $("uploadQuotaPanel");
+  const amount = $("uploadQuotaAmount");
+  const track = $("uploadQuotaTrack");
+  const fill = $("uploadQuotaFill");
+  const remaining = $("uploadQuotaRemaining");
+  const warning = $("uploadQuotaWarning");
+  if(!panel || !amount || !track || !fill || !remaining || !warning) return;
+  const hasUser = !!user && Number.isFinite(Number(user?.upload_used_bytes));
+  panel.classList.toggle("hidden", !hasUser);
+  if(!hasUser) return;
+
+  const used = Math.max(0, Number(user?.upload_used_bytes || 0));
+  const limit = Math.max(0, Number(user?.upload_limit_bytes || 0));
+  const limited = !!user?.upload_quota_limited && limit > 0;
+  const reached = limited && !!user?.upload_quota_reached;
+  const percent = limited ? Math.max(0, Math.min(100, (used / limit) * 100)) : 0;
+  const percentText = percent > 0 && percent < 0.1 ? "<0.1" : percent.toFixed(1).replace(/\.0$/, "");
+
+  amount.textContent = limited
+    ? t("app.upload.quota_usage", { used: fmtUploadBytes(used), limit: fmtUploadBytes(limit) })
+    : t("app.upload.quota_usage_unlimited", { used: fmtUploadBytes(used) });
+  panel.title = limited
+    ? t("app.upload.quota_tooltip", {
+        used: fmtUploadBytes(used),
+        limit: fmtUploadBytes(limit),
+        remaining: fmtUploadBytes(Math.max(0, limit - used)),
+      })
+    : t("app.upload.quota_usage_unlimited", { used: fmtUploadBytes(used) });
+  track.classList.toggle("hidden", !limited);
+  track.setAttribute("aria-valuenow", String(Math.round(percent)));
+  track.setAttribute("aria-valuetext", limited ? t("app.upload.quota_progress_aria", { percent: percentText }) : "");
+  fill.style.width = limited ? `${percent}%` : "0%";
+  remaining.textContent = reached
+    ? t("app.upload.quota_reached_compact")
+    : limited
+    ? t("app.upload.quota_remaining_compact", {
+        remaining: fmtUploadBytes(Math.max(0, limit - used)),
+      })
+    : t("app.upload.quota_unlimited");
+  panel.classList.toggle("isNearLimit", limited && percent >= 80 && !reached);
+  panel.classList.toggle("isReached", reached);
+  warning.classList.toggle("hidden", !reached);
+  warning.textContent = reached
+    ? t("app.upload.quota_warning", {
+        used: fmtUploadBytes(used),
+        limit: fmtUploadBytes(limit),
+      })
+    : "";
+  if(!reached) state.quotaToastShown = false;
+}
+
+function handleUploadError(error){
+  if(String(error?.code || "") === "UPLOAD_QUOTA_REACHED"){
+    if(state.user){
+      state.user.upload_quota_reached = true;
+      if(Number(error?.usedBytes || 0) > 0) state.user.upload_used_bytes = Number(error.usedBytes);
+      if(Number(error?.limitBytes || 0) > 0) state.user.upload_limit_bytes = Number(error.limitBytes);
+    }
+    renderUploadQuotaWarning();
+    refreshUploadQuotaStatus();
+    if(!state.quotaToastShown){
+      showUiToast(uploadErrorMessage(error), "error");
+      state.quotaToastShown = true;
+    }
+  }
+  return uploadErrorMessage(error);
+}
+
+async function refreshUploadQuotaStatus(){
+  try{
+    const response = await apiFetch(API.me, { cache: "no-store" });
+    const user = await apiJson(response);
+    state.user = { ...(state.user || {}), ...(user || {}) };
+    renderUploadQuotaWarning();
+  }catch(_e){}
+}
+
 const state = {
   user: null,
+  quotaToastShown: false,
   uploadQueue: [],
   uploadStop: false,
   uploadZipJob: null,
@@ -652,8 +774,10 @@ function bindMobileSwipe(){
 async function loadMe(){
   const me = await loadCurrentUser({
     endpoint: API.me,
+    forceNetwork: true,
     onLoaded: (user) => {
       state.user = user;
+      renderUploadQuotaWarning(user);
       state.perfEnabled = !!user?.perf_enabled;
       const isAdmin = user?.role === "admin" || user?.role === "master";
       bindUserMenu({
@@ -665,6 +789,7 @@ async function loadMe(){
     },
   });
   state.user = me;
+  renderUploadQuotaWarning(me);
   state.perfEnabled = !!me?.perf_enabled;
   return me;
 }
@@ -944,7 +1069,10 @@ function uploadListAppendItems(items){
 function uploadListUpdateItem(it){
   if(!it || !it._elState) return;
   const st = uploadStateCode(it.state || "");
-  it._elState.textContent = uploadStateLabel(st);
+  const quotaFailed = st === "failed" && String(it.message || "") === "UPLOAD_QUOTA_REACHED";
+  it._elState.textContent = quotaFailed
+    ? `${uploadStateLabel(st)}: ${t("app.upload.quota_reached_short")}`
+    : uploadStateLabel(st);
   it._elState.classList.toggle("ok", st === "done");
   it._elState.classList.toggle("ng", st === "failed");
   it._elState.classList.toggle("dup", st === "duplicate");
@@ -1049,9 +1177,18 @@ async function _pollActiveUploadJob(jobLabel){
           name: x.filename || "",
           previewUrl: "",
           state: x.state || "",
+          message: x.message || "",
           detail: x.detail || null,
           image_id: x.image_id || null,
         })).filter(x => x.seq > 0);
+
+        items.forEach(it => {
+          if(String(it.message || "") === "UPLOAD_QUOTA_REACHED"){
+            const error = new Error("UPLOAD_QUOTA_REACHED");
+            error.code = "UPLOAD_QUOTA_REACHED";
+            handleUploadError(error);
+          }
+        });
 
         if(isDirect){
           const bySeq = new Map((state.uploadQueue || []).map(it => [Number(it.seq || 0), it]));
@@ -1060,6 +1197,7 @@ async function _pollActiveUploadJob(jobLabel){
             const cur = bySeq.get(it.seq);
             if(cur){
               cur.state = it.state || cur.state;
+              cur.message = it.message || cur.message || "";
               cur.detail = it.detail || cur.detail || null;
               cur.image_id = it.image_id || cur.image_id || null;
               uploadListUpdateItem(cur);
@@ -1091,6 +1229,7 @@ async function _pollActiveUploadJob(jobLabel){
       if(j.status === "done" || j.status === "error" || j.status === "cancelled"){
         _zipPollTimer = null;
         await refreshStatsAndPreviewAfterChange();
+        await refreshUploadQuotaStatus();
         return;
       }
     }catch(_e){}
@@ -1143,12 +1282,14 @@ async function startUploadFiles(files){
       method: "POST",
       body: JSON.stringify({ total: state.uploadQueue.length, ...bookmarkConfig }),
     });
+    if(!initRes.ok) throw await uploadErrorFromResponse(initRes);
     const initData = await apiJson(initRes);
     jobId = Number(initData?.job_id || 0);
     if(!jobId) throw new Error("batch init failed");
     state.uploadZipJob = { id: jobId, total: Number(initData?.total || state.uploadQueue.length), done: 0, failed: 0, dup: 0, status: "collecting", source_kind: "direct", filename: t("app.upload.title") };
-  }catch(_e){
-    if(jobBox) jobBox.innerHTML = `<div class="row"><b>${escapeHtml(t("app.upload.title"))}</b><span class="mut">${escapeHtml(t("app.upload.start_failed"))}</span></div>`;
+  }catch(error){
+    const message = handleUploadError(error);
+    if(jobBox) jobBox.innerHTML = `<div class="row"><b>${escapeHtml(t("app.upload.title"))}</b><span class="mut">${escapeHtml(message)}</span></div>`;
     return;
   }
 
@@ -1168,8 +1309,10 @@ async function startUploadFiles(files){
         String((it.file && it.file.type) || "application/octet-stream"),
       );
       it.state = "received";
-    }catch(_e){
+    }catch(error){
       it.state = "failed";
+      it.message = String(error?.code || "") === "UPLOAD_QUOTA_REACHED" ? "UPLOAD_QUOTA_REACHED" : "";
+      handleUploadError(error);
     }
     uploadListUpdateItem(it);
     uploadProgressUpdate();
@@ -1185,6 +1328,7 @@ async function startUploadFiles(files){
 
   try{
     const finRes = await apiFetch(API.uploadBatchFinish(jobId), { method: "POST" });
+    if(!finRes.ok) throw await uploadErrorFromResponse(finRes);
     const fin = await apiJson(finRes);
     if(state.uploadZipJob){
       state.uploadZipJob.total = Number(fin?.total || uploadedCount);
@@ -1194,8 +1338,9 @@ async function startUploadFiles(files){
       jobBox.innerHTML = `<div class="row"><b>${escapeHtml(t("app.upload.image_label"))}</b><span class="mut">${escapeHtml(t("app.upload.received_starting"))}</span></div>`;
     }
     await _pollActiveUploadJob(t("app.upload.title"));
-  }catch(_e){
-    if(jobBox) jobBox.innerHTML = `<div class="row"><b>${escapeHtml(t("app.upload.image_label"))}</b><span class="mut">${escapeHtml(t("app.upload.processing_start_failed"))}</span></div>`;
+  }catch(error){
+    const message = handleUploadError(error);
+    if(jobBox) jobBox.innerHTML = `<div class="row"><b>${escapeHtml(t("app.upload.image_label"))}</b><span class="mut">${escapeHtml(message)}</span></div>`;
   }
 }
 
@@ -1255,6 +1400,7 @@ async function startZipUpload(zipFile){
       initQs.set("bookmark_list_id", String(bookmarkConfig.bookmark_list_id));
     }
     const initRes = await apiFetch(`${API.uploadZipChunkInit}?${initQs.toString()}`, { method: "POST" });
+    if(!initRes.ok) throw await uploadErrorFromResponse(initRes);
     const init = await apiJson(initRes);
     const token = init?.token;
     if(!token) throw new Error("chunk init failed");
@@ -1283,6 +1429,7 @@ async function startZipUpload(zipFile){
     const finQs = new URLSearchParams();
     finQs.set("token", token);
     const finRes = await apiFetch(`${API.uploadZipChunkFinish}?${finQs.toString()}`, { method: "POST" });
+    if(!finRes.ok) throw await uploadErrorFromResponse(finRes);
     return await apiJson(finRes);
   };
 
@@ -1297,7 +1444,9 @@ async function startZipUpload(zipFile){
       if(elText) elText.textContent = t("app.upload.cancelled");
       return;
     }
-    throw e;
+    const message = handleUploadError(e);
+    if(jobBox) jobBox.innerHTML = `<div class="row"><b>zip</b><span class="mut">${escapeHtml(message)}</span></div>`;
+    return;
   }
 
   if(jobBox){

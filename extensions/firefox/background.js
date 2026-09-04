@@ -282,10 +282,12 @@ async function uploadImage(payload) {
     };
   }
   if (!response.ok || !data.ok) {
+    const detail = data?.detail && typeof data.detail === 'object' ? data.detail : {};
     return {
       ok: false,
-      code: data.code || 'UPLOAD_FAILED',
+      code: data.code || detail.code || 'UPLOAD_FAILED',
       status: response.status,
+      message: data.message || detail.message || '',
     };
   }
   return {

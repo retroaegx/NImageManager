@@ -164,6 +164,9 @@
   "error_UPLOAD_FAILED": {
     "message": "アップロードに失敗しました。"
   },
+  "error_UPLOAD_QUOTA_REACHED": {
+    "message": "NIMのアップロード容量が上限に達しています。"
+  },
   "error_OPEN_FAILED": {
     "message": "開けませんでした。"
   },

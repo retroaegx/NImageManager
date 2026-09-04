@@ -164,6 +164,9 @@
   "error_UPLOAD_FAILED": {
     "message": "Upload failed."
   },
+  "error_UPLOAD_QUOTA_REACHED": {
+    "message": "Your NIM upload storage limit has been reached."
+  },
   "error_OPEN_FAILED": {
     "message": "Failed to open."
   },

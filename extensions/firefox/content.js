@@ -1194,7 +1194,9 @@ async function transferCurrentImage({ button = null, media = null, showProgressT
         await messageRuntime({ type: 'nim-open-options' });
         return { ok: false, code: response?.code || 'AUTH_REQUIRED' };
       }
-      throw new Error(errorText(response?.code || 'UPLOAD_FAILED'));
+      const uploadError = new Error(errorText(response?.code || 'UPLOAD_FAILED'));
+      uploadError.code = String(response?.code || 'UPLOAD_FAILED');
+      throw uploadError;
     }
     if (showSuccessToast) {
       showToast(msg('transferSuccess'), 'success');
@@ -1231,6 +1233,14 @@ async function maybeAutoTransfer() {
     rememberAttemptedSignature(signature);
     if (autoTransferState.pendingMedia === media) autoTransferState.pendingMedia = null;
   } catch (error) {
+    if (String(error?.code || '') === 'UPLOAD_QUOTA_REACHED') {
+      autoTransferState.failedSignatures.delete(signature);
+      rememberAttemptedSignature(signature);
+      if (autoTransferState.pendingMedia === media) autoTransferState.pendingMedia = null;
+      warn('auto transfer stopped because upload quota was reached', error);
+      showToast(String(error?.message || errorText('UPLOAD_QUOTA_REACHED')), 'error');
+      return;
+    }
     const delayMs = rememberFailedSignature(signature);
     window.setTimeout(() => scheduleAutoTransfer(media), delayMs + 50);
     warn('auto transfer failed', error);

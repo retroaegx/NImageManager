@@ -471,6 +471,7 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             extension_links_html = (web_root / "extensions.html").read_text(encoding="utf-8")
             extension_links_js = (web_root / "extension-links.js").read_text(encoding="utf-8")
             index_html = (web_root / "index.html").read_text(encoding="utf-8")
+            admin_html = (web_root / "admin.html").read_text(encoding="utf-8")
             login_html = (web_root / "login.html").read_text(encoding="utf-8")
             extension_auth_html = (web_root / "extension-auth.html").read_text(encoding="utf-8")
             settings_html = (web_root / "settings.html").read_text(encoding="utf-8")
@@ -539,13 +540,28 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             self.assertIn("pageExtensions", styles_css)
             self.assertEqual(ja_json["menu.extensions"], "拡張機能はこちら")
             self.assertEqual(en_json["menu.extensions"], "Get the extension")
+            self.assertIn('id="uploadQuotaPanel"', index_html)
+            self.assertIn('id="uploadQuotaTrack"', index_html)
+            self.assertIn('id="uploadQuotaRemaining"', index_html)
+            self.assertIn('id="uploadQuotaWarning"', index_html)
+            user_box_fragment = index_html.split('<div class="userBox">', 1)[1].split("</div>", 1)[0]
+            self.assertNotIn('id="uploadQuotaPanel"', user_box_fragment)
+            self.assertLess(index_html.index('id="uploadQuotaPanel"'), index_html.index('id="meLabel"'))
+            self.assertIn('data-i18n="admin.quota.title"', admin_html)
+            self.assertIn("upload_limit_bytes", admin_js)
+            self.assertIn("UPLOAD_QUOTA_REACHED", app_js)
+            self.assertIn('t("app.upload.quota_remaining_compact"', app_js)
+            self.assertIn("forceNetwork: true", app_js)
+            self.assertIn("NAI_IM_USER_UPLOAD_LIMIT_BYTES=5368709120", (PROJECT_ROOT / ".env.template").read_text(encoding="utf-8"))
 
             for browser in ("chrome", "firefox"):
                 extension_root = PROJECT_ROOT / "extensions" / browser
                 options_html = (extension_root / "options.html").read_text(encoding="utf-8")
                 options_js = (extension_root / "options.js").read_text(encoding="utf-8")
                 background_js = (extension_root / "background.js").read_text(encoding="utf-8")
+                content_js = (extension_root / "content.js").read_text(encoding="utf-8")
                 manifest = json.loads((extension_root / "manifest.json").read_text(encoding="utf-8"))
+                locale_ja = json.loads((extension_root / "_locales" / "ja" / "messages.json").read_text(encoding="utf-8"))
                 self.assertIn('id="browserLogin"', options_html)
                 self.assertIn('data-i18n="browserLoginRequirement"', options_html)
                 self.assertNotIn('id="login"', options_html)
@@ -558,6 +574,10 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
                 self.assertNotIn("nim-login", background_js)
                 self.assertNotIn("identity", manifest["permissions"])
                 self.assertNotIn("cookies", manifest["permissions"])
+                self.assertEqual(manifest["version"], "0.2.40")
+                self.assertIn("detail.code", background_js)
+                self.assertIn("error_UPLOAD_QUOTA_REACHED", locale_ja)
+                self.assertIn("auto transfer stopped because upload quota was reached", content_js)
 
     def test_auth_and_account_lifecycle(self):
         with Runtime() as rt:
@@ -1157,6 +1177,121 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             admin_login = rt.json("POST", "/auth/login", payload={"username": "admin1", "password": "admin1_pw"})
             self.assertEqual(admin_login.status_code, 401)
 
+    def test_regular_user_upload_quota_and_admin_override(self):
+        with Runtime() as rt:
+            rt.setup_master()
+            rt.create_user(actor="master", username="limited1", role="user")
+
+            initial = rt.request("GET", "/me", user="limited1")
+            expect_status(initial, 200)
+            self.assertEqual(int(initial.json()["upload_limit_bytes"]), 5 * 1024 * 1024 * 1024)
+            self.assertEqual(int(initial.json()["upload_used_bytes"]), 0)
+            self.assertFalse(initial.json()["upload_quota_reached"])
+
+            custom = rt.json(
+                "POST",
+                f"/admin/users/{rt.user_ids['limited1']}",
+                user="master",
+                payload={"upload_limit_bytes": 1},
+            )
+            expect_status(custom, 200)
+            self.assertEqual(int(custom.json()["upload_limit_bytes"]), 1)
+            self.assertEqual(custom.json()["upload_limit_source"], "custom")
+
+            first_raw = rt.make_png_bytes(color=(12, 34, 56))
+            first = rt.request(
+                "POST",
+                "/upload",
+                user="limited1",
+                files={"file": ("first.png", first_raw, "image/png")},
+            )
+            expect_status(first, 200)
+            self.assertFalse(first.json()["dedup"])
+
+            reached = rt.request("GET", "/me", user="limited1")
+            expect_status(reached, 200)
+            self.assertEqual(int(reached.json()["upload_used_bytes"]), len(first_raw))
+            self.assertEqual(
+                rt.get_db_row_count("SELECT upload_used_bytes FROM users WHERE id=?", (rt.user_ids["limited1"],)),
+                len(first_raw),
+            )
+            self.assertTrue(reached.json()["upload_quota_reached"])
+
+            second = rt.request(
+                "POST",
+                "/upload",
+                user="limited1",
+                files={"file": ("second.png", rt.make_png_bytes(color=(65, 43, 21)), "image/png")},
+            )
+            self.assertEqual(second.status_code, 413)
+            self.assertEqual(second.json()["detail"]["code"], "UPLOAD_QUOTA_REACHED")
+
+            batch = rt.json("POST", "/upload_batch/init", user="limited1", payload={"total": 1})
+            self.assertEqual(batch.status_code, 413)
+            chunk = rt.request(
+                "POST",
+                "/upload_zip_chunk/init?filename=test.zip&total_bytes=100",
+                user="limited1",
+            )
+            self.assertEqual(chunk.status_code, 413)
+            extension = rt.request(
+                "POST",
+                "/ext/upload",
+                user="limited1",
+                files={"file": ("extension.png", rt.make_png_bytes(color=(1, 2, 3)), "image/png")},
+            )
+            self.assertEqual(extension.status_code, 413)
+
+            deleted = rt.json(
+                "POST",
+                "/images/bulk_delete",
+                user="limited1",
+                payload={"mode": "ids", "ids": [int(first.json()["image_id"])]},
+            )
+            expect_status(deleted, 200)
+            after_delete = rt.request("GET", "/me", user="limited1")
+            expect_status(after_delete, 200)
+            self.assertEqual(int(after_delete.json()["upload_used_bytes"]), 0)
+            self.assertFalse(after_delete.json()["upload_quota_reached"])
+
+            replacement_raw = rt.make_png_bytes(color=(21, 43, 65))
+            replacement = rt.request(
+                "POST",
+                "/upload",
+                user="limited1",
+                files={"file": ("replacement.png", replacement_raw, "image/png")},
+            )
+            expect_status(replacement, 200)
+            self.assertEqual(
+                rt.get_db_row_count("SELECT upload_used_bytes FROM users WHERE id=?", (rt.user_ids["limited1"],)),
+                len(replacement_raw),
+            )
+
+            reset_default = rt.json(
+                "POST",
+                f"/admin/users/{rt.user_ids['limited1']}",
+                user="master",
+                payload={"upload_limit_bytes": None},
+            )
+            expect_status(reset_default, 200)
+            self.assertEqual(reset_default.json()["upload_limit_source"], "default")
+            self.assertEqual(int(reset_default.json()["upload_limit_bytes"]), 5 * 1024 * 1024 * 1024)
+            self.assertFalse(reset_default.json()["upload_quota_reached"])
+
+            unlimited = rt.json(
+                "POST",
+                f"/admin/users/{rt.user_ids['limited1']}",
+                user="master",
+                payload={"upload_limit_bytes": 0},
+            )
+            expect_status(unlimited, 200)
+            self.assertFalse(unlimited.json()["upload_quota_limited"])
+            self.assertEqual(int(unlimited.json()["upload_limit_bytes"]), 0)
+
+            master_me = rt.request("GET", "/me", user="master")
+            expect_status(master_me, 200)
+            self.assertFalse(master_me.json()["upload_quota_limited"])
+
     def test_metadata_extract_usage_flags_from_nested_scopes(self):
         with Runtime() as rt:
             from server.app.services.metadata_extract import extract_novelai_metadata
@@ -1313,6 +1448,7 @@ TEST_DESCRIPTIONS = {
     "test_visibility_for_detail_thumb_overlay_and_downloads": "detail、thumb(grid/overlay)、view/file/metadata の可視性確認",
     "test_bookmark_crud_bulk_operations_and_gallery_queries": "ブックマークCRUD、favorite、bulk apply、一覧問い合わせの確認",
     "test_upload_routes_and_admin_status_smoke": "upload、upload_batch、管理ステータス反映の確認",
+    "test_regular_user_upload_quota_and_admin_override": "一般ユーザーの既定/個別容量上限、1ファイル超過許容、各アップロード経路の拒否確認",
     "test_bulk_delete_permissions_and_account_delete_cascade": "bulk delete権限、自己削除、管理削除、削除連鎖の確認",
     "test_metadata_extract_usage_flags_from_nested_scopes": "入れ子 params の参照利用フラグと sampler 抽出確認",
     "test_reparse_updates_usage_flags_from_nested_scopes": "再解析で入れ子 params の参照利用フラグと sampler を更新できるか確認",
