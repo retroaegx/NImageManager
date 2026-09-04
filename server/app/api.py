@@ -4045,71 +4045,122 @@ def _delete_invalid_image_record(conn: sqlite3.Connection, image_id: int) -> boo
 
 
 def _fill_missing_derivatives_worker(run_id: int, batch_size: int = 100, interval_sec: float = 0.1) -> None:
+    current_image_id: int | None = None
     try:
         while True:
+            # Keep maintenance state transactions short.  In particular, never
+            # hold a write transaction while _ensure_derivatives() uses its own
+            # connection to write the generated files back to app.db.
             conn = get_conn()
             try:
                 _kv_set(conn, "derivative_fill_bg_running", "1")
                 _kv_set(conn, "derivative_fill_bg_heartbeat", str(_hb_now()))
-
                 after_id = int(_kv_get(conn, "derivative_fill_after_id") or "0")
+                conn.commit()
                 rows = conn.execute(
                     "SELECT id FROM images WHERE id > ? ORDER BY id ASC LIMIT ?",
                     (after_id, int(batch_size)),
                 ).fetchall()
                 ids = [int(r[0] if isinstance(r, tuple) else r["id"]) for r in rows]
+            finally:
+                conn.close()
 
-                if not ids:
+            if not ids:
+                conn = get_conn()
+                try:
                     _run_add_counts(conn, run_id, last_image_id=after_id, processed=0, updated=0, error_count=0, done=True)
                     _set_run_status(conn, run_id, "done")
                     _kv_set(conn, "derivative_fill_bg_running", "0")
                     _kv_set(conn, "derivative_fill_bg_heartbeat", str(_hb_now()))
                     conn.commit()
-                    break
+                finally:
+                    conn.close()
+                break
 
-                updated_n = 0
-                error_n = 0
-                last_id = after_id
-                for iid in ids:
-                    last_id = int(iid)
+            for iid in ids:
+                current_image_id = int(iid)
+                item_updated = 0
+                item_errors = 0
+                missing_kinds: tuple[str, ...] = ()
+
+                # Determine what is missing in a separate, completed
+                # transaction.  This helper may migrate an old in-DB blob to
+                # disk, so commit before opening the generator connection.
+                conn = get_conn()
+                try:
+                    _kv_set(conn, "derivative_fill_bg_heartbeat", str(_hb_now()))
+                    conn.commit()
+                    missing_kinds = _missing_derivative_kinds(conn, current_image_id)
+                    conn.commit()
+                finally:
+                    conn.close()
+
+                if missing_kinds:
                     try:
-                        missing_kinds = _missing_derivative_kinds(conn, int(iid))
-                        if missing_kinds:
-                            _ensure_derivatives(int(iid), missing_kinds, trigger="maintenance_fill")
-                            updated_n += 1
-                    except Exception as exc:
-                        if _is_unrecoverable_source_decode_error(exc):
-                            deleted = False
-                            try:
-                                deleted = _delete_invalid_image_record(conn, int(iid))
-                            except Exception as delete_exc:
-                                error_n += 1
-                                _run_log_error(conn, run_id, int(iid), "derivative_fill", f"{str(exc) or 'error'} / delete_failed: {type(delete_exc).__name__}: {delete_exc}")
-                            else:
-                                if deleted:
-                                    updated_n += 1
-                                    _run_log_error(conn, run_id, int(iid), "derivative_fill_delete", f"source image invalid; deleted from DB: {str(exc) or 'error'}")
-                                else:
-                                    error_n += 1
-                                    _run_log_error(conn, run_id, int(iid), "derivative_fill", str(exc) or "error")
-                        else:
-                            error_n += 1
-                            _run_log_error(conn, run_id, int(iid), "derivative_fill", str(exc) or "error")
-                    if (last_id % 20) == 0:
-                        _kv_set(conn, "derivative_fill_bg_heartbeat", str(_hb_now()))
+                        _ensure_derivatives(current_image_id, missing_kinds, trigger="maintenance_fill")
 
-                _kv_set(conn, "derivative_fill_after_id", str(int(last_id)))
-                _run_add_counts(conn, run_id, last_image_id=int(last_id), processed=len(ids), updated=updated_n, error_count=error_n, done=False)
-                _kv_set(conn, "derivative_fill_bg_heartbeat", str(_hb_now()))
-                conn.commit()
-            finally:
-                conn.close()
+                        # _ensure_derivatives records encoder failures in its
+                        # performance data and can return without raising.  A
+                        # maintenance run must surface that as a real failure.
+                        verify_conn = get_conn()
+                        try:
+                            remaining = _missing_derivative_kinds(verify_conn, current_image_id)
+                            verify_conn.commit()
+                        finally:
+                            verify_conn.close()
+                        if remaining:
+                            raise RuntimeError(f"派生画像を作成できませんでした: {', '.join(remaining)}")
+                        item_updated = 1
+                    except Exception as exc:
+                        error_conn = get_conn()
+                        try:
+                            if _is_unrecoverable_source_decode_error(exc):
+                                deleted = False
+                                try:
+                                    deleted = _delete_invalid_image_record(error_conn, current_image_id)
+                                except Exception as delete_exc:
+                                    item_errors = 1
+                                    _run_log_error(error_conn, run_id, current_image_id, "derivative_fill", f"{str(exc) or 'error'} / delete_failed: {type(delete_exc).__name__}: {delete_exc}")
+                                else:
+                                    if deleted:
+                                        item_updated = 1
+                                        _run_log_error(error_conn, run_id, current_image_id, "derivative_fill_delete", f"source image invalid; deleted from DB: {str(exc) or 'error'}")
+                                    else:
+                                        item_errors = 1
+                                        _run_log_error(error_conn, run_id, current_image_id, "derivative_fill", str(exc) or "error")
+                            else:
+                                item_errors = 1
+                                _run_log_error(error_conn, run_id, current_image_id, "derivative_fill", str(exc) or "error")
+                            error_conn.commit()
+                        finally:
+                            error_conn.close()
+
+                # Checkpoint every image.  A restart can resume at the next
+                # image without losing a whole batch, and the UI sees a fresh
+                # heartbeat and progress immediately.
+                progress_conn = get_conn()
+                try:
+                    _kv_set(progress_conn, "derivative_fill_after_id", str(current_image_id))
+                    _run_add_counts(
+                        progress_conn,
+                        run_id,
+                        last_image_id=current_image_id,
+                        processed=1,
+                        updated=item_updated,
+                        error_count=item_errors,
+                        done=False,
+                    )
+                    _kv_set(progress_conn, "derivative_fill_bg_heartbeat", str(_hb_now()))
+                    progress_conn.commit()
+                finally:
+                    progress_conn.close()
 
             time.sleep(max(0.05, float(interval_sec)))
-    except Exception:
+    except Exception as exc:
         try:
             conn = get_conn()
             try:
+                _run_log_error(conn, run_id, current_image_id, "derivative_fill_worker", f"{type(exc).__name__}: {str(exc) or 'error'}")
                 _kv_set(conn, "derivative_fill_bg_running", "0")
                 _kv_set(conn, "derivative_fill_bg_heartbeat", str(_hb_now()))
                 _set_run_status(conn, run_id, "stopped")

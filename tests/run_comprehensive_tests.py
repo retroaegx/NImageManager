@@ -999,6 +999,81 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             self.assertGreaterEqual(int(admin_json["derivatives"]["grid"]), 2)
             self.assertGreaterEqual(int(admin_json["derivatives"]["overlay"]), 2)
 
+    def test_derivative_fill_does_not_self_lock_and_checkpoints_each_image(self):
+        with Runtime() as rt:
+            rt.setup_master()
+            image_id = rt.seed_image(owner="master", filename="fill-missing.png")
+            assert rt.db is not None and rt.api is not None
+
+            previous_timeout = os.environ.get("NAI_IM_SQLITE_BUSY_TIMEOUT_MS")
+            os.environ["NAI_IM_SQLITE_BUSY_TIMEOUT_MS"] = "150"
+            try:
+                conn = rt.db.get_conn()
+                try:
+                    stale_paths = [
+                        str(row["disk_path"] or "")
+                        for row in conn.execute(
+                            "SELECT disk_path FROM image_derivatives WHERE image_id=? AND kind='grid'",
+                            (image_id,),
+                        ).fetchall()
+                    ]
+                    conn.execute(
+                        "DELETE FROM image_derivatives WHERE image_id=? AND kind='grid'",
+                        (image_id,),
+                    )
+                    run_id = rt.api._create_run(
+                        conn,
+                        "fill_derivatives_missing",
+                        {"batch": 1, "interval_sec": 0.05},
+                    )
+                    rt.api._kv_set(conn, "derivative_fill_run_id", str(run_id))
+                    rt.api._kv_set(conn, "derivative_fill_after_id", "0")
+                    rt.api._kv_set(conn, "derivative_fill_bg_running", "1")
+                    rt.api._kv_set(conn, "derivative_fill_bg_heartbeat", str(rt.api._hb_now()))
+                    conn.commit()
+                finally:
+                    conn.close()
+
+                for path in stale_paths:
+                    if path:
+                        Path(path).unlink(missing_ok=True)
+
+                started = time.perf_counter()
+                rt.api._fill_missing_derivatives_worker(run_id, batch_size=1, interval_sec=0.05)
+                elapsed = time.perf_counter() - started
+
+                conn = rt.db.get_conn()
+                try:
+                    run = conn.execute(
+                        "SELECT status,last_image_id,processed,updated,error_count FROM maintenance_runs WHERE id=?",
+                        (run_id,),
+                    ).fetchone()
+                    state = {
+                        row["key"]: row["value"]
+                        for row in conn.execute(
+                            "SELECT key,value FROM admin_kv WHERE key IN ('derivative_fill_after_id','derivative_fill_bg_running')"
+                        ).fetchall()
+                    }
+                    remaining = rt.api._missing_derivative_kinds(conn, image_id)
+                    conn.commit()
+                finally:
+                    conn.close()
+
+                self.assertLess(elapsed, 5.0)
+                self.assertEqual(run["status"], "done")
+                self.assertEqual(int(run["last_image_id"]), image_id)
+                self.assertEqual(int(run["processed"]), 1)
+                self.assertEqual(int(run["updated"]), 1)
+                self.assertEqual(int(run["error_count"]), 0)
+                self.assertEqual(state["derivative_fill_after_id"], str(image_id))
+                self.assertEqual(state["derivative_fill_bg_running"], "0")
+                self.assertNotIn("grid", remaining)
+            finally:
+                if previous_timeout is None:
+                    os.environ.pop("NAI_IM_SQLITE_BUSY_TIMEOUT_MS", None)
+                else:
+                    os.environ["NAI_IM_SQLITE_BUSY_TIMEOUT_MS"] = previous_timeout
+
     def test_bulk_delete_permissions_and_account_delete_cascade(self):
         with Runtime() as rt:
             rt.setup_master()
