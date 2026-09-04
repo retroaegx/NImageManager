@@ -2187,6 +2187,8 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
 .authTab:disabled{opacity:.42;cursor:not-allowed}
 .authActionRow{align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
 .authActionRow .primaryBtn{min-width:140px}
+.loginSubmitRow{justify-content:center}
+.forgotPasswordRow{display:flex;justify-content:flex-end;margin-top:2px}
 .linkBtn{border:0;background:transparent;color:#aebcff;padding:7px 0;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
 .authMessage{min-height:20px;margin-top:8px;overflow-wrap:anywhere}
 .authWideBtn,.agreementOpenBtn{width:100%;justify-content:center;margin-top:10px}
@@ -2194,7 +2196,7 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
 .agreementState.ok,.authMessage.ok{color:#73e6a4}
 .authDivider{display:flex;align-items:center;gap:10px;margin:16px 0 12px;color:rgba(255,255,255,.5);font-size:12px}
 .authDivider::before,.authDivider::after{content:"";height:1px;background:rgba(255,255,255,.12);flex:1}
-.googleAuthArea>div:last-child{display:flex;justify-content:center;min-height:40px}
+#googleLoginButton,#googleRegisterButton{display:flex;justify-content:center;width:100%;min-height:40px}
 .googleRegisterFields{margin-top:12px}
 .googleAccountConfirmed{display:flex;flex-direction:column;gap:5px;padding:12px 14px;border:1px solid rgba(115,230,164,.32);border-radius:12px;background:rgba(50,180,110,.1)}
 .googleAccountConfirmed strong{font-size:13px;color:#a9f2c7}
@@ -2231,7 +2233,7 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
 .legalDocument p,.legalDocument li{color:rgba(239,242,255,.86)}
 .legalDocument li+li{margin-top:7px}
 .legalMeta{font-size:12px;color:rgba(255,255,255,.58)!important}
-@media(max-width:600px){.loginShell{padding:10px}.loginCard{padding:15px}.agreementModal{padding:0}.agreementDialog{height:100dvh;border-radius:0;border-left:0;border-right:0}.authActionRow>*{width:100%}.linkBtn{text-align:left}}
+@media(max-width:600px){.loginShell{padding:10px}.loginCard{padding:15px}.agreementModal{padding:0}.agreementDialog{height:100dvh;border-radius:0;border-left:0;border-right:0}.authActionRow>*{width:100%}.forgotPasswordRow{justify-content:center}.linkBtn{text-align:center}}
 
 
 .menu::-webkit-scrollbar{ display:none; }

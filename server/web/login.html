@@ -48,8 +48,10 @@
             <label data-i18n="common.password">パスワード</label>
             <input id="loginPass" type="password" autocomplete="current-password" data-i18n-placeholder="common.password_placeholder" />
           </div>
-          <div class="row authActionRow">
+          <div class="row authActionRow loginSubmitRow">
             <button id="loginBtn" class="primaryBtn" type="button" data-i18n="login.action">ログイン</button>
+          </div>
+          <div class="forgotPasswordRow">
             <button id="forgotPasswordBtn" class="linkBtn" type="button" data-i18n="password.forgot">パスワードを忘れた場合</button>
           </div>
           <div id="loginErr" class="err authMessage" aria-live="polite"></div>
@@ -79,7 +81,7 @@
               <label data-i18n="common.password">パスワード</label>
               <input id="registerPass" type="password" minlength="8" autocomplete="new-password" data-i18n-placeholder="register.password_placeholder" />
             </div>
-            <div class="small authFieldHint" data-i18n="register.extension_password_hint">このパスワードはWeb版と拡張機能のログインに使用します。</div>
+            <div class="small authFieldHint" data-i18n="register.password_hint">このパスワードはWeb版のログインに使用します。</div>
             <div class="field">
               <label data-i18n="common.password_confirm">パスワード（確認）</label>
               <input id="registerPass2" type="password" minlength="8" autocomplete="new-password" data-i18n-placeholder="common.password_placeholder" />
@@ -91,18 +93,10 @@
               <strong data-i18n="register.google_confirmed">Googleアカウントを確認しました</strong>
               <span id="googleRegisterEmail"></span>
             </div>
-            <p class="loginHint" data-i18n="register.google_details_hint">NImageManagerで使うユーザー名とパスワードを設定してください。このパスワードはWeb版と拡張機能で使用できます。</p>
+            <p class="loginHint" data-i18n="register.google_details_hint">NImageManagerで使うユーザー名を設定してください。</p>
             <div class="field">
               <label data-i18n="common.username">ユーザー名</label>
               <input id="googleRegisterUser" maxlength="40" autocomplete="username" data-i18n-placeholder="common.username_placeholder" />
-            </div>
-            <div class="field">
-              <label data-i18n="google_password.label">パスワード</label>
-              <input id="googleRegisterPass" type="password" minlength="8" autocomplete="new-password" data-i18n-placeholder="register.password_placeholder" />
-            </div>
-            <div class="field">
-              <label data-i18n="common.password_confirm">パスワード（確認）</label>
-              <input id="googleRegisterPass2" type="password" minlength="8" autocomplete="new-password" data-i18n-placeholder="common.password_placeholder" />
             </div>
           </div>
 
@@ -126,21 +120,6 @@
             <button id="backToLoginBtn" class="secondaryBtn" type="button" data-i18n="common.back">戻る</button>
           </div>
           <div id="forgotMessage" class="small authMessage" aria-live="polite"></div>
-        </section>
-
-        <section id="googlePasswordPanel" class="hidden">
-          <p class="loginHint" data-i18n="google_password.hint">Web版と拡張機能で使う、8文字以上のパスワードを設定してください。</p>
-          <div class="field">
-            <label data-i18n="google_password.label">パスワード</label>
-            <input id="googleExtensionPass" type="password" minlength="8" autocomplete="new-password" data-i18n-placeholder="register.password_placeholder" />
-          </div>
-          <div class="field">
-            <label data-i18n="common.password_confirm">パスワード（確認）</label>
-            <input id="googleExtensionPass2" type="password" minlength="8" autocomplete="new-password" data-i18n-placeholder="common.password_placeholder" />
-          </div>
-          <button id="saveGooglePasswordBtn" class="primaryBtn authWideBtn" type="button" data-i18n="google_password.action">パスワードを設定してログイン</button>
-          <div id="googlePasswordErr" class="err authMessage" aria-live="polite"></div>
-          <button id="cancelGooglePasswordBtn" class="linkBtn" type="button" data-i18n="common.back">戻る</button>
         </section>
 
         <div class="loginLegalLinks">

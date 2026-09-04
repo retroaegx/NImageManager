@@ -1820,8 +1820,6 @@ def forgot_password(request: Request, req: EmailReq):
 class GoogleAuthReq(BaseModel):
     credential: str
     username: str | None = None
-    password: str | None = None
-    password2: str | None = None
     accepted: bool = False
     terms_version: str = ""
     privacy_version: str = ""
@@ -1855,8 +1853,6 @@ def google_login(request: Request, response: Response, req: GoogleAuthReq):
         if not row:
             has_registration_details = bool(
                 str(req.username or "").strip()
-                or req.password
-                or req.password2
                 or req.accepted
                 or req.terms_version
                 or req.privacy_version
@@ -1875,14 +1871,13 @@ def google_login(request: Request, response: Response, req: GoogleAuthReq):
                 privacy_version=req.privacy_version,
             )
             username, username_norm = _validate_public_username(req.username)
-            _validate_new_password(str(req.password or ""), str(req.password2 or ""))
             try:
                 cur = conn.execute(
                     """
                     INSERT INTO users(
                       username, username_norm, email, email_norm, email_verified_at,
                       google_sub, extension_password_set, password_hash, role, disabled, must_set_password, pw_set_at
-                    ) VALUES (?,?,?,?,datetime('now'),?,1,?,'user',0,0,datetime('now'))
+                    ) VALUES (?,?,?,?,datetime('now'),?,0,?,'user',0,0,NULL)
                     """,
                     (
                         username,
@@ -1890,7 +1885,7 @@ def google_login(request: Request, response: Response, req: GoogleAuthReq):
                         profile["email"],
                         profile["email"],
                         profile["sub"],
-                        hash_password(str(req.password)),
+                        hash_password(secrets.token_urlsafe(48)),
                     ),
                 )
                 user_id = int(cur.lastrowid)
@@ -1906,15 +1901,6 @@ def google_login(request: Request, response: Response, req: GoogleAuthReq):
 
         if int(row["disabled"] or 0) == 1:
             raise HTTPException(status_code=403, detail="account disabled")
-        if str(row["google_sub"] or "") and int(row["extension_password_set"] or 0) != 1:
-            if not req.password and not req.password2:
-                raise HTTPException(status_code=428, detail="extension password required")
-            _validate_new_password(str(req.password or ""), str(req.password2 or ""))
-            conn.execute(
-                "UPDATE users SET password_hash=?, extension_password_set=1, pw_set_at=datetime('now') WHERE id=?",
-                (hash_password(str(req.password)), int(row["id"])),
-            )
-            conn.commit()
         token = _set_login_cookie(response, request, row)
         response.delete_cookie(
             "nai_google_nonce",

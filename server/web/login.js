@@ -72,12 +72,12 @@ function showMessage(id,message,kind="error"){
   el.textContent=message||""; el.classList.toggle("ok",kind==="success"); el.classList.toggle("err",kind!=="success"&&Boolean(message));
 }
 function showPanel(name){
-  const login=name==="login", register=name==="register", forgot=name==="forgot", googlePassword=name==="googlePassword";
-  $("loginPanel")?.classList.toggle("hidden",!login); $("registerPanel")?.classList.toggle("hidden",!register); $("forgotPanel")?.classList.toggle("hidden",!forgot); $("googlePasswordPanel")?.classList.toggle("hidden",!googlePassword);
+  const login=name==="login", register=name==="register", forgot=name==="forgot";
+  $("loginPanel")?.classList.toggle("hidden",!login); $("registerPanel")?.classList.toggle("hidden",!register); $("forgotPanel")?.classList.toggle("hidden",!forgot);
   $("showLoginBtn")?.classList.toggle("active",login); $("showRegisterBtn")?.classList.toggle("active",register);
   $("showLoginBtn")?.setAttribute("aria-selected",String(login)); $("showRegisterBtn")?.setAttribute("aria-selected",String(register));
-  $("authHeading").textContent=t(googlePassword?"google_password.heading":forgot?"password.reset_title":register?"register.heading":"login.heading");
-  (googlePassword?$("googleExtensionPass"):forgot?$("forgotEmail"):register?(googleRegistrationActive?$("googleRegisterUser"):$("registerUser")):$("loginUser"))?.focus();
+  $("authHeading").textContent=t(forgot?"password.reset_title":register?"register.heading":"login.heading");
+  (forgot?$("forgotEmail"):register?(googleRegistrationActive?$("googleRegisterUser"):$("registerUser")):$("loginUser"))?.focus();
 }
 function setGoogleRegistrationMode(active,email=""){
   googleRegistrationActive=Boolean(active);
@@ -170,7 +170,6 @@ async function handleGoogleCredential(credential){
   try{
     const response=await fetch(API.google,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({credential}),credentials:"include"}); const data=await readJson(response);
     if(response.ok){finishLogin();return;}
-    if(response.status===428&&data?.detail==="extension password required"){pendingGoogleCredential=credential;showPanel("googlePassword");return;}
     if(response.status===428&&data?.detail==="google registration required"){
       pendingGoogleCredential=credential;setGoogleRegistrationMode(true,data?.email||"");showPanel("register");return;
     }
@@ -178,28 +177,16 @@ async function handleGoogleCredential(credential){
   }catch{showMessage(messageId,t("common.connection_failed"));}
 }
 async function completeGoogleRegistration(){
-  const payload={credential:pendingGoogleCredential,username:$("googleRegisterUser").value.trim(),password:$("googleRegisterPass").value,password2:$("googleRegisterPass2").value,accepted:agreementAccepted,terms_version:providers.terms_version,privacy_version:providers.privacy_version};
+  const payload={credential:pendingGoogleCredential,username:$("googleRegisterUser").value.trim(),accepted:agreementAccepted,terms_version:providers.terms_version,privacy_version:providers.privacy_version};
   showMessage("registerErr","");
   if(!payload.credential){resetGoogleRegistration();showMessage("registerErr",t("register.google_session_expired"));return;}
-  if(!payload.username||!payload.password||!payload.password2){showMessage("registerErr",t("common.required"));return;}
-  if(payload.password!==payload.password2){showMessage("registerErr",t("common.confirmation_mismatch"));return;}
+  if(!payload.username){showMessage("registerErr",t("common.required"));return;}
   try{
     const response=await fetch(API.google,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),credentials:"include"});const data=await readJson(response);
     if(response.ok){pendingGoogleCredential="";finishLogin();return;}
     if(response.status===401){resetGoogleRegistration();showMessage("registerErr",t("register.google_session_expired"));return;}
     showMessage("registerErr",data?.detail||t("register.failed"));
   }catch{showMessage("registerErr",t("common.connection_failed"));}
-}
-async function saveGoogleExtensionPassword(){
-  const password=$("googleExtensionPass").value,password2=$("googleExtensionPass2").value;showMessage("googlePasswordErr","");
-  if(!pendingGoogleCredential){showPanel("login");showMessage("loginErr",t("login.google_failed"));return;}
-  if(!password||!password2){showMessage("googlePasswordErr",t("common.required"));return;}
-  if(password!==password2){showMessage("googlePasswordErr",t("common.confirmation_mismatch"));return;}
-  try{
-    const response=await fetch(API.google,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({credential:pendingGoogleCredential,password,password2}),credentials:"include"});const data=await readJson(response);
-    if(response.ok){pendingGoogleCredential="";finishLogin();return;}
-    showMessage("googlePasswordErr",data?.detail||t("google_password.failed"));
-  }catch{showMessage("googlePasswordErr",t("common.connection_failed"));}
 }
 async function setupGoogle(){
   if(!providers.google_enabled||!providers.google_client_id)return;
@@ -229,7 +216,6 @@ async function init(){
   $("showLoginBtn")?.addEventListener("click",()=>{resetGoogleRegistration();showPanel("login");});$("showRegisterBtn")?.addEventListener("click",openRegisterPanel);$("forgotPasswordBtn")?.addEventListener("click",()=>showPanel("forgot"));$("backToLoginBtn")?.addEventListener("click",()=>showPanel("login"));
   $("loginBtn")?.addEventListener("click",doLogin);$("loginPass")?.addEventListener("keydown",e=>{if(e.key==="Enter")doLogin();});$("registerBtn")?.addEventListener("click",doRegister);$("resendVerificationBtn")?.addEventListener("click",resendVerification);$("sendResetBtn")?.addEventListener("click",sendPasswordReset);
   $("completeGoogleRegisterBtn")?.addEventListener("click",completeGoogleRegistration);$("cancelGoogleRegisterBtn")?.addEventListener("click",resetGoogleRegistration);
-  $("saveGooglePasswordBtn")?.addEventListener("click",saveGoogleExtensionPassword);$("cancelGooglePasswordBtn")?.addEventListener("click",()=>{pendingGoogleCredential="";showPanel("login");});
   $("openAgreementBtn")?.addEventListener("click",openAgreement);$("closeAgreementBtn")?.addEventListener("click",closeAgreement);$("agreementNextBtn")?.addEventListener("click",advanceAgreement);$("agreementFrame")?.addEventListener("load",bindAgreementFrameScroll);
   $("agreementModal")?.addEventListener("click",e=>{if(e.target===$("agreementModal"))closeAgreement();});document.addEventListener("keydown",e=>{if(e.key==="Escape"&&!$("agreementModal")?.classList.contains("hidden"))closeAgreement();});
   showPanel("login");setupFirstTimeRedirect();if(await initEmbeddedLogin())return;

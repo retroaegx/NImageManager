@@ -499,9 +499,16 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             self.assertLess(login_html.index('id="googleRegisterButton"'), login_html.index('id="registerUser"'))
             self.assertIn('id="googleRegisterFields"', login_html)
             self.assertIn('id="completeGoogleRegisterBtn"', login_html)
+            self.assertNotIn('id="googleRegisterPass"', login_html)
+            self.assertNotIn('id="googleRegisterPass2"', login_html)
+            self.assertNotIn('id="googlePasswordPanel"', login_html)
             self.assertIn('data?.detail==="google registration required"', login_js)
+            self.assertNotIn("extension password required", login_js)
+            self.assertNotIn("saveGoogleExtensionPassword", login_js)
             self.assertNotIn("register.google_new_account", login_js)
             self.assertIn("loginDestination()", login_js)
+            self.assertIn(".loginSubmitRow{justify-content:center}", styles_css)
+            self.assertIn("#googleLoginButton,#googleRegisterButton", styles_css)
             self.assertIn('id="approveExtensionAuth"', extension_auth_html)
             self.assertIn("/api/ext/device/approve", extension_auth_js)
             self.assertIn('id="menuExtensions"', index_html)
@@ -727,8 +734,6 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
                 payload={
                     "credential": "stub",
                     "username": "google-user",
-                    "password": "extension-pass-789",
-                    "password2": "extension-pass-789",
                     **policy,
                 },
             )
@@ -737,29 +742,23 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
 
             conn = rt.db.get_conn()
             try:
-                conn.execute("UPDATE users SET extension_password_set=0 WHERE google_sub=?", ("google-subject-1",))
-                conn.commit()
+                google_row = conn.execute(
+                    "SELECT extension_password_set, pw_set_at FROM users WHERE google_sub=?",
+                    ("google-subject-1",),
+                ).fetchone()
+                self.assertEqual(int(google_row["extension_password_set"]), 0)
+                self.assertIsNone(google_row["pw_set_at"])
             finally:
                 conn.close()
             expect_status(
-                rt.json("POST", "/auth/login", payload={"username": "google-user", "password": "extension-pass-789"}),
+                rt.json("POST", "/auth/login", payload={"username": "google-user", "password": "not-a-google-password"}),
                 401,
             )
             providers = rt.request("GET", "/auth/providers")
             nonce = providers.json()["google_nonce"]
-            needs_extension_password = rt.json("POST", "/auth/google", payload={"credential": "stub"})
-            self.assertEqual(needs_extension_password.status_code, 428)
-            google = rt.json(
-                "POST",
-                "/auth/google",
-                payload={"credential": "stub", "password": "new-extension-pass", "password2": "new-extension-pass"},
-            )
+            google = rt.json("POST", "/auth/google", payload={"credential": "stub"})
             expect_status(google, 200)
             google_token = google.json()["token"]
-            expect_status(
-                rt.json("POST", "/auth/login", payload={"username": "google-user", "password": "new-extension-pass"}),
-                200,
-            )
 
             deleted = rt.request("DELETE", "/me", headers={"Authorization": f"Bearer {google_token}"})
             expect_status(deleted, 200)
