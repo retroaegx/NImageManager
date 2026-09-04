@@ -135,6 +135,7 @@ export function bindUserMenu({
   const menuAdmin = $("menuAdmin");
   const menuMaintenance = $("menuMaintenance");
   const menuSettings = $("menuSettings");
+  const menuExtensions = $("menuExtensions");
   const menuPwLink = $("menuPwLink");
   const menuLogout = $("menuLogout");
 
@@ -152,6 +153,7 @@ export function bindUserMenu({
   menuAdmin?.addEventListener("click", () => location.assign("/admin.html"));
   menuMaintenance?.addEventListener("click", () => location.assign("/maintenance.html"));
   menuSettings?.addEventListener("click", () => location.assign("/settings.html"));
+  menuExtensions?.addEventListener("click", () => location.assign("/extensions.html"));
   menuPwLink?.addEventListener("click", async () => {
     try{
       const r = await apiFetch(passwordLinkEndpoint, { method: "POST" });

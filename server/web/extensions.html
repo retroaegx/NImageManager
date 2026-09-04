@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title data-i18n="page.extensions.title">拡張機能 - NIM</title>
+  <link rel="stylesheet" href="/styles.css?v=1" />
+</head>
+<body class="pageExtensions">
+  <div class="bg"></div>
+
+  <div class="app">
+    <header class="topbar">
+      <div class="topbarInner">
+        <div class="brand" style="cursor:pointer" onclick="location.assign('/')">
+          <svg class="logo" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 2c3.2 0 5.9 1.8 7.2 4.4.4.8 0 1.7-.9 2.1l-2.6 1.2c-.8.4-1.7 0-2.1-.9C13 7.8 12.1 7.2 12 7.2c-1.5 0-2.8 1.3-2.8 2.8v1.2h1.6c.9 0 1.6.7 1.6 1.6v2.4c0 .9-.7 1.6-1.6 1.6H9.2V20c0 1.1-.9 2-2 2H6c-1.1 0-2-.9-2-2v-6.4c0-3.8 0-4.1.1-4.6C4.6 5.1 8 2 12 2Z" fill="currentColor" opacity=".92"/>
+            <path d="M20 12.2v6.2c0 1.1-.9 2-2 2h-6.1c-.9 0-1.6-.7-1.6-1.6v-2.4c0-.9.7-1.6 1.6-1.6h3.2v-2.6c0-.9.7-1.6 1.6-1.6h1.7c.9 0 1.6.7 1.6 1.6Z" fill="currentColor" opacity=".65"/>
+          </svg>
+          <div class="brandText"><div class="brandTitle">NIM</div></div>
+        </div>
+
+        <nav class="menu" aria-label="main">
+          <button class="tab" onclick="location.assign('/')"><span data-i18n="common.back">戻る</span><i class="tabGlow"></i></button>
+          <button class="tab active"><span data-i18n="menu.extensions">拡張機能はこちら</span><i class="tabGlow"></i></button>
+        </nav>
+
+        <div class="right">
+          <div class="userBox"><span id="meLabel" class="me"></span></div>
+          <button id="hamburger" class="iconBtn" data-i18n-title="menu.title" data-i18n-aria-label="menu.title"><span class="icon">☰</span></button>
+          <div id="userMenu" class="menuPopup hidden" role="menu" data-i18n-aria-label="menu.user">
+            <button id="menuAdmin" class="menuItem hidden" role="menuitem" data-i18n="menu.admin">アカウント管理</button>
+            <button id="menuMaintenance" class="menuItem hidden" role="menuitem" data-i18n="menu.maintenance">メンテナンス</button>
+            <button id="menuSettings" class="menuItem" role="menuitem" data-i18n="menu.settings">個人設定</button>
+            <button id="menuExtensions" class="menuItem" role="menuitem" data-i18n="menu.extensions">拡張機能はこちら</button>
+            <button id="menuPwLink" class="menuItem" role="menuitem" data-i18n="menu.password">パスワード変更</button>
+            <button id="menuLogout" class="menuItem" role="menuitem" data-i18n="menu.logout">ログアウト</button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main class="main shell extensionLinksMain">
+      <section class="panel">
+        <div class="card">
+          <div class="panelTitleRow">
+            <h2 data-i18n="extensions.heading">NIM Transfer拡張機能</h2>
+            <div class="small" data-i18n="extensions.description">お使いのブラウザに合わせて公式ストアからインストールできます。</div>
+          </div>
+
+          <div class="extensionStoreGrid">
+            <article class="extensionStoreCard">
+              <div class="extensionStoreBadge">Chrome</div>
+              <h3 data-i18n="extensions.chrome.title">Google Chrome版</h3>
+              <p data-i18n="extensions.chrome.description">Chrome Web StoreからNIM Transferをインストールします。</p>
+              <a class="primaryBtn extensionStoreLink" href="https://chromewebstore.google.com/detail/nim-transfer/cnmickkcdgahfcjehhhnokkheaifadci?authuser=0&amp;hl=ja" target="_blank" rel="noopener noreferrer" data-i18n="extensions.chrome.action">Chrome Web Storeで開く</a>
+            </article>
+
+            <article class="extensionStoreCard">
+              <div class="extensionStoreBadge extensionStoreBadgeFirefox">Firefox</div>
+              <h3 data-i18n="extensions.firefox.title">Mozilla Firefox版</h3>
+              <p data-i18n="extensions.firefox.description">Firefox Browser Add-onsからNIM Transferをインストールします。</p>
+              <a class="primaryBtn extensionStoreLink" href="https://addons.mozilla.org/ja/firefox/addon/nim-transfer/" target="_blank" rel="noopener noreferrer" data-i18n="extensions.firefox.action">Firefox Add-onsで開く</a>
+            </article>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script type="module" src="/lib/page-i18n.js"></script>
+  <script type="module" src="/extension-links.js?v=1"></script>
+</body>
+</html>

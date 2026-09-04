@@ -218,6 +218,7 @@ def _html_with_asset_versions(name: str, bootstrap_user: dict | None = None) -> 
         "admin.js": _asset_version("admin.js"),
         "maintenance.js": _asset_version("maintenance.js"),
         "settings.js": _asset_version("settings.js"),
+        "extension-links.js": _asset_version("extension-links.js"),
         "login.js": _asset_version("login.js"),
         "setup.js": _asset_version("setup.js"),
         "set-password.js": _asset_version("set-password.js"),
@@ -268,6 +269,13 @@ def _settings(user: dict | None = Depends(get_user_optional)):
     if not user:
         return RedirectResponse(url="/login.html", status_code=302)
     return _file("settings.html", bootstrap_user=_bootstrap_user_payload(user))
+
+
+@app.get("/extensions.html")
+def _extensions_page(user: dict | None = Depends(get_user_optional)):
+    if not user:
+        return RedirectResponse(url="/login.html", status_code=302)
+    return _file("extensions.html", bootstrap_user=_bootstrap_user_payload(user))
 
 
 @app.get("/login.html")

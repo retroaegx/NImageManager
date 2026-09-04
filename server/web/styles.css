@@ -1713,12 +1713,14 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
   /* Utility pages: keep back/current navigation consistent and make the visible pill fully clickable */
   body.pageAdmin .topbar .menu,
   body.pageMaintenance .topbar .menu,
-  body.pageSettings .topbar .menu{
+  body.pageSettings .topbar .menu,
+  body.pageExtensions .topbar .menu{
     justify-content: stretch;
   }
   body.pageAdmin .topbar .menu .tab,
   body.pageMaintenance .topbar .menu .tab,
-  body.pageSettings .topbar .menu .tab{
+  body.pageSettings .topbar .menu .tab,
+  body.pageExtensions .topbar .menu .tab{
     flex: 1 1 0;
     min-width: 0;
     display:flex;
@@ -1730,12 +1732,14 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
   }
   body.pageAdmin .topbar .menu .tab:hover,
   body.pageMaintenance .topbar .menu .tab:hover,
-  body.pageSettings .topbar .menu .tab:hover{
+  body.pageSettings .topbar .menu .tab:hover,
+  body.pageExtensions .topbar .menu .tab:hover{
     background: rgba(122,210,255,0.10);
   }
   body.pageAdmin .topbar .menu .tab.active,
   body.pageMaintenance .topbar .menu .tab.active,
-  body.pageSettings .topbar .menu .tab.active{
+  body.pageSettings .topbar .menu .tab.active,
+  body.pageExtensions .topbar .menu .tab.active{
     background: rgba(255,255,255,0.08);
     box-shadow: 0 0 0 1px rgba(122,210,255,0.18) inset;
   }
@@ -2442,6 +2446,60 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
   font-weight: 850;
   color: rgba(255,255,255,0.92);
   margin-bottom: 6px;
+}
+
+/* ===== Browser extensions ===== */
+.extensionLinksMain{ max-width: 980px; }
+.extensionStoreGrid{
+  display:grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 16px;
+}
+.extensionStoreCard{
+  display:flex;
+  flex-direction:column;
+  min-width:0;
+  min-height:220px;
+  padding:20px;
+  border-radius:18px;
+  border:1px solid rgba(255,255,255,0.13);
+  background:rgba(255,255,255,0.045);
+}
+.extensionStoreCard h3{ margin:14px 0 8px; }
+.extensionStoreCard p{
+  flex:1;
+  margin:0 0 18px;
+  color:var(--mut);
+  line-height:1.65;
+}
+.extensionStoreBadge{
+  align-self:flex-start;
+  padding:6px 10px;
+  border-radius:999px;
+  border:1px solid rgba(122,210,255,0.32);
+  background:rgba(122,210,255,0.10);
+  color:rgba(210,241,255,0.95);
+  font-size:12px;
+  font-weight:850;
+}
+.extensionStoreBadgeFirefox{
+  border-color:rgba(255,174,94,0.38);
+  background:rgba(255,132,56,0.11);
+  color:rgba(255,221,186,0.96);
+}
+.extensionStoreLink{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:100%;
+  min-height:44px;
+  text-align:center;
+  text-decoration:none;
+}
+@media (max-width: 720px){
+  .extensionStoreGrid{ grid-template-columns:1fr; }
+  .extensionStoreCard{ min-height:0; padding:16px; }
 }
 
 

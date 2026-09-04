@@ -468,11 +468,15 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             app_js = (web_root / "app.js").read_text(encoding="utf-8")
             login_js = (web_root / "login.js").read_text(encoding="utf-8")
             extension_auth_js = (web_root / "extension-auth.js").read_text(encoding="utf-8")
+            extension_links_html = (web_root / "extensions.html").read_text(encoding="utf-8")
+            extension_links_js = (web_root / "extension-links.js").read_text(encoding="utf-8")
             index_html = (web_root / "index.html").read_text(encoding="utf-8")
             login_html = (web_root / "login.html").read_text(encoding="utf-8")
             extension_auth_html = (web_root / "extension-auth.html").read_text(encoding="utf-8")
             settings_html = (web_root / "settings.html").read_text(encoding="utf-8")
             page_i18n = (web_root / "lib" / "page-i18n.js").read_text(encoding="utf-8")
+            user_menu_js = (web_root / "lib" / "userMenu.js").read_text(encoding="utf-8")
+            styles_css = (web_root / "styles.css").read_text(encoding="utf-8")
             ja_json = json.loads((web_root / "i18n" / "ja.json").read_text(encoding="utf-8"))
             en_json = json.loads((web_root / "i18n" / "en.json").read_text(encoding="utf-8"))
 
@@ -500,6 +504,15 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             self.assertIn("loginDestination()", login_js)
             self.assertIn('id="approveExtensionAuth"', extension_auth_html)
             self.assertIn("/api/ext/device/approve", extension_auth_js)
+            self.assertIn('id="menuExtensions"', index_html)
+            self.assertIn('location.assign("/extensions.html")', user_menu_js)
+            self.assertIn("loadCurrentUser", extension_links_js)
+            self.assertIn("https://chromewebstore.google.com/detail/nim-transfer/cnmickkcdgahfcjehhhnokkheaifadci", extension_links_html)
+            self.assertIn("https://addons.mozilla.org/ja/firefox/addon/nim-transfer/", extension_links_html)
+            self.assertIn("extensionStoreGrid", styles_css)
+            self.assertIn("pageExtensions", styles_css)
+            self.assertEqual(ja_json["menu.extensions"], "拡張機能はこちら")
+            self.assertEqual(en_json["menu.extensions"], "Get the extension")
 
             for browser in ("chrome", "firefox"):
                 extension_root = PROJECT_ROOT / "extensions" / browser
@@ -523,6 +536,13 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
     def test_auth_and_account_lifecycle(self):
         with Runtime() as rt:
             rt.setup_master()
+            extensions_page = rt.web_request("GET", "/extensions.html", user="master")
+            expect_status(extensions_page, 200)
+            self.assertIn("Chrome Web Store", extensions_page.text)
+            rt.client.cookies.clear()
+            anonymous_extensions_page = rt.web_request("GET", "/extensions.html", follow_redirects=False)
+            self.assertEqual(anonymous_extensions_page.status_code, 302)
+            self.assertEqual(anonymous_extensions_page.headers.get("location"), "/login.html")
             me = rt.request("GET", "/me", user="master")
             expect_status(me, 200)
             self.assertEqual(me.json()["role"], "master")
