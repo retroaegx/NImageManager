@@ -322,6 +322,11 @@ def _privacy_page():
     return _file("privacy.html")
 
 
+@app.get("/extension-auth.html")
+def _extension_auth_page(user: dict | None = Depends(get_user_optional)):
+    return _file("extension-auth.html", bootstrap_user=_bootstrap_user_payload(user))
+
+
 @app.get("/admin.html")
 def _admin_page(user: dict | None = Depends(get_user_optional)):
     if not user:

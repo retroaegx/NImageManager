@@ -305,6 +305,20 @@ def migrate_db(conn: sqlite3.Connection) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_user_consents_user
               ON user_consents(user_id, agreed_at);
+
+            CREATE TABLE IF NOT EXISTS extension_auth_requests (
+              request_id       TEXT PRIMARY KEY,
+              poll_secret_hash TEXT NOT NULL,
+              user_id          INTEGER REFERENCES users(id) ON DELETE CASCADE,
+              client_name      TEXT NOT NULL DEFAULT 'NIM Transfer',
+              status           TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','denied')),
+              created_at       TEXT NOT NULL,
+              expires_at       TEXT NOT NULL,
+              approved_at      TEXT,
+              consumed_at      TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_extension_auth_requests_expires
+              ON extension_auth_requests(expires_at, consumed_at);
             """
         )
     except Exception:
@@ -1255,6 +1269,18 @@ CREATE TABLE IF NOT EXISTS user_consents (
   privacy_version TEXT NOT NULL,
   agreed_at       TEXT NOT NULL DEFAULT (datetime('now')),
   method          TEXT NOT NULL CHECK(method IN ('password','google','migration'))
+);
+
+CREATE TABLE IF NOT EXISTS extension_auth_requests (
+  request_id       TEXT PRIMARY KEY,
+  poll_secret_hash TEXT NOT NULL,
+  user_id          INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  client_name      TEXT NOT NULL DEFAULT 'NIM Transfer',
+  status           TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','denied')),
+  created_at       TEXT NOT NULL,
+  expires_at       TEXT NOT NULL,
+  approved_at      TEXT,
+  consumed_at      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS images (

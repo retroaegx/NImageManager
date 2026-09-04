@@ -41,6 +41,33 @@
   "loginSection": {
     "message": "Login"
   },
+  "browserLoginButton": {
+    "message": "Sign in with browser"
+  },
+  "browserLoginHelp": {
+    "message": "Sign in to NImageManager in your browser and authorize this extension. Google sign-in is supported."
+  },
+  "browserLoginOpening": {
+    "message": "Opening the authorization page…"
+  },
+  "browserLoginWaiting": {
+    "message": "Allow sign-in on the page that was opened."
+  },
+  "browserLoginComplete": {
+    "message": "Signed in through browser authorization."
+  },
+  "browserLoginFailed": {
+    "message": "Browser authorization failed."
+  },
+  "legacyLoginDivider": {
+    "message": "or use the existing method"
+  },
+  "legacyLoginHeading": {
+    "message": "Sign in with username and password"
+  },
+  "legacyLoginHelp": {
+    "message": "The existing sign-in method remains available."
+  },
   "usernameLabel": {
     "message": "Username"
   },
@@ -136,6 +163,15 @@
   },
   "error_LOGIN_FAILED": {
     "message": "Login failed."
+  },
+  "error_BROWSER_LOGIN_START_FAILED": {
+    "message": "Could not start browser authorization."
+  },
+  "error_BROWSER_LOGIN_EXPIRED": {
+    "message": "Browser authorization expired. Please try again."
+  },
+  "error_BROWSER_LOGIN_FAILED": {
+    "message": "Browser authorization failed."
   },
   "error_SESSION_CHECK_FAILED": {
     "message": "Failed to check session."

@@ -6,6 +6,7 @@ const msg = (key, substitutions) => ext.i18n?.getMessage(key, substitutions) || 
 let behaviorFeedbackTimer = null;
 let behaviorSaveToken = 0;
 let behaviorSaving = false;
+let browserLoginInProgress = false;
 
 function localizeDocument(root = document) {
   root.querySelectorAll('[data-i18n]').forEach((node) => {
@@ -44,6 +45,17 @@ function setPill(id, textKey, kind) {
   if (!node) return;
   node.textContent = statusText(textKey);
   node.className = `statusPill ${kind}`;
+}
+
+function setBrowserLoginMessage(textKey, kind = '') {
+  const node = $('browserLoginMessage');
+  if (!node) return;
+  node.textContent = textKey ? statusText(textKey) : '';
+  node.className = `browserLoginMessage ${kind}`.trim();
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function setBehaviorControlsDisabled(disabled) {
@@ -165,6 +177,50 @@ async function login() {
   setPill('loginState', 'status_login_ok', 'success');
 }
 
+async function browserLogin() {
+  if (browserLoginInProgress) return;
+  browserLoginInProgress = true;
+  $('browserLogin').disabled = true;
+  setBrowserLoginMessage('browserLoginOpening');
+  try {
+    const started = await runtimeMessage({
+      type: 'nim-browser-login-start',
+      baseUrl: $('baseUrl').value,
+    });
+    if (!started?.ok || !started.data?.requestId || !started.data?.pollSecret) {
+      throw new Error(started?.code || 'BROWSER_LOGIN_START_FAILED');
+    }
+    setBrowserLoginMessage('browserLoginWaiting');
+    const deadline = Date.now() + Number(started.data.expiresIn || 600) * 1000;
+    const intervalMs = Math.max(1000, Number(started.data.interval || 2) * 1000);
+    while (Date.now() < deadline) {
+      await wait(intervalMs);
+      const result = await runtimeMessage({
+        type: 'nim-browser-login-poll',
+        baseUrl: $('baseUrl').value,
+        requestId: started.data.requestId,
+        pollSecret: started.data.pollSecret,
+      });
+      if (result?.ok) {
+        await loadConfig();
+        setPill('loginState', 'status_login_ok', 'success');
+        setBrowserLoginMessage('browserLoginComplete', 'success');
+        return;
+      }
+      if (result?.status === 'pending') continue;
+      throw new Error(result?.code || 'BROWSER_LOGIN_FAILED');
+    }
+    throw new Error('BROWSER_LOGIN_EXPIRED');
+  } catch (error) {
+    const key = `error_${String(error?.message || 'BROWSER_LOGIN_FAILED')}`;
+    setBrowserLoginMessage(msg(key) === key ? 'browserLoginFailed' : key, 'error');
+    throw error;
+  } finally {
+    browserLoginInProgress = false;
+    $('browserLogin').disabled = false;
+  }
+}
+
 async function logout() {
   const response = await runtimeMessage({ type: 'nim-logout' });
   if (!response?.ok) {
@@ -220,6 +276,7 @@ document.addEventListener('DOMContentLoaded', () => {
   localizeDocument();
 
   bindAction('saveConfig', saveConfig, () => setPill('saveState', 'status_save_failed', 'error'));
+  bindAction('browserLogin', browserLogin, () => setPill('loginState', 'status_check_failed', 'error'));
   bindAction('login', login, () => setPill('loginState', 'status_check_failed', 'error'));
   bindAction('logout', logout, () => setPill('loginState', 'status_logout_failed', 'error'));
   bindAction('checkSession', checkSession, () => setPill('loginState', 'status_check_failed', 'error'));

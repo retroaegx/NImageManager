@@ -176,6 +176,49 @@ async function loginToServer({ baseUrl, username, password }) {
   return data;
 }
 
+async function startBrowserLogin({ baseUrl }) {
+  const apiBase = apiBaseFrom(baseUrl);
+  const response = await fetch(`${apiBase}/api/ext/device/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ client_name: ext.i18n?.getMessage('extName') || 'NIM Transfer' }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.ok || !data.request_id || !data.poll_secret || !data.verification_url) {
+    throw extError(data.code || 'BROWSER_LOGIN_START_FAILED');
+  }
+  await saveConfig({ baseUrl: apiBase });
+  await openTab(String(data.verification_url));
+  return {
+    requestId: String(data.request_id),
+    pollSecret: String(data.poll_secret),
+    interval: Math.max(1, Number(data.interval || 2)),
+    expiresIn: Math.max(30, Number(data.expires_in || 600)),
+  };
+}
+
+async function pollBrowserLogin({ baseUrl, requestId, pollSecret }) {
+  const apiBase = apiBaseFrom(baseUrl);
+  const response = await fetch(`${apiBase}/api/ext/device/poll`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ request_id: requestId, poll_secret: pollSecret }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (response.status === 202 && data.status === 'pending') {
+    return { ok: false, status: 'pending' };
+  }
+  if (!response.ok || !data.ok || !data.token) {
+    throw extError(data.code || (response.status === 410 ? 'BROWSER_LOGIN_EXPIRED' : data.detail || 'BROWSER_LOGIN_FAILED'));
+  }
+  await saveConfig({
+    baseUrl: apiBase,
+    token: String(data.token),
+    user: data.user || null,
+  });
+  return { ok: true, status: 'approved', user: data.user || null };
+}
+
 async function fetchSession() {
   const config = await getConfig();
   if (!config.baseUrl) {
@@ -382,6 +425,13 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (type === 'nim-login') {
       const data = await loginToServer(message);
       return { ok: true, data };
+    }
+    if (type === 'nim-browser-login-start') {
+      const data = await startBrowserLogin(message);
+      return { ok: true, data };
+    }
+    if (type === 'nim-browser-login-poll') {
+      return await pollBrowserLogin(message);
     }
     if (type === 'nim-logout') {
       await clearSession();

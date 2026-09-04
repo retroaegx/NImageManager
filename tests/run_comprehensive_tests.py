@@ -467,8 +467,10 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             settings_js = (web_root / "settings.js").read_text(encoding="utf-8")
             app_js = (web_root / "app.js").read_text(encoding="utf-8")
             login_js = (web_root / "login.js").read_text(encoding="utf-8")
+            extension_auth_js = (web_root / "extension-auth.js").read_text(encoding="utf-8")
             index_html = (web_root / "index.html").read_text(encoding="utf-8")
             login_html = (web_root / "login.html").read_text(encoding="utf-8")
+            extension_auth_html = (web_root / "extension-auth.html").read_text(encoding="utf-8")
             settings_html = (web_root / "settings.html").read_text(encoding="utf-8")
             page_i18n = (web_root / "lib" / "page-i18n.js").read_text(encoding="utf-8")
             ja_json = json.loads((web_root / "i18n" / "ja.json").read_text(encoding="utf-8"))
@@ -495,6 +497,23 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             self.assertIn('id="completeGoogleRegisterBtn"', login_html)
             self.assertIn('data?.detail==="google registration required"', login_js)
             self.assertNotIn("register.google_new_account", login_js)
+            self.assertIn("loginDestination()", login_js)
+            self.assertIn('id="approveExtensionAuth"', extension_auth_html)
+            self.assertIn("/api/ext/device/approve", extension_auth_js)
+
+            for browser in ("chrome", "firefox"):
+                extension_root = PROJECT_ROOT / "extensions" / browser
+                options_html = (extension_root / "options.html").read_text(encoding="utf-8")
+                options_js = (extension_root / "options.js").read_text(encoding="utf-8")
+                background_js = (extension_root / "background.js").read_text(encoding="utf-8")
+                manifest = json.loads((extension_root / "manifest.json").read_text(encoding="utf-8"))
+                self.assertIn('id="browserLogin"', options_html)
+                self.assertIn('id="login"', options_html)
+                self.assertIn("nim-browser-login-start", options_js)
+                self.assertIn("/api/ext/device/start", background_js)
+                self.assertIn("/api/ext/login", background_js)
+                self.assertNotIn("identity", manifest["permissions"])
+                self.assertNotIn("cookies", manifest["permissions"])
 
     def test_auth_and_account_lifecycle(self):
         with Runtime() as rt:
@@ -526,6 +545,87 @@ class ComprehensiveIntegrationTests(unittest.TestCase):
             expect_status(delete_other_user, 200)
             login_deleted = rt.json("POST", "/auth/login", payload={"username": "user2", "password": "user2pw"})
             self.assertEqual(login_deleted.status_code, 401)
+
+    def test_extension_browser_authorization_and_legacy_login(self):
+        with Runtime() as rt:
+            rt.setup_master()
+
+            legacy = rt.json(
+                "POST",
+                "/ext/login",
+                payload={"username": "master", "password": "masterpw"},
+            )
+            expect_status(legacy, 200)
+            self.assertTrue(legacy.json()["token"])
+
+            started = rt.json(
+                "POST",
+                "/ext/device/start",
+                payload={"client_name": "NIM Transfer Test"},
+            )
+            expect_status(started, 200)
+            request_id = started.json()["request_id"]
+            poll_secret = started.json()["poll_secret"]
+            self.assertIn(f"request_id={request_id}", started.json()["verification_url"])
+
+            info = rt.request("GET", f"/ext/device/info?request_id={request_id}")
+            expect_status(info, 200)
+            self.assertEqual(info.json()["status"], "pending")
+
+            pending = rt.json(
+                "POST",
+                "/ext/device/poll",
+                payload={"request_id": request_id, "poll_secret": poll_secret},
+            )
+            expect_status(pending, 202)
+            self.assertEqual(pending.json()["status"], "pending")
+
+            bad_secret = rt.json(
+                "POST",
+                "/ext/device/poll",
+                payload={"request_id": request_id, "poll_secret": "wrong-secret"},
+            )
+            expect_status(bad_secret, 401)
+
+            rt.client.cookies.clear()
+            unauthenticated = rt.json(
+                "POST",
+                "/ext/device/approve",
+                payload={"request_id": request_id},
+            )
+            expect_status(unauthenticated, 401)
+
+            approved = rt.json(
+                "POST",
+                "/ext/device/approve",
+                user="master",
+                payload={"request_id": request_id},
+            )
+            expect_status(approved, 200)
+
+            exchanged = rt.json(
+                "POST",
+                "/ext/device/poll",
+                payload={"request_id": request_id, "poll_secret": poll_secret},
+            )
+            expect_status(exchanged, 200)
+            self.assertEqual(exchanged.json()["user"]["username"], "master")
+            browser_token = exchanged.json()["token"]
+
+            session = rt.request(
+                "GET",
+                "/ext/session",
+                headers={"Authorization": f"Bearer {browser_token}"},
+            )
+            expect_status(session, 200)
+            self.assertEqual(session.json()["user"]["username"], "master")
+
+            reused = rt.json(
+                "POST",
+                "/ext/device/poll",
+                payload={"request_id": request_id, "poll_secret": poll_secret},
+            )
+            expect_status(reused, 410)
 
     def test_public_registration_verification_reset_google_and_delete(self):
         with Runtime() as rt:

@@ -47,6 +47,12 @@
 
     <section class="card">
       <h2 data-i18n="loginSection">Login</h2>
+      <p class="sectionNote" data-i18n="browserLoginHelp">ブラウザでNImageManagerへログインし、この拡張機能を認証します。Googleログインも利用できます。</p>
+      <button id="browserLogin" class="browserLoginButton" type="button" data-i18n="browserLoginButton">ブラウザでログイン</button>
+      <p id="browserLoginMessage" class="browserLoginMessage" aria-live="polite"></p>
+      <div class="optionDivider"><span data-i18n="legacyLoginDivider">または従来の方法</span></div>
+      <h3 data-i18n="legacyLoginHeading">ユーザー名とパスワードでログイン</h3>
+      <p class="sectionNote legacyLoginNote" data-i18n="legacyLoginHelp">既存のログイン方法も引き続き利用できます。</p>
       <label class="field">
         <span data-i18n="usernameLabel">Username</span>
         <input id="username" type="text" autocomplete="username">

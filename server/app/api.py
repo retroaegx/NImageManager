@@ -2074,6 +2074,188 @@ def ext_login(request: Request, req: LoginReq):
     }
 
 
+class ExtensionAuthStartReq(BaseModel):
+    client_name: str = "NIM Transfer"
+
+
+class ExtensionAuthRequestReq(BaseModel):
+    request_id: str
+
+
+class ExtensionAuthPollReq(BaseModel):
+    request_id: str
+    poll_secret: str
+
+
+def _extension_auth_expired(expires_at: str) -> bool:
+    try:
+        expires = datetime.fromisoformat(str(expires_at or "").replace("Z", "+00:00"))
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) > expires
+    except Exception:
+        return True
+
+
+@api_router.post("/ext/device/start")
+def ext_device_start(request: Request, req: ExtensionAuthStartReq):
+    _check_public_auth_rate(request, "ext-device-start", limit=20, window_seconds=3600)
+    request_id = secrets.token_urlsafe(24)
+    poll_secret = secrets.token_urlsafe(40)
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(minutes=10)
+    client_name = re.sub(r"[\r\n\t]+", " ", str(req.client_name or "NIM Transfer")).strip()[:80] or "NIM Transfer"
+    conn = get_conn()
+    try:
+        conn.execute(
+            "DELETE FROM extension_auth_requests WHERE expires_at < ? AND (consumed_at IS NOT NULL OR created_at < ?)",
+            (now.isoformat(), (now - timedelta(days=1)).isoformat()),
+        )
+        conn.execute(
+            """
+            INSERT INTO extension_auth_requests(
+              request_id, poll_secret_hash, client_name, status, created_at, expires_at
+            ) VALUES (?,?,?,'pending',?,?)
+            """,
+            (request_id, hash_account_token(poll_secret), client_name, now.isoformat(), expires.isoformat()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "ok": True,
+        "request_id": request_id,
+        "poll_secret": poll_secret,
+        "verification_url": _abs_url(f"/extension-auth.html?request_id={request_id}", request),
+        "expires_in": 600,
+        "interval": 2,
+    }
+
+
+@api_router.get("/ext/device/info")
+def ext_device_info(request_id: str):
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT request_id, client_name, status, expires_at, consumed_at FROM extension_auth_requests WHERE request_id=?",
+            (str(request_id or ""),),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="authorization request not found")
+        if _extension_auth_expired(row["expires_at"]):
+            raise HTTPException(status_code=410, detail="authorization request expired")
+        return {
+            "ok": True,
+            "client_name": row["client_name"],
+            "status": "consumed" if row["consumed_at"] else row["status"],
+            "expires_at": row["expires_at"],
+        }
+    finally:
+        conn.close()
+
+
+@api_router.post("/ext/device/approve")
+def ext_device_approve(req: ExtensionAuthRequestReq, user: dict = Depends(get_user)):
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT status, expires_at, consumed_at FROM extension_auth_requests WHERE request_id=?",
+            (str(req.request_id or ""),),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="authorization request not found")
+        if _extension_auth_expired(row["expires_at"]):
+            raise HTTPException(status_code=410, detail="authorization request expired")
+        if row["consumed_at"]:
+            raise HTTPException(status_code=409, detail="authorization request already used")
+        if row["status"] == "denied":
+            raise HTTPException(status_code=409, detail="authorization request denied")
+        conn.execute(
+            """
+            UPDATE extension_auth_requests
+            SET user_id=?, status='approved', approved_at=?
+            WHERE request_id=? AND consumed_at IS NULL
+            """,
+            (int(user["id"]), datetime.now(timezone.utc).isoformat(), req.request_id),
+        )
+        conn.commit()
+        return {"ok": True, "status": "approved"}
+    finally:
+        conn.close()
+
+
+@api_router.post("/ext/device/deny")
+def ext_device_deny(req: ExtensionAuthRequestReq, user: dict = Depends(get_user)):
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT expires_at, consumed_at FROM extension_auth_requests WHERE request_id=?",
+            (str(req.request_id or ""),),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="authorization request not found")
+        if _extension_auth_expired(row["expires_at"]):
+            raise HTTPException(status_code=410, detail="authorization request expired")
+        if row["consumed_at"]:
+            raise HTTPException(status_code=409, detail="authorization request already used")
+        conn.execute(
+            "UPDATE extension_auth_requests SET user_id=?, status='denied', approved_at=? WHERE request_id=?",
+            (int(user["id"]), datetime.now(timezone.utc).isoformat(), req.request_id),
+        )
+        conn.commit()
+        return {"ok": True, "status": "denied"}
+    finally:
+        conn.close()
+
+
+@api_router.post("/ext/device/poll")
+def ext_device_poll(request: Request, req: ExtensionAuthPollReq):
+    _check_public_auth_rate(request, "ext-device-poll", limit=360, window_seconds=3600)
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            """
+            SELECT r.request_id, r.poll_secret_hash, r.user_id, r.status, r.expires_at, r.consumed_at,
+                   u.username, u.role, u.disabled
+            FROM extension_auth_requests r
+            LEFT JOIN users u ON u.id=r.user_id
+            WHERE r.request_id=?
+            """,
+            (str(req.request_id or ""),),
+        ).fetchone()
+        supplied_hash = hash_account_token(str(req.poll_secret or ""))
+        if not row or not secrets.compare_digest(str(row["poll_secret_hash"] or ""), supplied_hash):
+            raise HTTPException(status_code=401, detail="invalid authorization request")
+        if _extension_auth_expired(row["expires_at"]):
+            raise HTTPException(status_code=410, detail="authorization request expired")
+        if row["consumed_at"]:
+            raise HTTPException(status_code=410, detail="authorization request already used")
+        if row["status"] == "denied":
+            raise HTTPException(status_code=403, detail="authorization request denied")
+        if row["status"] != "approved" or not row["user_id"]:
+            return JSONResponse(status_code=202, content={"ok": False, "status": "pending"})
+        if int(row["disabled"] or 0) == 1:
+            raise HTTPException(status_code=403, detail="account disabled")
+        consumed_at = datetime.now(timezone.utc).isoformat()
+        updated = conn.execute(
+            "UPDATE extension_auth_requests SET consumed_at=? WHERE request_id=? AND consumed_at IS NULL",
+            (consumed_at, req.request_id),
+        )
+        if updated.rowcount != 1:
+            conn.rollback()
+            raise HTTPException(status_code=410, detail="authorization request already used")
+        conn.commit()
+        token = create_token(user_id=int(row["user_id"]), username=row["username"], role=row["role"])
+        return {
+            "ok": True,
+            "status": "approved",
+            "token": token,
+            "user": {"id": int(row["user_id"]), "username": row["username"], "role": row["role"]},
+        }
+    finally:
+        conn.close()
+
+
 @api_router.get("/ext/session")
 def ext_session(request: Request, user: dict | None = Depends(get_user_optional)):
     if not user:

@@ -16,6 +16,12 @@ let googleRegistrationActive = false;
 
 function $(id){ return document.getElementById(id); }
 function isEmbedded(){ try { return window.self !== window.top; } catch { return true; } }
+function loginDestination(){
+  const raw=new URLSearchParams(location.search).get("next")||"";
+  if(!raw.startsWith("/")||raw.startsWith("//"))return "/";
+  try{const url=new URL(raw,location.origin);return url.origin===location.origin?`${url.pathname}${url.search}${url.hash}`:"/";}catch{return "/";}
+}
+function finishLogin(){location.href=loginDestination();}
 function absoluteUrl(path){ return new URL(path, location.origin).toString(); }
 function postParentMessage(type, extra={}){ if(isEmbedded()) window.parent.postMessage({ type, ...extra }, "*"); }
 function getEmbedNavAttempted(){ try { return sessionStorage.getItem(EMBED_AUTH_NAV_FLAG) === "1"; } catch { return false; } }
@@ -96,7 +102,7 @@ async function doLogin(){
   try{
     const response=await fetch(API.login,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,password}),credentials:"include"});
     if(!response.ok){ showMessage("loginErr",t("login.failed")); return; }
-    location.href="/";
+    finishLogin();
   }catch{ showMessage("loginErr",t("common.connection_failed")); }
 }
 
@@ -163,7 +169,7 @@ async function handleGoogleCredential(credential){
   const messageId=$("registerPanel")?.classList.contains("hidden")?"loginErr":"registerErr";
   try{
     const response=await fetch(API.google,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({credential}),credentials:"include"}); const data=await readJson(response);
-    if(response.ok){location.href="/";return;}
+    if(response.ok){finishLogin();return;}
     if(response.status===428&&data?.detail==="extension password required"){pendingGoogleCredential=credential;showPanel("googlePassword");return;}
     if(response.status===428&&data?.detail==="google registration required"){
       pendingGoogleCredential=credential;setGoogleRegistrationMode(true,data?.email||"");showPanel("register");return;
@@ -179,7 +185,7 @@ async function completeGoogleRegistration(){
   if(payload.password!==payload.password2){showMessage("registerErr",t("common.confirmation_mismatch"));return;}
   try{
     const response=await fetch(API.google,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),credentials:"include"});const data=await readJson(response);
-    if(response.ok){pendingGoogleCredential="";location.href="/";return;}
+    if(response.ok){pendingGoogleCredential="";finishLogin();return;}
     if(response.status===401){resetGoogleRegistration();showMessage("registerErr",t("register.google_session_expired"));return;}
     showMessage("registerErr",data?.detail||t("register.failed"));
   }catch{showMessage("registerErr",t("common.connection_failed"));}
@@ -191,7 +197,7 @@ async function saveGoogleExtensionPassword(){
   if(password!==password2){showMessage("googlePasswordErr",t("common.confirmation_mismatch"));return;}
   try{
     const response=await fetch(API.google,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({credential:pendingGoogleCredential,password,password2}),credentials:"include"});const data=await readJson(response);
-    if(response.ok){pendingGoogleCredential="";location.href="/";return;}
+    if(response.ok){pendingGoogleCredential="";finishLogin();return;}
     showMessage("googlePasswordErr",data?.detail||t("google_password.failed"));
   }catch{showMessage("googlePasswordErr",t("common.connection_failed"));}
 }

@@ -41,6 +41,33 @@
   "loginSection": {
     "message": "Login"
   },
+  "browserLoginButton": {
+    "message": "ブラウザでログイン"
+  },
+  "browserLoginHelp": {
+    "message": "ブラウザでNImageManagerへログインし、この拡張機能を認証します。Googleログインも利用できます。"
+  },
+  "browserLoginOpening": {
+    "message": "認証ページを開いています…"
+  },
+  "browserLoginWaiting": {
+    "message": "開いたページでログインを許可してください。"
+  },
+  "browserLoginComplete": {
+    "message": "ブラウザ認証でログインしました。"
+  },
+  "browserLoginFailed": {
+    "message": "ブラウザ認証に失敗しました。"
+  },
+  "legacyLoginDivider": {
+    "message": "または従来の方法"
+  },
+  "legacyLoginHeading": {
+    "message": "ユーザー名とパスワードでログイン"
+  },
+  "legacyLoginHelp": {
+    "message": "既存のログイン方法も引き続き利用できます。"
+  },
   "usernameLabel": {
     "message": "Username"
   },
@@ -136,6 +163,15 @@
   },
   "error_LOGIN_FAILED": {
     "message": "ログインに失敗しました。"
+  },
+  "error_BROWSER_LOGIN_START_FAILED": {
+    "message": "ブラウザ認証を開始できませんでした。"
+  },
+  "error_BROWSER_LOGIN_EXPIRED": {
+    "message": "ブラウザ認証の有効期限が切れました。もう一度やり直してください。"
+  },
+  "error_BROWSER_LOGIN_FAILED": {
+    "message": "ブラウザ認証に失敗しました。"
   },
   "error_SESSION_CHECK_FAILED": {
     "message": "セッション確認に失敗しました。"

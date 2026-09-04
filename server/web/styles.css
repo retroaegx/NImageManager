@@ -2196,6 +2196,14 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
 .googleAccountConfirmed strong{font-size:13px;color:#a9f2c7}
 .googleAccountConfirmed span{font-size:14px;overflow-wrap:anywhere}
 .authFieldHint{margin:-2px 0 8px;line-height:1.5;color:rgba(255,255,255,.62)}
+.extensionAuthCard{max-width:480px}
+.extensionAuthHeading{font-size:22px}
+.extensionAuthDescription{color:rgba(255,255,255,.72);line-height:1.65}
+.extensionAuthDetails{display:grid;gap:10px;margin:18px 0;padding:14px;border:1px solid rgba(255,255,255,.12);border-radius:14px;background:rgba(255,255,255,.04)}
+.extensionAuthRow{display:flex;align-items:center;justify-content:space-between;gap:18px}
+.extensionAuthRow span{color:rgba(255,255,255,.58);font-size:13px}
+.extensionAuthRow strong{overflow-wrap:anywhere;text-align:right}
+.extensionAuthActions{margin-top:14px}
 .loginLegalLinks{display:flex;justify-content:center;gap:18px;margin-top:18px;font-size:12px}
 .loginLegalLinks a{color:rgba(210,217,255,.8)}
 
