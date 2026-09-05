@@ -1575,7 +1575,7 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
   #galleryHint{ font-size: 11px; }
   .galleryActions{
     display:grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) repeat(3, minmax(0, 1fr));
     grid-template-areas:
       "filter page allsel bulkbm delete"
       "sort sort sort view view"
@@ -1622,23 +1622,26 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
     text-align: center;
   }
   #mobileFilterBtn{ grid-area: filter; }
-  /* Keep every action readable in the five-column mobile toolbar. */
+  /* Text-only actions preserve the compact mobile row height. */
   .galleryActions > .iconBtn,
   .galleryActions > .dangerBtn{
-    flex-direction: column;
+    flex-direction: row;
     align-self: stretch;
-    min-height: 52px;
+    height: 36px;
+    min-height: 36px;
     padding-inline: 2px;
-    gap: 4px;
+    gap: 0;
   }
+  .galleryActions > .iconBtn .icon{ display: none; }
   .galleryActions > .iconBtn .label,
   .galleryActions > .dangerBtn .label{
     flex: 0 1 auto;
     max-width: 100%;
-    line-height: 1.25;
-    white-space: normal;
+    font-size: clamp(10px, 2.8vw, 11px);
+    line-height: 1;
+    white-space: nowrap;
     overflow: visible;
-    overflow-wrap: anywhere;
+    overflow-wrap: normal;
   }
   #pageSelectBtn{ grid-area: page; }
   #allSelectBtn{ grid-area: allsel; }
@@ -1651,6 +1654,12 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
   }
   #bulkDeleteBtn .label{
     font-size: 11px;
+  }
+  html[lang="en"] .galleryActions{
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 0.7fr) repeat(3, minmax(0, 1.2fr));
+  }
+  html[lang="en"] .galleryActions > button .label{
+    font-size: clamp(9px, 2.6vw, 11px);
   }
   #bulkStatus{
     grid-area: status;
