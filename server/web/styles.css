@@ -1471,7 +1471,7 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
   .mobileOnly{ display:inline-flex; }
   .desktopOnly{ display:none; }
 
-  .main{ padding: 6px 6px 8px; }
+  .main{ padding: 4px 6px 6px; }
   .card{ padding: 10px; }
 
   /* Layout packs */
@@ -1519,13 +1519,13 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
   .uploadMain .row[style] > button{ flex: 1 1 140px; }
 
   /* grid: mobile is ALWAYS 3 columns */
-  .grid:not(.list){ grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .grid:not(.list){ grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
 
   /* topbar: stack page menu under brand and remove dead space */
   .topbarInner{
     flex-wrap: wrap;
-    gap: 8px;
-    padding: 6px 10px 4px;
+    gap: 4px;
+    padding: 4px 8px 2px;
   }
   .brand{ gap: 8px; }
   .logo{ width: 24px; height: 24px; }
@@ -1536,13 +1536,17 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
   .menu{
     flex: 1 1 100%;
     width: 100%;
-    margin: 2px auto 0;
-    padding: 3px;
+    margin: 0 auto;
+    padding: 0;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    box-shadow: none;
     gap: 4px;
     order: 3;
     justify-content: center;
   }
-  .tab{ padding: 7px 12px; font-size: 14px; }
+  .tab{ padding: 5px 12px; min-height: 32px; font-size: 14px; }
 
   /* preview: keep filters stored; opened via ⚙ */
   #viewPreview .toolCard{ display:none; }
@@ -1554,7 +1558,7 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
   .previewLayout{
     grid-template-columns: 1fr;
     gap: 6px;
-    margin-top: 4px;
+    margin-top: 0;
   }
 
   /* filter overlay: stack controls */
@@ -1567,8 +1571,9 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
     top: 66px;
     flex-direction: column;
     align-items: stretch;
-    gap: 6px;
-    padding: 8px 8px 9px;
+    gap: 4px;
+    padding: 6px;
+    border-radius: 14px;
   }
   .galleryTitle{ flex-direction: row; align-items: baseline; justify-content: space-between; gap: 8px; }
   #galleryTitle{ font-size: 16px; }
@@ -1580,7 +1585,7 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
       "filter page allsel bulkbm delete"
       "sort sort sort view view"
       "status status status status status";
-    gap: 6px;
+    gap: 4px;
     justify-content: stretch;
     align-items: center;
   }
@@ -1706,7 +1711,7 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
     width: 36px;
     padding: 7px;
   }
-  .gridWrap{ margin-top: 8px; }
+  .gridWrap{ margin-top: 6px; }
 
   /* Upload: buttons should not squeeze */
   .dropZone .row{ flex-wrap: wrap; gap: 8px; }
