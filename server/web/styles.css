@@ -1622,6 +1622,24 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
     text-align: center;
   }
   #mobileFilterBtn{ grid-area: filter; }
+  /* Keep every action readable in the five-column mobile toolbar. */
+  .galleryActions > .iconBtn,
+  .galleryActions > .dangerBtn{
+    flex-direction: column;
+    align-self: stretch;
+    min-height: 52px;
+    padding-inline: 2px;
+    gap: 4px;
+  }
+  .galleryActions > .iconBtn .label,
+  .galleryActions > .dangerBtn .label{
+    flex: 0 1 auto;
+    max-width: 100%;
+    line-height: 1.25;
+    white-space: normal;
+    overflow: visible;
+    overflow-wrap: anywhere;
+  }
   #pageSelectBtn{ grid-area: page; }
   #allSelectBtn{ grid-area: allsel; }
   #bulkBookmarkBtn{ grid-area: bulkbm; }
@@ -1629,7 +1647,7 @@ details.meta summary{ cursor:pointer; color: rgba(255,255,255,0.80); }
     grid-area: delete;
     white-space: nowrap;
     line-height: 1;
-    padding-inline: 8px;
+    padding-inline: 2px;
   }
   #bulkDeleteBtn .label{
     font-size: 11px;
