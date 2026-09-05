@@ -17,82 +17,8 @@ function extError(code, extra = {}) {
 }
 
 
-const AUTH_HEADER_NAME = 'Authorization';
-const AUTH_SCHEME = 'Bearer';
-const AUTH_EXCLUDED_PATHS = new Set([
-  '/api/auth/login',
-  '/api/auth/logout',
-]);
-
-function shouldInjectAuthHeader(requestUrl, config) {
-  const token = String(config?.token || '').trim();
-  const baseUrl = String(config?.baseUrl || '').trim();
-  if (!token || !baseUrl) {
-    return false;
-  }
-
-  let request;
-  let base;
-  try {
-    request = new URL(requestUrl);
-    base = new URL(baseUrl);
-  } catch (_) {
-    return false;
-  }
-
-  if (request.origin !== base.origin) {
-    return false;
-  }
-  if (AUTH_EXCLUDED_PATHS.has(request.pathname)) {
-    return false;
-  }
-  return true;
-}
-
-function upsertRequestHeader(headers, name, value) {
-  const normalized = String(name || '').toLowerCase();
-  if (!normalized) {
-    return headers;
-  }
-
-  let replaced = false;
-  const nextHeaders = Array.isArray(headers) ? headers.map((header) => {
-    if (String(header?.name || '').toLowerCase() !== normalized) {
-      return header;
-    }
-    replaced = true;
-    return { ...header, value };
-  }) : [];
-
-  if (!replaced) {
-    nextHeaders.push({ name, value });
-  }
-  return nextHeaders;
-}
-
-async function injectAuthHeader(details) {
-  if (!details?.url) {
-    return {};
-  }
-
-  const config = await getConfig();
-  if (!shouldInjectAuthHeader(details.url, config)) {
-    return {};
-  }
-
-  const token = String(config.token || '').trim();
-  if (!token) {
-    return {};
-  }
-
-  return {
-    requestHeaders: upsertRequestHeader(
-      details.requestHeaders,
-      AUTH_HEADER_NAME,
-      `${AUTH_SCHEME} ${token}`
-    ),
-  };
-}
+// Browser pages use their own cookie session. Extension API calls below
+// send their bearer token explicitly; never inject it into page requests.
 
 function apiBaseFrom(value) {
   const raw = String(value || '').trim();
@@ -358,13 +284,6 @@ async function openTab(targetUrl) {
   await ext.tabs.create({ url });
 }
 
-if (ext.webRequest?.onBeforeSendHeaders) {
-  ext.webRequest.onBeforeSendHeaders.addListener(
-    injectAuthHeader,
-    { urls: ['<all_urls>'] },
-    ['blocking', 'requestHeaders']
-  );
-}
 
 if (ext.runtime.onInstalled) {
   ext.runtime.onInstalled.addListener((details) => {
